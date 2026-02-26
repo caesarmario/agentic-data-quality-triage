@@ -1,19 +1,52 @@
+####
+## Docker Compose for Agentic Data Quality Triage
+## Author: Mario Caesar // caesarmario87@gmail.com
+####
+
+# infra/docker-compose.yml
 name: agentic-dq-triage
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:${AIRFLOW_VERSION}
+  env_file:
+    - ./.env
+  environment:
+    AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN}
+    AIRFLOW__CELERY__BROKER_URL: ${AIRFLOW__CELERY__BROKER_URL}
+    AIRFLOW__CELERY__RESULT_BACKEND: ${AIRFLOW__CELERY__RESULT_BACKEND}
+    AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES}
+    _PIP_ADDITIONAL_REQUIREMENTS: ${AIRFLOW_PIP_ADDITIONAL_REQUIREMENTS}
+  volumes:
+    - ../dags:/opt/airflow/dags
+    - ../logs/airflow:/opt/airflow/logs
+    - ../plugins:/opt/airflow/plugins
+    - ./airflow/auth:/opt/airflow/auth
+  restart: unless-stopped
+  depends_on:
+    airflow-postgres:
+      condition: service_healthy
+    airflow-redis:
+      condition: service_healthy
+
 
 services:
   # -----------------------------
-  # ClickHouse
+  # ClickHouse (warehouse)
   # -----------------------------
   clickhouse:
     image: clickhouse/clickhouse-server:25.3-alpine
     container_name: dq_clickhouse
-    ports:
-      - "8123:8123"
-      - "9000:9000"
+    env_file:
+      - ./.env
     environment:
-      CLICKHOUSE_DB: dq
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: ${CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT}
+    ports:
+      - "${CH_HTTP_PORT}:8123"
+      - "${CH_NATIVE_PORT}:9000"
     ulimits:
       nofile:
         soft: 262144
@@ -21,108 +54,94 @@ services:
     volumes:
       - ch_data:/var/lib/clickhouse
       - ch_logs:/var/log/clickhouse-server
-      - ./infra/init:/docker-entrypoint-initdb.d:ro
+      - ./init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1' >/dev/null 2>&1"]
       interval: 5s
-      timeout: 3s
+      timeout: 5s
       retries: 30
+    restart: unless-stopped
 
-  # ClickHouse UI (CH-UI)
   ch-ui:
     image: ghcr.io/caioricciuti/ch-ui:latest
     container_name: dq_ch_ui
-    ports:
-      - "3488:3488"
+    env_file:
+      - ./.env
     environment:
-      CLICKHOUSE_URL: "http://clickhouse:8123"
-      CONNECTION_NAME: "Local ClickHouse"
+      CLICKHOUSE_URL: ${CHUI_CLICKHOUSE_URL}
+      CONNECTION_NAME: ${CHUI_CONNECTION_NAME}
+    ports:
+      - "${CH_UI_PORT}:3488"
     volumes:
       - ch_ui_data:/app/data
     depends_on:
       clickhouse:
         condition: service_healthy
+    restart: unless-stopped
 
-  # Bootstrap ClickHouse schema/tables
-  clickhouse-init:
-    image: clickhouse/clickhouse-server:25.3-alpine
-    container_name: dq_clickhouse_init
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-    volumes:
-      - ./infra/init/clickhouse_bootstrap.sql:/tmp/clickhouse_bootstrap.sql:ro
-    entrypoint: ["/bin/sh", "-lc"]
-    command: >
-      clickhouse-client --host clickhouse --multiquery < /tmp/clickhouse_bootstrap.sql || true
 
   # -----------------------------
-  # SeaweedFS
+  # S3 On-Prem (SeaweedFS)
   # -----------------------------
   seaweed-master:
     image: chrislusf/seaweedfs:4.13
     container_name: dq_seaweed_master
-    command: "master -ip=seaweed-master -ip.bind=0.0.0.0 -port=9333"
+    command: ["master","-ip=seaweed-master","-ip.bind=0.0.0.0","-port=9333","-mdir=/data"]
     ports:
-      - "9333:9333"
+      - "${SEAWEED_MASTER_PORT}:9333"
     volumes:
       - sw_master:/data
+    restart: unless-stopped
 
   seaweed-volume:
     image: chrislusf/seaweedfs:4.13
     container_name: dq_seaweed_volume
-    command: "volume -ip=seaweed-volume -ip.bind=0.0.0.0 -port=8080 -dir=/data -max=0 -mserver=seaweed-master:9333"
-    ports:
-      - "8080:8080"
+    command: ["volume","-ip=seaweed-volume","-ip.bind=0.0.0.0","-port=8080","-dir=/data","-max=0","-mserver=seaweed-master:9333"]
     depends_on:
       - seaweed-master
     volumes:
       - sw_volume:/data
+    restart: unless-stopped
 
   seaweed-filer:
     image: chrislusf/seaweedfs:4.13
     container_name: dq_seaweed_filer
-    command: "filer -ip=seaweed-filer -ip.bind=0.0.0.0 -port=8888 -master=seaweed-master:9333 -dir=/data"
+    command: ["filer","-ip=seaweed-filer","-ip.bind=0.0.0.0","-port=8888","-master=seaweed-master:9333","-defaultStoreDir=/data"]
     ports:
-      - "8888:8888"
+      - "${SEAWEED_FILER_PORT}:8888"
     depends_on:
       - seaweed-master
       - seaweed-volume
     volumes:
       - sw_filer:/data
-    tty: true
-    stdin_open: true
+    restart: unless-stopped
 
   seaweed-s3:
     image: chrislusf/seaweedfs:4.13
     container_name: dq_seaweed_s3
-    command: "s3 -filer=seaweed-filer:8888 -ip.bind=0.0.0.0 -port=8333"
+    command: ["s3","-filer=seaweed-filer:8888","-ip.bind=0.0.0.0","-port=8333"]
     ports:
-      - "8333:8333"
+      - "${SEAWEED_S3_PORT}:8333"
     depends_on:
       - seaweed-filer
+    restart: unless-stopped
 
-  # Create required buckets
   s3-init:
-    image: amazon/aws-cli:latest
+    image: amazon/aws-cli:2.15.57
     container_name: dq_s3_init
+    env_file:
+      - ./.env
     depends_on:
       - seaweed-s3
-    environment:
-      AWS_ACCESS_KEY_ID: admin
-      AWS_SECRET_ACCESS_KEY: admin
-      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./s3/init_buckets.sh:/scripts/init_buckets.sh:ro
     entrypoint: ["/bin/sh", "-lc"]
-    command: >
-      until aws --endpoint-url http://seaweed-s3:8333 s3api list-buckets >/dev/null 2>&1; do sleep 2; done;
-      aws --endpoint-url http://seaweed-s3:8333 s3 mb s3://dq-landing || true;
-      aws --endpoint-url http://seaweed-s3:8333 s3 mb s3://dq-artifacts || true;
-      aws --endpoint-url http://seaweed-s3:8333 s3 mb s3://dq-dqreports || true;
-      aws --endpoint-url http://seaweed-s3:8333 s3 mb s3://dq-dqfailures || true;
-      aws --endpoint-url http://seaweed-s3:8333 s3 mb s3://dq-audit || true
+    command: "/scripts/init_buckets.sh"
+    restart: "no"
+
 
   # -----------------------------
-  # Airflow 3.1.7
+  # Airflow
   # -----------------------------
   airflow-postgres:
     image: postgres:16-alpine
@@ -130,236 +149,179 @@ services:
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
+      POSTGRES_DB: postgres
     ports:
-      - "5433:5432"
+      - "${AIRFLOW_POSTGRES_HOST_PORT}:5432"
     volumes:
       - airflow_pgdata:/var/lib/postgresql/data
+      - ./airflow/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      test: ["CMD-SHELL", "pg_isready -U airflow -d postgres"]
       interval: 5s
-      timeout: 3s
+      timeout: 5s
       retries: 30
+    restart: unless-stopped
 
   airflow-redis:
     image: redis:7-alpine
     container_name: dq_airflow_redis
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
-      timeout: 3s
+      timeout: 5s
       retries: 30
+    restart: unless-stopped
 
   airflow-init:
-    image: apache/airflow:3.1.7
+    <<: *airflow-common
     container_name: dq_airflow_init
-    depends_on:
-      airflow-postgres:
-        condition: service_healthy
-      airflow-redis:
-        condition: service_healthy
-    environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
-      AIRFLOW__CELERY__BROKER_URL: redis://airflow-redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-postgres:5432/airflow
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      _AIRFLOW_WWW_USER_USERNAME: airflow
-      _AIRFLOW_WWW_USER_PASSWORD: airflow
-      _PIP_ADDITIONAL_REQUIREMENTS: >-
-        apache-airflow-providers-amazon
-        apache-airflow-providers-docker
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs/airflow:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
+    restart: "no" 
     entrypoint: ["/bin/bash", "-lc"]
-    command: >
-      airflow db migrate &&
-      airflow users create
-      --username "${_AIRFLOW_WWW_USER_USERNAME}"
-      --password "${_AIRFLOW_WWW_USER_PASSWORD}"
-      --firstname Airflow
-      --lastname Admin
-      --role Admin
-      --email admin@example.com ||
-      true
+    command:
+      - |
+        set -e
+        mkdir -p /opt/airflow/auth
+        python - <<'PY'
+        import json, os, pathlib
+        u = os.environ.get("AIRFLOW_WWW_USER_USERNAME")
+        p = os.environ.get("AIRFLOW_WWW_USER_PASSWORD")
+        path = os.environ.get("AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE")
+        pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+        pathlib.Path(path).write_text(json.dumps({u: p}))
+        print(f"[init] wrote simple auth passwords file: {path} (user={u})")
+        PY
+        airflow db migrate
 
   airflow-api-server:
-    image: apache/airflow:3.1.7
+    <<: *airflow-common
     container_name: dq_airflow_api_server
-    depends_on:
-      airflow-init:
-        condition: service_completed_successfully
-      airflow-postgres:
-        condition: service_healthy
-      airflow-redis:
-        condition: service_healthy
-    environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
-      AIRFLOW__CELERY__BROKER_URL: redis://airflow-redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-postgres:5432/airflow
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      _PIP_ADDITIONAL_REQUIREMENTS: >-
-        apache-airflow-providers-amazon
-        apache-airflow-providers-docker
     ports:
-      - "8080:8080"
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs/airflow:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
+      - "${AIRFLOW_PORT}:8080"
     command: ["airflow", "api-server"]
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/v2/monitor/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
 
   airflow-scheduler:
-    image: apache/airflow:3.1.7
+    <<: *airflow-common
     container_name: dq_airflow_scheduler
+    command: ["airflow", "scheduler"]
     depends_on:
       airflow-init:
         condition: service_completed_successfully
-      airflow-postgres:
-        condition: service_healthy
-      airflow-redis:
-        condition: service_healthy
-    environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
-      AIRFLOW__CELERY__BROKER_URL: redis://airflow-redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-postgres:5432/airflow
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      _PIP_ADDITIONAL_REQUIREMENTS: >-
-        apache-airflow-providers-amazon
-        apache-airflow-providers-docker
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs/airflow:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
-    command: ["airflow", "scheduler"]
 
   airflow-triggerer:
-    image: apache/airflow:3.1.7
+    <<: *airflow-common
     container_name: dq_airflow_triggerer
+    command: ["airflow", "triggerer"]
     depends_on:
       airflow-init:
         condition: service_completed_successfully
-      airflow-postgres:
-        condition: service_healthy
-      airflow-redis:
-        condition: service_healthy
-    environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
-      AIRFLOW__CELERY__BROKER_URL: redis://airflow-redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-postgres:5432/airflow
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      _PIP_ADDITIONAL_REQUIREMENTS: >-
-        apache-airflow-providers-amazon
-        apache-airflow-providers-docker
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs/airflow:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
-    command: ["airflow", "triggerer"]
 
   airflow-worker:
-    image: apache/airflow:3.1.7
+    <<: *airflow-common
     container_name: dq_airflow_worker
+    command: ["airflow", "celery", "worker"]
+    volumes:
+      - ../dags:/opt/airflow/dags
+      - ../logs/airflow:/opt/airflow/logs
+      - ../plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../:/workspace:ro
     depends_on:
       airflow-init:
         condition: service_completed_successfully
-      airflow-postgres:
-        condition: service_healthy
-      airflow-redis:
-        condition: service_healthy
-    environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
-      AIRFLOW__CELERY__BROKER_URL: redis://airflow-redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-postgres:5432/airflow
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      _PIP_ADDITIONAL_REQUIREMENTS: >-
-        apache-airflow-providers-amazon
-        apache-airflow-providers-docker
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs/airflow:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./:/workspace:ro
-    command: ["airflow", "celery", "worker"]
+
+  flower:
+    <<: *airflow-common
+    container_name: dq_airflow_flower
+    command: ["airflow", "celery", "flower"]
+    ports:
+      - "${FLOWER_PORT}:5555"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
 
   # -----------------------------
   # Streamlit
   # -----------------------------
   streamlit:
-    image: python:3.12-slim
+    image: python:3.11-slim
     container_name: dq_streamlit
+    env_file:
+      - ./.env
     working_dir: /app
     volumes:
-      - ./:/app
+      - ../:/app
     environment:
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_HTTP_PORT: "8123"
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: ""
-      S3_ENDPOINT_URL: "http://seaweed-s3:8333"
-      AWS_ACCESS_KEY_ID: admin
-      AWS_SECRET_ACCESS_KEY: admin
-      AWS_DEFAULT_REGION: us-east-1
-      LANDING_BUCKET: dq-landing
-      ARTIFACTS_BUCKET: dq-artifacts
-      DQREPORTS_BUCKET: dq-dqreports
-      DQFAILURES_BUCKET: dq-dqfailures
-      AUDIT_BUCKET: dq-audit
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL_INTERNAL}
+      LANDING_BUCKET: ${LANDING_BUCKET}
+      ARTIFACTS_BUCKET: ${ARTIFACTS_BUCKET}
+      DQREPORTS_BUCKET: ${DQREPORTS_BUCKET}
+      DQFAILURES_BUCKET: ${DQFAILURES_BUCKET}
+      AUDIT_BUCKET: ${AUDIT_BUCKET}
     ports:
-      - "8501:8501"
+      - "${STREAMLIT_PORT}:8501"
     depends_on:
       clickhouse:
         condition: service_healthy
       seaweed-s3:
         condition: service_started
-    entrypoint: ["/bin/sh", "-lc"]
-    command: >
-      pip install --no-cache-dir -r requirements.txt &&
-      streamlit run apps/streamlit/app.py --server.address=0.0.0.0 --server.port=8501
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eux
+        python -m pip install --upgrade pip
+        python -m pip install --no-cache-dir -r infra/requirements.txt
+        python -m streamlit run apps/streamlit/app.py --server.address 0.0.0.0 --server.port 8501
+    restart: unless-stopped
 
   dq-runner:
-    image: python:3.12-slim
+    image: python:3.11-slim
     container_name: dq_runner
+    env_file:
+      - ./.env
     working_dir: /app
     volumes:
-      - ./:/app
+      - ../:/app
     environment:
       CLICKHOUSE_HOST: clickhouse
-      CLICKHOUSE_HTTP_PORT: "8123"
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: ""
-      S3_ENDPOINT_URL: "http://seaweed-s3:8333"
-      AWS_ACCESS_KEY_ID: admin
-      AWS_SECRET_ACCESS_KEY: admin
-      AWS_DEFAULT_REGION: us-east-1
-      LANDING_BUCKET: dq-landing
-      ARTIFACTS_BUCKET: dq-artifacts
-      DQREPORTS_BUCKET: dq-dqreports
-      DQFAILURES_BUCKET: dq-dqfailures
-      AUDIT_BUCKET: dq-audit
+      CLICKHOUSE_HTTP_PORT: ${CLICKHOUSE_HTTP_PORT}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL_INTERNAL}
+      LANDING_BUCKET: ${LANDING_BUCKET}
+      ARTIFACTS_BUCKET: ${ARTIFACTS_BUCKET}
+      DQREPORTS_BUCKET: ${DQREPORTS_BUCKET}
+      DQFAILURES_BUCKET: ${DQFAILURES_BUCKET}
+      AUDIT_BUCKET: ${AUDIT_BUCKET}
     depends_on:
       clickhouse:
         condition: service_healthy
       seaweed-s3:
         condition: service_started
-    entrypoint: ["/bin/sh", "-lc"]
-    command: >
-      pip install --no-cache-dir -r requirements.txt &&
-      sleep infinity
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eux
+        python -m pip install --upgrade pip
+        python -m pip install --no-cache-dir -r infra/requirements.txt
+        sleep infinity
+    restart: unless-stopped
 
 volumes:
   ch_data:

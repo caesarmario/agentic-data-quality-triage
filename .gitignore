@@ -1,3 +1,12 @@
+####
+## Environment Variables for Agentic Data Quality Triage
+## Author: Mario Caesar // caesarmario87@gmail.com
+####
+
+# Credentials
+infra/airflow/auth/*
+infra/.env
+
 # Byte-compiled / optimized / DLL files
 **/__pycache__/
 **/*.py[cod]
