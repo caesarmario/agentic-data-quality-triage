@@ -1,4 +1,4 @@
-## _[Working dates (ex: 20250612)]_
+## _Working dates (ex: 20250612)_
 
 ## Summary:
 _Provide an overview..._
