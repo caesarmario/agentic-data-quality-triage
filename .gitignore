@@ -16,5 +16,4 @@ infra/.env
 # Logs
 *.log
 *.py.log
-airflow/logs/
 logs/

@@ -323,6 +323,30 @@ services:
         sleep infinity
     restart: unless-stopped
 
+  discord-bot:
+    image: python:3.11-slim
+    container_name: dq_discord_bot
+    env_file:
+      - ./.env
+    working_dir: /app
+    volumes:
+      - ../:/app
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      seaweed-s3:
+        condition: service_started
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eux
+        python -m pip install --upgrade pip
+        python -m pip install --no-cache-dir -r infra/requirements.txt
+        python apps/discord_bot/bot.py
+    restart: unless-stopped
+
+
 volumes:
   ch_data:
   ch_logs:
