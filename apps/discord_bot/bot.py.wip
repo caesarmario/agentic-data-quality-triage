@@ -1,0 +1,42 @@
+import os
+import asyncio
+import discord
+from discord import app_commands
+
+TOKEN = os.environ["DISCORD_BOT_TOKEN"]
+GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0") or "0")
+ALERTS_CH = int(os.environ["DISCORD_ALERTS_CHANNEL_ID"])
+TRIAGE_CH = int(os.environ["DISCORD_TRIAGE_CHANNEL_ID"])
+
+intents = discord.Intents.default()
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+async def send_text(channel_id: int, content: str):
+   ch = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
+   await ch.send(content)
+
+@client.event
+async def on_ready():
+   # Faster dev sync to a single guild (optional)
+   if GUILD_ID:
+       await tree.sync(guild=discord.Object(id=GUILD_ID))
+   else:
+       await tree.sync()
+   await send_text(ALERTS_CH, "✅ DQ bot is online.")
+   print(f"Logged in as {client.user}")
+
+@tree.command(name="triage", description="Run triage for an alert_id", guild=discord.Object(id=GUILD_ID) if GUILD_ID else None)
+@app_commands.describe(alert_id="Alert ID from ClickHouse alerts table")
+async def triage(interaction: discord.Interaction, alert_id: int):
+   await interaction.response.defer(thinking=True)
+
+   # TODO: call your triage runner here
+   # Example: run a subprocess or call a python function.
+   # For now, just mock it:
+   summary = f"🧪 Triage started for alert_id={alert_id}. (mock)"
+
+   await send_text(TRIAGE_CH, summary)
+   await interaction.followup.send(f"Done. Posted to <#{TRIAGE_CH}>")
+
+client.run(TOKEN)

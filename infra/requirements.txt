@@ -34,3 +34,6 @@ Faker>=26.0.0
 
 # Dev/Test
 pytest>=8.3.2
+
+# Discord Bot
+discord.py>=2.0.0

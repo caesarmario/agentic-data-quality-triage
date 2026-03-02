@@ -1,0 +1,480 @@
+# scripts/seed_data.py
+import argparse
+import json
+import os
+import random
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Dict, List, Tuple
+
+import psycopg2
+from psycopg2.extras import execute_values
+
+
+COUNTRIES = ["ID", "SG", "MY", "TH", "VN"]
+CHANNELS = ["organic", "paid", "referral", "direct", "affiliate"]
+
+# Country/channel effects to make the data look realistic
+COUNTRY_BASE_ORDERS = {"ID": 2200, "SG": 380, "MY": 520, "TH": 610, "VN": 700}
+COUNTRY_AOV = {"ID": 6.8, "SG": 26.0, "MY": 12.5, "TH": 10.8, "VN": 9.6}
+CHANNEL_ORDER_MULT = {"organic": 1.05, "paid": 0.85, "referral": 0.55, "direct": 0.95, "affiliate": 0.35}
+CHANNEL_AOV_MULT = {"organic": 1.00, "paid": 0.98, "referral": 1.02, "direct": 1.01, "affiliate": 0.96}
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def q2(x: float) -> Decimal:
+    return Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def get_conn_str() -> str:
+    # Prefer DATABASE_URL if provided
+    db_url = os.getenv("DATABASE_URL")
+    if db_url:
+        return db_url
+
+    host = os.getenv("DB_HOST", "localhost")
+    port = os.getenv("DB_PORT", "5432")
+    name = os.getenv("DB_NAME", "dq")
+    user = os.getenv("DB_USER", "dq")
+    password = os.getenv("DB_PASSWORD", "dq")
+    return f"postgresql://{user}:{password}@{host}:{port}/{name}"
+
+
+def connect(conn_str: str):
+    return psycopg2.connect(conn_str)
+
+
+SCHEMA_SQL = """
+CREATE SCHEMA IF NOT EXISTS public;
+
+CREATE TABLE IF NOT EXISTS fact_orders_daily (
+  date       date        NOT NULL,
+  country    text        NOT NULL,
+  channel    text        NOT NULL,
+  orders     integer     NOT NULL,
+  revenue    numeric(18,2) NOT NULL,
+  PRIMARY KEY (date, country, channel)
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+  id          bigserial PRIMARY KEY,
+  run_at      timestamptz NOT NULL,
+  job_name    text NOT NULL,
+  status      text NOT NULL,
+  started_at  timestamptz NOT NULL,
+  ended_at    timestamptz NOT NULL,
+  commit_sha  text,
+  error_msg   text
+);
+
+CREATE TABLE IF NOT EXISTS dq_check_results (
+  id            bigserial PRIMARY KEY,
+  run_at        timestamptz NOT NULL,
+  table_name    text NOT NULL,
+  check_name    text NOT NULL,
+  status        text NOT NULL,
+  observed_value numeric(18,4),
+  threshold     numeric(18,4),
+  details_json  jsonb
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+  id          bigserial PRIMARY KEY,
+  created_at  timestamptz NOT NULL,
+  alert_type  text NOT NULL,
+  metric      text NOT NULL,
+  table_name  text NOT NULL,
+  date        date NOT NULL,
+  dimension   text,
+  severity    text NOT NULL,
+  observed    numeric(18,4),
+  expected    numeric(18,4),
+  details_json jsonb
+);
+
+CREATE TABLE IF NOT EXISTS agent_audit_log (
+  id          bigserial PRIMARY KEY,
+  ts          timestamptz NOT NULL,
+  alert_id    bigint,
+  action      text NOT NULL,
+  payload_json jsonb,
+  status      text NOT NULL,
+  duration_ms integer
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_orders_date ON fact_orders_daily(date);
+CREATE INDEX IF NOT EXISTS idx_dq_table_run ON dq_check_results(table_name, run_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alerts_date ON alerts(date DESC);
+"""
+
+
+TRUNCATE_SQL = """
+TRUNCATE TABLE
+  fact_orders_daily,
+  pipeline_runs,
+  dq_check_results,
+  alerts,
+  agent_audit_log
+RESTART IDENTITY;
+"""
+
+
+def init_db(conn) -> None:
+    with conn, conn.cursor() as cur:
+        cur.execute(SCHEMA_SQL)
+
+
+def reset_db(conn) -> None:
+    with conn, conn.cursor() as cur:
+        cur.execute(TRUNCATE_SQL)
+
+
+def day_seasonality(d: date) -> float:
+    # Weekly seasonality: weekends slightly lower, Fridays slightly higher
+    weekday = d.weekday()  # Mon=0 ... Sun=6
+    if weekday == 4:
+        return 1.08
+    if weekday in (5, 6):
+        return 0.92
+    return 1.00
+
+
+def trend_multiplier(day_index: int, total_days: int) -> float:
+    # Mild trend over time (up to ~6%)
+    if total_days <= 1:
+        return 1.0
+    return 1.0 + (0.06 * (day_index / (total_days - 1)))
+
+
+def gen_daily_point(d: date, country: str, channel: str) -> Tuple[int, Decimal]:
+    base_orders = COUNTRY_BASE_ORDERS[country] * CHANNEL_ORDER_MULT[channel]
+    aov = COUNTRY_AOV[country] * CHANNEL_AOV_MULT[channel]
+
+    # Smooth seasonality + noise
+    seasonal = day_seasonality(d)
+    noise_orders = random.uniform(0.92, 1.08)
+    noise_aov = random.uniform(0.95, 1.05)
+
+    orders = int(round(base_orders * seasonal * noise_orders))
+    orders = max(0, orders)
+
+    revenue = q2(orders * aov * noise_aov)
+    return orders, revenue
+
+
+def bulk_insert_fact(conn, rows: List[Tuple[date, str, str, int, Decimal]]) -> None:
+    sql = """
+      INSERT INTO fact_orders_daily (date, country, channel, orders, revenue)
+      VALUES %s
+      ON CONFLICT (date, country, channel) DO UPDATE
+        SET orders = EXCLUDED.orders,
+            revenue = EXCLUDED.revenue
+    """
+    with conn, conn.cursor() as cur:
+        execute_values(cur, sql, rows, page_size=5000)
+
+
+def query_scalar(conn, sql: str, params=None):
+    with conn.cursor() as cur:
+        cur.execute(sql, params or ())
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def query_dicts(conn, sql: str, params=None) -> List[Dict]:
+    with conn.cursor() as cur:
+        cur.execute(sql, params or ())
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def insert_pipeline_run(conn, job_name: str, status: str, started_at: datetime, ended_at: datetime, commit_sha: str = None, error_msg: str = None):
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO pipeline_runs (run_at, job_name, status, started_at, ended_at, commit_sha, error_msg)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (utc_now(), job_name, status, started_at, ended_at, commit_sha, error_msg),
+        )
+
+
+def insert_dq_result(conn, table_name: str, check_name: str, status: str, observed_value=None, threshold=None, details: Dict = None):
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO dq_check_results (run_at, table_name, check_name, status, observed_value, threshold, details_json)
+            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+            """,
+            (utc_now(), table_name, check_name, status, observed_value, threshold, json.dumps(details or {})),
+        )
+
+
+def insert_alert(conn, alert_type: str, metric: str, table_name: str, d: date, dimension: str, severity: str, observed=None, expected=None, details: Dict = None) -> int:
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO alerts (created_at, alert_type, metric, table_name, date, dimension, severity, observed, expected, details_json)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            RETURNING id
+            """,
+            (utc_now(), alert_type, metric, table_name, d, dimension, severity, observed, expected, json.dumps(details or {})),
+        )
+        return int(cur.fetchone()[0])
+
+
+def compute_total_revenue(conn, table_name: str, d: date, extra_where_sql: str = "", params=()) -> float:
+    sql = f"""
+      SELECT COALESCE(SUM(revenue), 0)::float
+      FROM {table_name}
+      WHERE date = %s
+      {extra_where_sql}
+    """
+    return float(query_scalar(conn, sql, (d, *params)))
+
+
+def compute_expected_baseline(conn, table_name: str, d: date, lookback_days: int = 7) -> float:
+    # Baseline: mean of previous N days
+    start = d - timedelta(days=lookback_days)
+    end = d - timedelta(days=1)
+    sql = f"""
+      SELECT COALESCE(AVG(daily_rev), 0)::float
+      FROM (
+        SELECT date, SUM(revenue)::float AS daily_rev
+        FROM {table_name}
+        WHERE date BETWEEN %s AND %s
+        GROUP BY 1
+      ) t
+    """
+    return float(query_scalar(conn, sql, (start, end)))
+
+
+def apply_incident_missing_segment(conn, table_name: str, d: date, missing_country: str = "ID") -> Dict:
+    # Delete all rows for one key segment (country) for the incident day
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            f"DELETE FROM {table_name} WHERE date = %s AND country = %s",
+            (d, missing_country),
+        )
+
+    impacted = {"missing_country": missing_country, "missing_date": str(d)}
+    return impacted
+
+
+def seed(conn_str: str, days: int, incident: str, reset: bool, seed_value: int) -> None:
+    random.seed(seed_value)
+    conn = connect(conn_str)
+    try:
+        init_db(conn)
+        if reset:
+            reset_db(conn)
+
+        today = date.today()
+        start_date = today - timedelta(days=days)
+        end_date = today - timedelta(days=1)
+
+        total_days = (end_date - start_date).days + 1
+
+        # 1) Generate base data
+        fact_rows: List[Tuple[date, str, str, int, Decimal]] = []
+        for i in range(total_days):
+            d = start_date + timedelta(days=i)
+            t_mult = trend_multiplier(i, total_days)
+
+            for country in COUNTRIES:
+                for channel in CHANNELS:
+                    orders, revenue = gen_daily_point(d, country, channel)
+
+                    # Apply mild trend at aggregate level
+                    orders = int(round(orders * t_mult))
+                    revenue = q2(float(revenue) * t_mult)
+
+                    fact_rows.append((d, country, channel, orders, revenue))
+
+        bulk_insert_fact(conn, fact_rows)
+
+        # 2) Choose an incident date close to "now"
+        incident_date = end_date  # yesterday (best for demos)
+
+        table_name = "public.fact_orders_daily"
+        metric = "revenue"
+
+        expected = compute_expected_baseline(conn, table_name, incident_date, lookback_days=7)
+        observed_before = compute_total_revenue(conn, table_name, incident_date)
+
+        incident_details: Dict = {
+            "incident_type": incident,
+            "incident_date": str(incident_date),
+            "baseline_lookback_days": 7,
+            "observed_before_incident": observed_before,
+        }
+
+        # 3) Apply incident
+        if incident == "missing_segment":
+            missing_country = "ID"
+            incident_details.update(apply_incident_missing_segment(conn, table_name, incident_date, missing_country=missing_country))
+        elif incident == "missing_latest_day":
+            # Simulate entire day missing (freshness lag)
+            with conn, conn.cursor() as cur:
+                cur.execute(f"DELETE FROM {table_name} WHERE date = %s", (incident_date,))
+            incident_details["missing_date_partition"] = str(incident_date)
+        else:
+            raise ValueError("Unknown incident type. Use missing_segment or missing_latest_day.")
+
+        observed_after = compute_total_revenue(conn, table_name, incident_date)
+        incident_details["observed_after_incident"] = observed_after
+
+        # 4) Seed pipeline runs
+        started = utc_now() - timedelta(minutes=7)
+        ended = utc_now() - timedelta(minutes=2)
+
+        if incident == "missing_segment":
+            insert_pipeline_run(
+                conn,
+                job_name="ingest_orders_api",
+                status="partial_fail",
+                started_at=started,
+                ended_at=ended,
+                commit_sha="a1b2c3d",
+                error_msg="Country=ID ingestion timed out (HTTP 504). Other segments succeeded.",
+            )
+        else:
+            insert_pipeline_run(
+                conn,
+                job_name="ingest_orders_api",
+                status="failed",
+                started_at=started,
+                ended_at=ended,
+                commit_sha="a1b2c3d",
+                error_msg="Upstream API outage. No partitions landed for latest day.",
+            )
+
+        # 5) Seed DQ check results
+        if incident == "missing_latest_day":
+            max_date = query_scalar(conn, f"SELECT MAX(date) FROM {table_name}")
+            # freshness check fails if max_date < incident_date
+            status = "fail" if max_date and max_date < incident_date else "pass"
+            insert_dq_result(
+                conn,
+                table_name=table_name,
+                check_name="freshness_max_date",
+                status=status,
+                observed_value=float((max_date - date(1970, 1, 1)).days) if max_date else None,
+                threshold=float((incident_date - date(1970, 1, 1)).days),
+                details={"max_date": str(max_date), "expected_min_date": str(incident_date)},
+            )
+            insert_dq_result(
+                conn,
+                table_name=table_name,
+                check_name="partition_present_latest_day",
+                status="fail",
+                observed_value=0,
+                threshold=1,
+                details={"missing_date": str(incident_date)},
+            )
+        else:
+            # segment completeness check
+            id_rev = compute_total_revenue(conn, table_name, incident_date, extra_where_sql="AND country = %s", params=("ID",))
+            insert_dq_result(
+                conn,
+                table_name=table_name,
+                check_name="segment_completeness_country_ID",
+                status="fail",
+                observed_value=float(id_rev),
+                threshold=1.0,
+                details={"country": "ID", "date": str(incident_date), "observed_segment_revenue": id_rev},
+            )
+
+        # generic metric anomaly check result
+        drop_ratio = (observed_after / expected) if expected > 0 else 0.0
+        insert_dq_result(
+            conn,
+            table_name=table_name,
+            check_name="metric_anomaly_revenue_drop",
+            status="fail" if drop_ratio < 0.8 else "pass",
+            observed_value=float(observed_after),
+            threshold=float(expected * 0.8),
+            details={"expected_baseline": expected, "observed": observed_after, "drop_ratio": drop_ratio, "date": str(incident_date)},
+        )
+
+        # 6) Seed alert event (what the agent will triage)
+        severity = "high" if drop_ratio < 0.7 else "medium"
+        alert_id = insert_alert(
+            conn,
+            alert_type="metric_anomaly",
+            metric=metric,
+            table_name=table_name,
+            d=incident_date,
+            dimension="country" if incident == "missing_segment" else "date",
+            severity=severity,
+            observed=float(observed_after),
+            expected=float(expected),
+            details=incident_details,
+        )
+
+        # Add one more alert: rowcount drop (nice for demos)
+        rowcount = query_scalar(conn, f"SELECT COALESCE(SUM(orders),0) FROM {table_name} WHERE date=%s", (incident_date,))
+        prev_rowcount = query_scalar(conn, f"SELECT COALESCE(SUM(orders),0) FROM {table_name} WHERE date=%s", (incident_date - timedelta(days=1),))
+        if prev_rowcount and prev_rowcount > 0:
+            rc_ratio = float(rowcount) / float(prev_rowcount)
+        else:
+            rc_ratio = 1.0
+
+        insert_alert(
+            conn,
+            alert_type="dq_check_failure",
+            metric="orders_rowcount",
+            table_name=table_name,
+            d=incident_date,
+            dimension="date",
+            severity="medium" if rc_ratio < 0.85 else "low",
+            observed=float(rowcount),
+            expected=float(prev_rowcount or 0),
+            details={
+                "check_name": "rowcount_day_over_day",
+                "ratio": rc_ratio,
+                "prev_day": str(incident_date - timedelta(days=1)),
+            },
+        )
+
+        with conn:
+            pass
+
+        print(json.dumps({
+            "status": "ok",
+            "seed_days": days,
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+            "incident": incident,
+            "incident_date": str(incident_date),
+            "alert_id_primary": alert_id,
+        }, indent=2))
+
+    finally:
+        conn.close()
+
+
+def main():
+    p = argparse.ArgumentParser(description="Seed demo data for Agentic DQ Triage Bot (Postgres).")
+    p.add_argument("--days", type=int, default=90, help="Number of days to generate (default: 90).")
+    p.add_argument("--incident", type=str, default="missing_segment", choices=["missing_segment", "missing_latest_day"])
+    p.add_argument("--no-reset", action="store_true", help="Do not truncate tables before seeding.")
+    p.add_argument("--seed", type=int, default=42, help="Random seed (default: 42).")
+    args = p.parse_args()
+
+    conn_str = get_conn_str()
+    seed(
+        conn_str=conn_str,
+        days=args.days,
+        incident=args.incident,
+        reset=not args.no_reset,
+        seed_value=args.seed,
+    )
+
+
+if __name__ == "__main__":
+    main()
