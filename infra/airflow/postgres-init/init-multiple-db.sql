@@ -1,6 +1,6 @@
 -- ##############################################
 -- SQL Initialization Script for PostgreSQL
--- Author: Mario Caesar // caesarmario87@gmail.com
+-- Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 -- ##############################################
 
 \set ON_ERROR_STOP on

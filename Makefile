@@ -1,6 +1,6 @@
 ####
 ## Makefile for Agentic Data Quality Triage
-## Author: Mario Caesar // caesarmario87@gmail.com
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 SHELL := /bin/sh
 
@@ -89,7 +89,7 @@ help:
 	echo "  make pip-freeze             Show installed python packages inside runner"
 	echo "  make test                   Run pytest inside runner"
 	echo ""
-	echo "Pipelines (placeholders):"
+	echo "Pipelines:"
 	echo "  make seed DT=YYYY-MM-DD     Run daily seeding pipeline"
 	echo "  make backfill START=... END=...  Backfill date range"
 	echo "  make dbt-debug              dbt debug"
@@ -202,8 +202,11 @@ fr-airflow:
 # -----------------------------
 .PHONY: ch-bootstrap
 ch-bootstrap:
-	echo "Applying ClickHouse bootstrap SQL..."
-	docker exec -i dq_clickhouse clickhouse-client --multiquery < infra/init/clickhouse_bootstrap.sql
+	echo "Applying modular ClickHouse bootstrap SQL..."
+	for f in infra/init/clickhouse/*.sql; do \
+		echo "Applying $$f"; \
+		docker exec -i dq_clickhouse clickhouse-client --multiquery < $$f; \
+	done
 
 .PHONY: ch-client
 ch-client:
@@ -221,7 +224,7 @@ test:
 	$(DC) exec -T $(RUNNER_SERVICE) pytest -q
 
 # -----------------------------
-# Pipelines (placeholders; update paths as you implement scripts)
+# Pipelines
 # -----------------------------
 .PHONY: seed
 seed:

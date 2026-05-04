@@ -1,11 +1,18 @@
 ####
-## Environment Variables for Agentic Data Quality Triage
-## Author: Mario Caesar // caesarmario87@gmail.com
+## Git Ignore Rules for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
+
+# Todo List
+todo/*
+*.todo
 
 # Credentials
 infra/airflow/auth/*
 infra/.env
+
+# Generated local data
+data/
 
 # Byte-compiled / optimized / DLL files
 **/__pycache__/
