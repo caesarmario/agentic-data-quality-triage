@@ -1,0 +1,123 @@
+####
+## Orders Seeding Config for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+dataset: orders
+description: Synthetic ecommerce order events used for local DQ triage scenarios.
+global_seed: 42
+
+generation:
+  timezone: UTC
+  default_days: 60
+  default_total_days_for_trend: 90
+  order_id_prefix: ORD
+  customer_id_prefix: CUST
+  business_date_version: 1
+  is_test: false
+  amount_stddev_ratio: 0.28
+  fx_noise_range: [0.995, 1.005]
+  ingestion_delay_minutes: [1, 180]
+
+seasonality:
+  monday: 1.00
+  tuesday: 1.00
+  wednesday: 1.00
+  thursday: 1.00
+  friday: 1.08
+  saturday: 0.90
+  sunday: 0.90
+
+trend:
+  enabled: true
+  total_growth_ratio: 0.08
+
+order_count_noise_range: [0.90, 1.12]
+
+source_system_weights:
+  orders_api: 0.72
+  mobile_checkout: 0.18
+  partner_portal: 0.10
+
+countries:
+  ID:
+    base_orders: 320
+    currency: IDR
+    local_aov: 110000
+    fx_to_usd: 0.000064102564
+  SG:
+    base_orders: 60
+    currency: SGD
+    local_aov: 36
+    fx_to_usd: 0.74
+  MY:
+    base_orders: 90
+    currency: MYR
+    local_aov: 56
+    fx_to_usd: 0.21
+  TH:
+    base_orders: 110
+    currency: THB
+    local_aov: 360
+    fx_to_usd: 0.028
+  VN:
+    base_orders: 130
+    currency: VND
+    local_aov: 230000
+    fx_to_usd: 0.000039215686
+
+channels:
+  organic:
+    order_multiplier: 1.10
+    aov_multiplier: 1.00
+    discount_range: [0.00, 0.06]
+    status_weights:
+      paid: 0.87
+      cancelled: 0.06
+      refunded: 0.04
+      pending: 0.03
+  paid:
+    order_multiplier: 0.92
+    aov_multiplier: 0.96
+    discount_range: [0.02, 0.12]
+    status_weights:
+      paid: 0.80
+      cancelled: 0.10
+      refunded: 0.05
+      pending: 0.05
+  referral:
+    order_multiplier: 0.58
+    aov_multiplier: 1.02
+    discount_range: [0.00, 0.08]
+    status_weights:
+      paid: 0.83
+      cancelled: 0.08
+      refunded: 0.05
+      pending: 0.04
+  direct:
+    order_multiplier: 0.92
+    aov_multiplier: 1.01
+    discount_range: [0.00, 0.05]
+    status_weights:
+      paid: 0.89
+      cancelled: 0.05
+      refunded: 0.03
+      pending: 0.03
+  affiliate:
+    order_multiplier: 0.36
+    aov_multiplier: 0.95
+    discount_range: [0.03, 0.15]
+    status_weights:
+      paid: 0.78
+      cancelled: 0.10
+      refunded: 0.07
+      pending: 0.05
+
+output:
+  local_dir: data/landing
+  bucket: dq-landing
+  prefix: orders
+  format: parquet
+  compression: snappy
+  partition_column: dt
+  file_template: orders_{dt}.parquet

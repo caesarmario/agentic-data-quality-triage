@@ -1,3 +1,8 @@
+####
+## Requirements TXT file for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
 # Core
 python-dotenv>=1.0.1
 PyYAML>=6.0.2
