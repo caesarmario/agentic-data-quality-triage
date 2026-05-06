@@ -1,0 +1,24 @@
+####
+## Docker Ignore Rules for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+.git
+.github
+.vscode
+
+data
+logs
+todo
+
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.log
+
+infra/.env
+infra/airflow/auth
+
+warehouse/dbt/target
+warehouse/dbt/dbt_packages
+

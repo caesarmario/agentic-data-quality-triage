@@ -14,6 +14,10 @@ infra/.env
 # Generated local data
 data/
 
+# dbt artifacts
+warehouse/dbt/target/
+warehouse/dbt/dbt_packages/
+
 # Byte-compiled / optimized / DLL files
 **/__pycache__/
 **/*.py[cod]

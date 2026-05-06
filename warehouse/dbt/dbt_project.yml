@@ -1,0 +1,55 @@
+####
+## dbt Project for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+name: agentic_data_quality_triage
+version: "1.0.0"
+config-version: 2
+
+profile: agentic_dq_clickhouse
+
+model-paths:
+  - models
+
+macro-paths:
+  - macros
+
+test-paths:
+  - tests
+
+target-path: target
+clean-targets:
+  - target
+  - dbt_packages
+
+vars:
+  start_dt: "1970-01-01"
+  end_dt: "2100-01-01"
+  freshness_max_days_old: 7
+  rowcount_lookback_days: 7
+  rowcount_min_history_days: 3
+  rowcount_lower_ratio: 0.50
+  rowcount_upper_ratio: 1.80
+
+models:
+  agentic_data_quality_triage:
+    staging:
+      +materialized: table
+      +engine: MergeTree()
+      +partition_by: dt
+      +order_by:
+        - dt
+        - country
+        - channel
+        - order_id
+
+    marts:
+      +materialized: table
+      +engine: MergeTree()
+      +partition_by: dt
+      +order_by:
+        - dt
+        - country
+        - channel
+

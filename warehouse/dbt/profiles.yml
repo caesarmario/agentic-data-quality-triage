@@ -1,0 +1,22 @@
+####
+## dbt Profiles for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+agentic_dq_clickhouse:
+  target: local
+  outputs:
+    local:
+      type: clickhouse
+      driver: http
+      host: "{{ env_var('CLICKHOUSE_HOST', 'localhost') }}"
+      port: "{{ env_var('CLICKHOUSE_HTTP_PORT', '8123') | int }}"
+      schema: "{{ env_var('CLICKHOUSE_DB', 'dq') }}"
+      user: "{{ env_var('CLICKHOUSE_USER', 'default') }}"
+      password: "{{ env_var('CLICKHOUSE_PASSWORD', '') }}"
+      secure: false
+      verify: false
+      connect_timeout: 10
+      send_receive_timeout: 300
+      retries: 1
+

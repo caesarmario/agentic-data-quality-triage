@@ -1,0 +1,61 @@
+####
+## dbt Staging Model Contract for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+version: 2
+
+models:
+  - name: stg_orders
+    description: Cleaned and typed order events derived from dq.raw_orders.
+    tests:
+      - freshness_by_date:
+          arguments:
+            date_column: dt
+            max_days_old: "{{ var('freshness_max_days_old') }}"
+
+    columns:
+      - name: dt
+        description: Business date partition.
+        tests:
+          - not_null
+
+      - name: order_id
+        description: Deterministic order identifier.
+        tests:
+          - not_null
+          - unique
+
+      - name: customer_id
+        description: Synthetic customer identifier.
+        tests:
+          - not_null
+
+      - name: country
+        description: Country segment code.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["ID", "SG", "MY", "TH", "VN"]
+
+      - name: channel
+        description: Acquisition channel.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["organic", "paid", "referral", "direct", "affiliate"]
+
+      - name: status
+        description: Order lifecycle status.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["paid", "cancelled", "refunded", "pending"]
+
+      - name: recognized_revenue_usd
+        description: Revenue recognized in USD after cancellation/refund logic.
+        tests:
+          - not_null

@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS dq.data_profile_results
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(run_at)
-ORDER BY (table_name, dt, column_name, metric_name, run_at);
+ORDER BY (table_name, ifNull(dt, toDate('1970-01-01')), column_name, metric_name, run_at);
 
 CREATE TABLE IF NOT EXISTS dq.dq_check_results
 (
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS dq.dq_check_results
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(run_at)
-ORDER BY (table_name, dt, status, check_name, run_at);
+ORDER BY (table_name, ifNull(dt, toDate('1970-01-01')), status, check_name, run_at);
 
 CREATE TABLE IF NOT EXISTS dq.alerts
 (
@@ -89,4 +89,4 @@ CREATE TABLE IF NOT EXISTS dq.pipeline_runs
 )
 ENGINE = ReplacingMergeTree(created_at)
 PARTITION BY toYYYYMM(started_at)
-ORDER BY (job_name, partition_dt, run_id);
+ORDER BY (job_name, ifNull(partition_dt, toDate('1970-01-01')), run_id);
