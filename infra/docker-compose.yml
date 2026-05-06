@@ -30,7 +30,10 @@ x-app-env: &app-env
   AUDIT_BUCKET: ${AUDIT_BUCKET:-dq-audit}
 
 x-python-runner: &python-runner
-  image: python:3.11-slim-bookworm
+  image: ${PYTHON_RUNNER_IMAGE:-agentic-dq-python:local}
+  build:
+    context: ..
+    dockerfile: infra/docker/python-runner/Dockerfile
   env_file: *env-file
   working_dir: /app
   volumes:
@@ -47,8 +50,6 @@ x-python-runner: &python-runner
     - -lc
     - |
       set -eu
-      python -m pip install --upgrade pip
-      python -m pip install --no-cache-dir -r infra/requirements.txt
       sleep infinity
   restart: unless-stopped
 
@@ -121,16 +122,20 @@ services:
     volumes:
       - ./init/clickhouse:/bootstrap:ro
     entrypoint: ["/bin/sh", "-lc"]
-    command: |
-      set -eu
-      for file in /bootstrap/*.sql; do
-        echo "[clickhouse-init] applying $${file}"
-        clickhouse-client --host clickhouse --multiquery < "$${file}"
-      done
+    command:
+      - |
+        set -eu
+
+        for file in /bootstrap/*.sql; do
+          echo "[clickhouse-init] applying $${file}"
+
+          # Apply each modular bootstrap file in lexical order.
+          clickhouse-client --host clickhouse --multiquery < "$${file}"
+        done
     restart: "no"
 
   ch-ui:
-    image: ghcr.io/caioricciuti/ch-ui:v1.6.4
+    image: ${CH_UI_IMAGE:-ghcr.io/caioricciuti/ch-ui:v1.6.4}
     container_name: dq_ch_ui
     environment:
       CLICKHOUSE_URL: ${CHUI_CLICKHOUSE_URL:-http://clickhouse:8123}
@@ -206,6 +211,10 @@ services:
   seaweed-s3:
     image: chrislusf/seaweedfs:4.13
     container_name: dq_seaweed_s3
+    env_file: *env-file
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-admin}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-admin}
     command: ["s3", "-filer=seaweed-filer:8888", "-ip.bind=0.0.0.0", "-port=8333"]
     ports:
       - "${SEAWEED_S3_PORT:-8333}:8333"
@@ -374,8 +383,6 @@ services:
       - -lc
       - |
         set -eu
-        python -m pip install --upgrade pip
-        python -m pip install --no-cache-dir -r infra/requirements.txt
         python -m streamlit run apps/streamlit/app.py --server.address 0.0.0.0 --server.port 8501
 
   discord-bot:
@@ -387,8 +394,6 @@ services:
       - -lc
       - |
         set -eu
-        python -m pip install --upgrade pip
-        python -m pip install --no-cache-dir -r infra/requirements.txt
         python apps/discord_bot/bot.py
 
 volumes:

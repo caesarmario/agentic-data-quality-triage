@@ -12,9 +12,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-import boto3
-from botocore.config import Config
-
 from pipelines.common.logging import logger
 from pipelines.seeding.config import OrdersSeedConfig, load_orders_config
 from pipelines.seeding.helpers import parse_date
@@ -60,6 +57,10 @@ def build_s3_client(endpoint_url: str | None = None):
     region_name       = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
 
     logger.info("Building S3 client | endpoint_url=%s region=%s", resolved_endpoint, region_name)
+
+    # Import lazily so local no-upload/debug commands do not require boto3 on the host.
+    import boto3
+    from botocore.config import Config
 
     # Path-style addressing is safer for local S3 gateways than virtual-host bucket names.
     return boto3.client(

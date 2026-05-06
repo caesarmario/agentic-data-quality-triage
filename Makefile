@@ -44,7 +44,12 @@ LONGRUN_SERVICES  := $(CH_SERVICE) $(CH_UI_SERVICE) $(SEAWEED_SERVICES) $(AIRFLO
 DT ?= $(shell date +%F 2>/dev/null || echo 2026-02-26)
 START ?= $(DT)
 END ?= $(DT)
-ALERT_ID ?= 1
+ALERT_ID ?=
+ALERT_KEY ?= orders|dq_failure|2026-05-04|dq.raw_orders|row_count_positive|table
+TABLE ?= dq.stg_orders
+SQL ?= SELECT alert_key, severity FROM dq.alerts WHERE dt = toDate('2026-05-04') LIMIT 5
+TRIAGE_ALERT_ARG := $(if $(strip $(ALERT_ID)),--alert-id "$(ALERT_ID)",--alert-key "$(ALERT_KEY)")
+TRIAGE_ALERT_LOG := $(if $(strip $(ALERT_ID)),alert_id=$(ALERT_ID),alert_key=$(ALERT_KEY))
 
 # -----------------------------
 # Help
@@ -60,6 +65,8 @@ help:
 	echo "  make restart                Restart all services"
 	echo "  make ps                     Show running containers"
 	echo "  make pull                   Pull images"
+	echo "  make build-runner           Build local Python runner image"
+	echo "  make compose-check          Validate Docker Compose config"
 	echo ""
 	echo "Logs:"
 	echo "  make logs                   Tail logs from all services"
@@ -91,11 +98,24 @@ help:
 	echo ""
 	echo "Pipelines:"
 	echo "  make seed DT=YYYY-MM-DD     Run daily seeding pipeline"
+	echo "  make seed-local DT=YYYY-MM-DD Generate local Parquet without S3 upload"
 	echo "  make backfill START=... END=...  Backfill date range"
+	echo "  make load DT=YYYY-MM-DD     Load one S3 partition to ClickHouse raw_orders"
+	echo "  make load-backfill START=... END=... Load S3 partitions to ClickHouse raw_orders"
 	echo "  make dbt-debug              dbt debug"
 	echo "  make dbt-run                dbt run"
 	echo "  make dbt-test               dbt test"
-	echo "  make triage ALERT_ID=1      Run triage once (placeholder)"
+	echo "  make profile DT=YYYY-MM-DD  Write profile metrics to ClickHouse"
+	echo "  make dq-checks DT=YYYY-MM-DD Run deterministic DQ checks"
+	echo "  make alerts DT=YYYY-MM-DD   Generate alerts from DQ failures/warnings"
+	echo "  make dq-flow DT=YYYY-MM-DD  Run profile + DQ checks + alert generation"
+	echo "  make agent-alerts DT=YYYY-MM-DD List open alerts for a date"
+	echo "  make agent-sql SQL=\"...\"    Run guarded read-only ClickHouse SQL"
+	echo "  make agent-dq-history ALERT_KEY=\"...\" Fetch DQ history evidence"
+	echo "  make agent-pipeline-runs ALERT_KEY=\"...\" Fetch pipeline run evidence"
+	echo "  make agent-dbt-lineage TABLE=dq.stg_orders Fetch dbt lineage evidence"
+	echo "  make agent-s3-smoke        Write a small artifact to dq-artifacts"
+	echo "  make triage ALERT_KEY=\"...\" Run LangGraph triage and store Markdown/JSON report artifacts"
 	echo ""
 	echo "  make urls                   Print local URLs"
 	echo ""
@@ -130,6 +150,14 @@ ps:
 .PHONY: pull
 pull:
 	$(DC) pull
+
+.PHONY: build-runner
+build-runner:
+	COMPOSE_ANSI=never COMPOSE_PROGRESS=plain $(DC) build $(RUNNER_SERVICE)
+
+.PHONY: compose-check
+compose-check:
+	$(DC) config --quiet
 
 # -----------------------------
 # Logs
@@ -231,10 +259,25 @@ seed:
 	echo "Seeding for dt=$(DT) ..."
 	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/seeding/run_daily.py --dt $(DT)
 
+.PHONY: seed-local
+seed-local:
+	echo "Generating local Parquet only for dt=$(DT) ..."
+	python -m pipelines.seeding.run_daily --dt $(DT) --no-upload
+
 .PHONY: backfill
 backfill:
 	echo "Backfill from $(START) to $(END) ..."
 	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/seeding/run_daily.py --start $(START) --end $(END)
+
+.PHONY: load
+load:
+	echo "Loading ClickHouse raw_orders for dt=$(DT) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/loading/load_clickhouse.py --dt $(DT)
+
+.PHONY: load-backfill
+load-backfill:
+	echo "Loading ClickHouse raw_orders from $(START) to $(END) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/loading/load_clickhouse.py --start $(START) --end $(END)
 
 # -----------------------------
 # dbt (expects dbt project under warehouse/dbt)
@@ -255,12 +298,78 @@ dbt-test:
 	$(DC) exec -T $(RUNNER_SERVICE) dbt test --project-dir $(DBT_PROJECT_DIR) --profiles-dir $(DBT_PROFILES_DIR)
 
 # -----------------------------
-# Agent (placeholder)
+# DQ and profiling
 # -----------------------------
+.PHONY: profile
+profile:
+	echo "Profiling orders tables for dt=$(DT) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/profiling/profile_orders.py --dt $(DT)
+
+.PHONY: profile-backfill
+profile-backfill:
+	echo "Profiling orders tables from $(START) to $(END) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/profiling/profile_orders.py --start $(START) --end $(END)
+
+.PHONY: dq-checks
+dq-checks:
+	echo "Running DQ checks for dt=$(DT) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/dq/run_checks.py --dt $(DT)
+
+.PHONY: dq-checks-backfill
+dq-checks-backfill:
+	echo "Running DQ checks from $(START) to $(END) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/dq/run_checks.py --start $(START) --end $(END)
+
+.PHONY: alerts
+alerts:
+	echo "Generating alerts for dt=$(DT) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/dq/generate_alerts.py --dt $(DT)
+
+.PHONY: alerts-backfill
+alerts-backfill:
+	echo "Generating alerts from $(START) to $(END) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/dq/generate_alerts.py --start $(START) --end $(END)
+
+.PHONY: dq-flow
+dq-flow: profile dq-checks alerts
+
+# -----------------------------
+# Agent
+# -----------------------------
+.PHONY: agent-alerts
+agent-alerts:
+	echo "Listing open alerts for dt=$(DT) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python agent/tools/alerts.py --mode list --dt $(DT) --limit 20
+
+.PHONY: agent-sql
+agent-sql:
+	echo "Running guarded agent SQL ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python agent/tools/clickhouse_sql.py --alert-key manual_agent_sql --sql "$(SQL)"
+
+.PHONY: agent-dq-history
+agent-dq-history:
+	echo "Fetching DQ history evidence ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python agent/tools/dq_history.py --alert-key "$(ALERT_KEY)"
+
+.PHONY: agent-pipeline-runs
+agent-pipeline-runs:
+	echo "Fetching pipeline run evidence ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python agent/tools/pipeline_runs.py --alert-key "$(ALERT_KEY)"
+
+.PHONY: agent-dbt-lineage
+agent-dbt-lineage:
+	echo "Fetching dbt lineage evidence for table=$(TABLE) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python agent/tools/dbt_lineage.py --table-name "$(TABLE)"
+
+.PHONY: agent-s3-smoke
+agent-s3-smoke:
+	echo "Writing S3 smoke artifact ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python agent/tools/s3.py --text "agent s3 smoke from make"
+
 .PHONY: triage
 triage:
-	echo "Running triage for alert_id=$(ALERT_ID) ..."
-	$(DC) exec -T $(RUNNER_SERVICE) python scripts/run_triage_once.py --alert-id $(ALERT_ID)
+	echo "Running triage for $(TRIAGE_ALERT_LOG) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python scripts/run_triage_once.py $(TRIAGE_ALERT_ARG)
 
 # -----------------------------
 # Convenience

@@ -1,0 +1,55 @@
+####
+## dbt Mart Model Contract for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+version: 2
+
+models:
+  - name: fct_orders_daily
+    description: Daily order metrics aggregated by date, country, and channel.
+    tests:
+      - rowcount_anomaly:
+          arguments:
+            date_column: dt
+            lookback_days: "{{ var('rowcount_lookback_days') }}"
+            min_history_days: "{{ var('rowcount_min_history_days') }}"
+            lower_ratio: "{{ var('rowcount_lower_ratio') }}"
+            upper_ratio: "{{ var('rowcount_upper_ratio') }}"
+
+    columns:
+      - name: dt
+        description: Business date partition.
+        tests:
+          - not_null
+
+      - name: country
+        description: Country segment code.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["ID", "SG", "MY", "TH", "VN"]
+
+      - name: channel
+        description: Acquisition channel.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["organic", "paid", "referral", "direct", "affiliate"]
+
+      - name: row_count
+        description: Number of event rows in the segment.
+        tests:
+          - not_null
+
+      - name: distinct_order_count
+        description: Unique order count in the segment.
+        tests:
+          - not_null
+
+      - name: recognized_revenue_usd
+        description: Total recognized revenue in USD.
+        tests:
+          - not_null

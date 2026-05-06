@@ -1,0 +1,112 @@
+﻿####
+## Orders Data Quality Contract for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+dataset: orders
+description: Data quality and profiling contract for synthetic ecommerce orders.
+
+tables:
+  raw_orders: dq.raw_orders
+  stg_orders: dq.stg_orders
+  fct_orders_daily: dq.fct_orders_daily
+
+expected_segments:
+  countries: [ID, SG, MY, TH, VN]
+  channels: [organic, paid, referral, direct, affiliate]
+  statuses: [paid, cancelled, refunded, pending]
+
+profiling:
+  enabled: true
+  row_count_tables:
+    - dq.raw_orders
+    - dq.stg_orders
+    - dq.fct_orders_daily
+  null_rate_columns:
+    dq.stg_orders:
+      - order_id
+      - customer_id
+      - country
+      - channel
+      - status
+      - recognized_revenue_usd
+  distinct_count_columns:
+    dq.stg_orders:
+      - order_id
+      - customer_id
+      - country
+      - channel
+      - status
+  revenue_metric_table: dq.fct_orders_daily
+  segment_metric_table: dq.fct_orders_daily
+
+quality:
+  freshness:
+    table_name: dq.stg_orders
+    date_column: dt
+    max_lag_days: 0
+    severity: critical
+
+  row_count_positive:
+    - table_name: dq.raw_orders
+      min_rows: 1
+      severity: critical
+    - table_name: dq.stg_orders
+      min_rows: 1
+      severity: critical
+    - table_name: dq.fct_orders_daily
+      min_rows: 1
+      severity: critical
+
+  not_null:
+    table_name: dq.stg_orders
+    columns:
+      - order_id
+      - customer_id
+      - country
+      - channel
+      - status
+      - recognized_revenue_usd
+    severity: critical
+
+  accepted_values:
+    table_name: dq.stg_orders
+    columns:
+      country: [ID, SG, MY, TH, VN]
+      channel: [organic, paid, referral, direct, affiliate]
+      status: [paid, cancelled, refunded, pending]
+    severity: critical
+
+  segment_coverage:
+    table_name: dq.fct_orders_daily
+    min_coverage_ratio: 1.0
+    severity: warning
+
+  rowcount_anomaly:
+    table_name: dq.fct_orders_daily
+    lookback_days: 7
+    min_history_days: 3
+    lower_ratio: 0.65
+    upper_ratio: 1.45
+    severity: warning
+
+  duplicate_rate:
+    table_name: dq.fct_orders_daily
+    max_rate: 0.01
+    severity: critical
+
+  late_arriving_rate:
+    table_name: dq.fct_orders_daily
+    max_rate: 0.20
+    severity: warning
+
+  revenue_non_negative:
+    table_name: dq.fct_orders_daily
+    metric_column: recognized_revenue_usd
+    severity: critical
+
+alerts:
+  fail_statuses: [fail]
+  warn_statuses: [warn]
+  open_status: open
+  alert_type: dq_failure
