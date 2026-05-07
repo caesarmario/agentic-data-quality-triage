@@ -1,8 +1,9 @@
-﻿####
+####
 ## dbt Lineage Tool for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
@@ -14,6 +15,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 
+# --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Add repo root before importing project packages when this file is executed by path.
@@ -28,10 +30,12 @@ from pipelines.common.logging import logger
 from pipelines.seeding.upload_to_s3 import build_s3_client
 
 
+# --- Defining Constants
 TOOL_NAME                   = "dbt_lineage"
 DEFAULT_LOCAL_MANIFEST_PATH = PROJECT_ROOT / "warehouse" / "dbt" / "target" / "manifest.json"
 
 
+# --- Defining Functions
 def load_manifest_from_local(path: str | Path = DEFAULT_LOCAL_MANIFEST_PATH) -> dict[str, Any]:
     """
     Load a dbt manifest JSON file from the local workspace.
@@ -478,5 +482,6 @@ def main() -> None:
     print(json.dumps(lineage, indent=2, default=str))
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

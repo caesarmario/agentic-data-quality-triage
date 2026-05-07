@@ -1,8 +1,9 @@
-﻿####
+####
 ## dbt Lineage Tests for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from agent.tools.dbt_lineage import build_lineage_summary, normalize_relation_name, parse_s3_uri
 
 
+# --- Defining Functions
 @pytest.fixture
 def minimal_manifest() -> dict:
     """

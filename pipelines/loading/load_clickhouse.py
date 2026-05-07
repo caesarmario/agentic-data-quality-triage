@@ -3,24 +3,26 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
 import io
 import json
-import os
 import time
 from datetime import date, datetime, timezone
 from typing import Any
 
+from pipelines.common.clickhouse import build_clickhouse_client, drop_date_partition_if_exists
 from pipelines.common.logging import logger
+from pipelines.common.pipeline_runs import write_pipeline_run
 from pipelines.seeding.config import OrdersSeedConfig, load_orders_config
 from pipelines.seeding.helpers import iter_dates, parse_date
 from pipelines.seeding.upload_to_s3 import build_s3_client
 
 
+# --- Defining Constants
 RAW_ORDERS_TABLE = "dq.raw_orders"
-PIPELINE_RUNS_TABLE = "dq.pipeline_runs"
 
 
 RAW_ORDER_COLUMNS = [
@@ -47,71 +49,7 @@ RAW_ORDER_COLUMNS = [
 ]
 
 
-PIPELINE_RUN_COLUMNS = [
-    "job_name",
-    "dag_id",
-    "task_id",
-    "logical_date",
-    "partition_dt",
-    "status",
-    "started_at",
-    "ended_at",
-    "duration_ms",
-    "rows_read",
-    "rows_written",
-    "source_uri",
-    "target_table",
-    "error_message",
-    "metadata_json",
-]
-
-
-def build_clickhouse_client(
-    host: str | None = None,
-    port: int | None = None,
-    database: str | None = None,
-    username: str | None = None,
-    password: str | None = None,
-):
-    """
-    Build a ClickHouse HTTP client from explicit values or environment variables.
-
-    Args:
-        host: Optional ClickHouse host override.
-        port: Optional ClickHouse HTTP port override.
-        database: Optional database override.
-        username: Optional ClickHouse username override.
-        password: Optional ClickHouse password override.
-
-    Returns:
-        clickhouse-connect client instance.
-    """
-    resolved_host     = host or os.getenv("CLICKHOUSE_HOST", "localhost")
-    resolved_port     = int(port or os.getenv("CLICKHOUSE_HTTP_PORT", "8123"))
-    resolved_database = database or os.getenv("CLICKHOUSE_DB", "dq")
-    resolved_username = username or os.getenv("CLICKHOUSE_USER", "default")
-    resolved_password = password if password is not None else os.getenv("CLICKHOUSE_PASSWORD", "")
-
-    logger.info(
-        "Building ClickHouse client | host=%s port=%s database=%s user=%s",
-        resolved_host,
-        resolved_port,
-        resolved_database,
-        resolved_username,
-    )
-
-    # Import lazily so --help/static validation works before Docker dependencies are installed.
-    import clickhouse_connect
-
-    return clickhouse_connect.get_client(
-        host=resolved_host,
-        port=resolved_port,
-        database=resolved_database,
-        username=resolved_username,
-        password=resolved_password,
-    )
-
-
+# --- Defining Functions
 def source_uri_for_date(dt: date, config: OrdersSeedConfig) -> str:
     """
     Build the expected S3 URI for one orders landing partition.
@@ -124,49 +62,6 @@ def source_uri_for_date(dt: date, config: OrdersSeedConfig) -> str:
         S3 URI pointing to the partition Parquet file.
     """
     return f"s3://{config.output.bucket}/{config.output.object_key(dt)}"
-
-
-def split_table_name(table_name: str) -> tuple[str, str]:
-    """
-    Split a fully qualified ClickHouse table name into database and table.
-
-    Args:
-        table_name: Fully qualified table name in database.table format.
-
-    Returns:
-        Tuple of database name and table name.
-
-    Raises:
-        ValueError: If the table name is not fully qualified or contains unsafe identifiers.
-    """
-    parts = table_name.split(".")
-
-    if len(parts) != 2:
-        raise ValueError(f"ClickHouse table name must use database.table format: {table_name}")
-
-    database, table = parts
-
-    _validate_clickhouse_identifier(database)
-    _validate_clickhouse_identifier(table)
-
-    return database, table
-
-
-def _validate_clickhouse_identifier(identifier: str) -> None:
-    """
-    Validate a ClickHouse identifier used in bounded SQL string interpolation.
-
-    Args:
-        identifier: Database or table identifier.
-
-    Returns:
-        None.
-
-    Raises:
-        ValueError: If the identifier contains unsupported characters.
-    """
-    if not identifier.replace("_", "").isalnum():
-        raise ValueError(f"Unsafe ClickHouse identifier: {identifier}")
 
 
 def read_orders_parquet_from_s3(
@@ -238,6 +133,11 @@ def normalize_raw_orders_frame(frame: Any, dt: date) -> Any:
     normalized["order_ts"]     = pd.to_datetime(normalized["order_ts"], utc=True)
     normalized["ingestion_ts"] = pd.to_datetime(normalized["ingestion_ts"], utc=True)
 
+    if normalized.empty:
+        logger.info("Raw orders frame is empty; partition validation allowed | dt=%s", dt)
+
+        return normalized
+
     observed_dates = set(normalized["dt"].dropna().unique())
 
     if observed_dates != {dt}:
@@ -265,37 +165,7 @@ def drop_raw_orders_partition(client: Any, dt: date, table_name: str = RAW_ORDER
     Returns:
         None.
     """
-    partition_id = dt.isoformat()
-    database, table = split_table_name(table_name)
-
-    partition_count = client.query(
-        f"""
-        SELECT count()
-        FROM system.parts
-        WHERE database = '{database}'
-          AND table = '{table}'
-          AND partition = '{partition_id}'
-          AND active
-        """
-    ).result_rows[0][0]
-
-    if partition_count == 0:
-        logger.info("ClickHouse partition does not exist; drop skipped | table=%s partition=%s", table_name, partition_id)
-
-        return
-
-    logger.info(
-        "Dropping ClickHouse partition | table=%s partition=%s active_parts=%s",
-        table_name,
-        partition_id,
-        partition_count,
-    )
-
-    # Date partitions are addressed by their ISO date value in ClickHouse.
-    # partition_id is derived from a datetime.date object, so this string interpolation is bounded.
-    client.command(f"ALTER TABLE {table_name} DROP PARTITION '{partition_id}'")
-
-    logger.info("ClickHouse partition dropped | table=%s partition=%s", table_name, partition_id)
+    drop_date_partition_if_exists(client=client, table_name=table_name, partition_dt=dt)
 
 
 def insert_raw_orders_frame(client: Any, frame: Any, table_name: str = RAW_ORDERS_TABLE) -> int:
@@ -312,6 +182,11 @@ def insert_raw_orders_frame(client: Any, frame: Any, table_name: str = RAW_ORDER
     """
     rows = int(len(frame))
 
+    if rows == 0:
+        logger.info("Raw orders insert skipped for empty partition | table=%s", table_name)
+
+        return 0
+
     logger.info("Inserting raw orders into ClickHouse | table=%s rows=%d", table_name, rows)
 
     client.insert_df(
@@ -323,80 +198,6 @@ def insert_raw_orders_frame(client: Any, frame: Any, table_name: str = RAW_ORDER
     logger.info("Raw orders inserted into ClickHouse | table=%s rows=%d", table_name, rows)
 
     return rows
-
-
-def write_pipeline_run(
-    client: Any,
-    job_name: str,
-    partition_dt: date,
-    status: str,
-    started_at: datetime,
-    ended_at: datetime,
-    rows_read: int | None = None,
-    rows_written: int | None = None,
-    source_uri: str = "",
-    target_table: str = RAW_ORDERS_TABLE,
-    error_message: str = "",
-    metadata: dict[str, Any] | None = None,
-    dag_id: str = "",
-    task_id: str = "",
-) -> None:
-    """
-    Persist one pipeline run record to ClickHouse observability storage.
-
-    Args:
-        client: clickhouse-connect client instance.
-        job_name: Logical job name.
-        partition_dt: Business date processed by the job.
-        status: Run status such as success or failed.
-        started_at: UTC timestamp when the job started.
-        ended_at: UTC timestamp when the job ended.
-        rows_read: Optional number of rows read from source.
-        rows_written: Optional number of rows written to target.
-        source_uri: Source URI used by the job.
-        target_table: Target ClickHouse table name.
-        error_message: Optional failure message.
-        metadata: Optional structured metadata stored as JSON.
-        dag_id: Optional Airflow DAG id.
-        task_id: Optional Airflow task id.
-
-    Returns:
-        None.
-    """
-    duration_ms = int((ended_at - started_at).total_seconds() * 1000)
-
-    row = [
-        job_name,
-        dag_id,
-        task_id,
-        partition_dt,
-        partition_dt,
-        status,
-        started_at,
-        ended_at,
-        duration_ms,
-        rows_read,
-        rows_written,
-        source_uri,
-        target_table,
-        error_message,
-        json.dumps(metadata or {}, default=str),
-    ]
-
-    logger.info(
-        "Writing pipeline run | job=%s dt=%s status=%s rows_read=%s rows_written=%s",
-        job_name,
-        partition_dt,
-        status,
-        rows_read,
-        rows_written,
-    )
-
-    client.insert(
-        table=PIPELINE_RUNS_TABLE,
-        data=[row],
-        column_names=PIPELINE_RUN_COLUMNS,
-    )
 
 
 def load_orders_partition(
@@ -452,6 +253,7 @@ def load_orders_partition(
             rows_read=rows_read,
             rows_written=rows_written,
             source_uri=source_uri,
+            target_table=RAW_ORDERS_TABLE,
             metadata={"loader": "pipelines.loading.load_clickhouse"},
         )
 
@@ -483,6 +285,7 @@ def load_orders_partition(
                 rows_read=rows_read,
                 rows_written=rows_written,
                 source_uri=source_uri,
+                target_table=RAW_ORDERS_TABLE,
                 error_message=str(exc)[:1000],
                 metadata={"loader": "pipelines.loading.load_clickhouse"},
             )
@@ -627,5 +430,6 @@ def main() -> None:
     print(json.dumps(summary, indent=2, default=str))
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

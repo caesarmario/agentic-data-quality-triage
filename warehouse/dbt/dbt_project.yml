@@ -3,6 +3,8 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Defining Configuration
+
 name: agentic_data_quality_triage
 version: "1.0.0"
 config-version: 2
@@ -35,7 +37,8 @@ vars:
 models:
   agentic_data_quality_triage:
     staging:
-      +materialized: table
+      +materialized: incremental
+      +incremental_strategy: insert_overwrite
       +engine: MergeTree()
       +partition_by: dt
       +order_by:
@@ -45,11 +48,11 @@ models:
         - order_id
 
     marts:
-      +materialized: table
+      +materialized: incremental
+      +incremental_strategy: insert_overwrite
       +engine: MergeTree()
       +partition_by: dt
       +order_by:
         - dt
         - country
         - channel
-

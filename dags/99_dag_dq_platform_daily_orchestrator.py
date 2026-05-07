@@ -1,0 +1,181 @@
+####
+## Airflow Full Daily Orchestrator DAG for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+# --- Importing Libraries
+from __future__ import annotations
+
+import logging
+
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.sdk import DAG, Param
+
+from dq_platform.helpers import (
+    DEFAULT_START_DATE,
+    common_dag_params,
+    default_dag_args,
+    finish_task,
+    single_date_conf,
+    start_task,
+)
+
+
+# --- Getting Logger
+logger = logging.getLogger(__name__)
+
+
+# --- Defining DAG ID And Documentation
+DAG_ID             = "99_dag_dq_platform_daily_orchestrator"
+LANDING_DAG_ID     = "00_dag_dq_orders_landing_orchestrator"
+DBT_DAG_ID         = "01_dag_dq_orders_dbt_transform"
+QUALITY_DAG_ID     = "02_dag_dq_orders_quality_alerts"
+TRIAGE_DAG_ID      = "03_dag_dq_orders_triage_agent"
+
+DOC_MD = """
+# 99 - Full Daily DQ Platform Orchestrator
+
+Run the GitHub/LinkedIn demo path end-to-end:
+
+1. Generate orders data and land Parquet in SeaweedFS S3.
+2. Load the S3 landing partition into ClickHouse raw.
+3. Run dbt staging/mart transformations and tests.
+4. Upload dbt lineage artifacts to S3.
+5. Run profiling, deterministic DQ checks, and alert generation.
+6. Optionally run LangGraph agentic triage for open alerts.
+
+Manual `dag_run.conf` examples:
+
+```json
+{"dt": "2026-05-04", "incident_scenario": "missing_latest_day", "run_triage": true, "max_alerts": 3}
+```
+
+```json
+{"start_date": "2026-05-01", "end_date": "2026-05-04", "run_mode": "backfill", "run_triage": false}
+```
+"""
+
+
+# --- Defining Functions
+def daily_orchestrator_params() -> dict[str, Param]:
+    """
+    Build manual-run parameters for the full daily orchestrator.
+
+    Returns:
+        Dictionary of Airflow Param objects exposed in the UI.
+    """
+    params = common_dag_params()
+    params.update(
+        {
+            "max_alerts": Param(
+                5,
+                type="integer",
+                minimum=1,
+                maximum=20,
+                description="Maximum alerts to triage when run_triage is enabled.",
+            ),
+        }
+    )
+
+    return params
+
+
+def daily_child_conf() -> dict[str, str]:
+    """
+    Build conf payload forwarded to all child DAGs.
+
+    Returns:
+        Conf dictionary including date, scenario, run mode, triage flag, and max alert count.
+    """
+    conf = single_date_conf()
+    conf.update(
+        {
+            "max_alerts": "{{ dag_run.conf.get(\"max_alerts\", 5) }}",
+        }
+    )
+
+    return conf
+
+
+# --- Defining DAG Structure
+with DAG(
+    dag_id=DAG_ID,
+    description="Run the full local orders DQ platform path from landing through optional agent triage.",
+    start_date=DEFAULT_START_DATE,
+    schedule="@daily",
+    catchup=False,
+    max_active_runs=1,
+    default_args=default_dag_args(),
+    params=daily_orchestrator_params(),
+    tags=["dq-platform", "orders", "daily", "orchestrator", "demo"],
+    doc_md=DOC_MD,
+) as dag:
+    """
+    Airflow DAG definition for the full daily demo orchestration path.
+
+    Returns:
+        DAG object registered by Airflow.
+    """
+    t00_start = start_task()
+
+    t10_trigger_landing = TriggerDagRunOperator(
+        task_id="t10_trigger_landing",
+        trigger_dag_id=LANDING_DAG_ID,
+        trigger_run_id="daily_landing__{{ ts_nodash }}",
+        conf=daily_child_conf(),
+        wait_for_completion=True,
+        poke_interval=15,
+        allowed_states=["success"],
+        failed_states=["failed"],
+        reset_dag_run=False,
+    )
+
+    t20_trigger_dbt_transform = TriggerDagRunOperator(
+        task_id="t20_trigger_dbt_transform",
+        trigger_dag_id=DBT_DAG_ID,
+        trigger_run_id="daily_dbt__{{ ts_nodash }}",
+        conf=daily_child_conf(),
+        wait_for_completion=True,
+        poke_interval=15,
+        allowed_states=["success"],
+        failed_states=["failed"],
+        reset_dag_run=False,
+    )
+
+    t30_trigger_quality_alerts = TriggerDagRunOperator(
+        task_id="t30_trigger_quality_alerts",
+        trigger_dag_id=QUALITY_DAG_ID,
+        trigger_run_id="daily_quality__{{ ts_nodash }}",
+        conf=daily_child_conf(),
+        wait_for_completion=True,
+        poke_interval=15,
+        allowed_states=["success"],
+        failed_states=["failed"],
+        reset_dag_run=False,
+    )
+
+    t40_trigger_agentic_triage = TriggerDagRunOperator(
+        task_id="t40_trigger_agentic_triage",
+        trigger_dag_id=TRIAGE_DAG_ID,
+        trigger_run_id="daily_triage__{{ ts_nodash }}",
+        conf=daily_child_conf(),
+        wait_for_completion=True,
+        poke_interval=15,
+        allowed_states=["success"],
+        failed_states=["failed"],
+        reset_dag_run=False,
+    )
+
+    t90_finish = finish_task()
+
+    (
+        t00_start
+        >> t10_trigger_landing
+        >> t20_trigger_dbt_transform
+        >> t30_trigger_quality_alerts
+        >> t40_trigger_agentic_triage
+        >> t90_finish
+    )
+
+
+logger.info("Loaded DAG | dag_id=%s", DAG_ID)

@@ -3,6 +3,7 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
@@ -22,8 +23,10 @@ from pipelines.seeding.helpers import (
     parse_date,
     stable_day_index,
 )
+from pipelines.seeding.incidents import apply_incidents, resolve_incident_names
 
 
+# --- Defining Constants
 ORDER_COLUMNS = [
     "dt",
     "order_id",
@@ -48,6 +51,7 @@ ORDER_COLUMNS = [
 ]
 
 
+# --- Defining Functions
 def generate_orders_for_date(
     dt: date,
     config: OrdersSeedConfig,
@@ -59,7 +63,8 @@ def generate_orders_for_date(
     Args:
         dt: Business date to generate.
         config: Validated orders seeding config.
-        incident_scenario: Scenario label stored with each row for later evaluation.
+        incident_scenario: Baseline or comma-separated incident scenario label stored
+            with each row for later evaluation.
 
     Returns:
         DataFrame with event-level order rows following the raw_orders contract.
@@ -109,14 +114,41 @@ def generate_orders_for_date(
                 )
                 sequence += 1
 
+    incident_names     = resolve_incident_names(incident_scenario)
+    incident_results   = []
+    incident_row_count = len(rows)
+
+    if incident_names:
+        incident_seed = config.seed_for_date(dt, namespace=f"orders.incidents.{incident_scenario}")
+        incident_rng  = random.Random(incident_seed)
+
+        logger.info(
+            "Injecting order incidents | dt=%s scenario=%s seed=%s incidents=%s input_rows=%d",
+            dt,
+            incident_scenario,
+            incident_seed,
+            incident_names,
+            incident_row_count,
+        )
+
+        # Incident handlers mutate rows in place so the landing Parquet contains real anomaly evidence.
+        incident_results = apply_incidents(
+            rows=rows,
+            incident_date=dt,
+            incidents=incident_names,
+            rng=incident_rng,
+        )
+
     frame = pd.DataFrame.from_records(rows, columns=ORDER_COLUMNS)
+    frame.attrs["incident_results"] = incident_results
 
     logger.info(
-        "Orders partition generated | dt=%s rows=%d countries=%d channels=%d",
+        "Orders partition generated | dt=%s rows=%d countries=%d channels=%d incidents=%s",
         dt,
         len(frame),
         len(config.country_codes),
         len(config.channel_names),
+        incident_results,
     )
 
     return frame
@@ -174,7 +206,8 @@ def generate_and_write_orders(
         dt: Business date to generate.
         config: Validated orders seeding config.
         output_path: Optional explicit local Parquet file path.
-        incident_scenario: Scenario label stored with each row for later evaluation.
+        incident_scenario: Baseline or incident scenario label stored with each row
+            for later evaluation.
 
     Returns:
         Summary dictionary with partition metadata and local file path.
@@ -187,6 +220,7 @@ def generate_and_write_orders(
         "rows": int(len(frame)),
         "local_path": str(parquet_path),
         "incident_scenario": incident_scenario,
+        "incident_results": frame.attrs.get("incident_results", []),
         "s3_bucket": config.output.bucket,
         "s3_key": config.output.object_key(dt),
     }
@@ -235,5 +269,6 @@ def main() -> None:
     print(json.dumps(summary, indent=2, default=str))
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

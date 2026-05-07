@@ -3,6 +3,7 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import os
@@ -13,6 +14,7 @@ from discord import app_commands
 from pipelines.common.logging import logger
 
 
+# --- Defining Constants
 TOKEN     = os.environ["DISCORD_BOT_TOKEN"]
 GUILD_ID  = int(os.getenv("DISCORD_GUILD_ID", "0") or "0")
 ALERTS_CH = int(os.environ["DISCORD_ALERTS_CHANNEL_ID"])
@@ -23,6 +25,7 @@ client  = discord.Client(intents=intents)
 tree    = app_commands.CommandTree(client)
 
 
+# --- Defining Functions
 async def send_text(channel_id: int, content: str) -> None:
     """
     Send a Discord message to a configured channel.

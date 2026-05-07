@@ -1,0 +1,33 @@
+####
+## Baseline Incident Scenario for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+# --- Defining Scenario Metadata
+scenario_id: baseline
+dataset: orders
+enabled: true
+incident_scenario: baseline
+description: Clean synthetic orders partition used as the control scenario for demo and regression testing.
+
+# --- Defining Ground Truth Labels
+ground_truth:
+  root_cause_category: no_incident
+  expected_alert: false
+  expected_dq_signals: []
+  expected_agent_summary: No material data quality incident should be detected for this partition.
+
+# --- Defining Expected Pipeline Behavior
+expected_pipeline_behavior:
+  seed_to_s3: success
+  load_to_clickhouse: success
+  dbt_transform: success
+  dq_checks: pass_or_skip_only
+  triage_required: false
+
+# --- Defining Demo Execution Defaults
+demo:
+  airflow_conf:
+    dt: "2026-05-04"
+    incident_scenario: baseline
+  make_command: make seed DT=2026-05-04 INCIDENT_SCENARIO=baseline

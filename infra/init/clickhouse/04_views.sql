@@ -3,6 +3,8 @@
 -- Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 -- ##############################################
 
+-- --- Defining SQL Objects
+
 CREATE VIEW IF NOT EXISTS dq.open_alerts AS
 SELECT *
 FROM dq.alerts

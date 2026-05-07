@@ -3,6 +3,8 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Defining Configuration
+
 version: 2
 
 models:

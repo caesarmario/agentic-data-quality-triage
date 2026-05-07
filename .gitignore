@@ -3,28 +3,28 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
-# Todo List
+# --- Ignoring Todo Files
 todo/*
 *.todo
 
-# Credentials
+# --- Ignoring Local Credentials
 infra/airflow/auth/*
 infra/.env
 
-# Generated local data
+# --- Ignoring Generated Local Data
 data/
 
-# dbt artifacts
+# --- Ignoring dbt Artifacts
 warehouse/dbt/target/
 warehouse/dbt/dbt_packages/
 
-# Byte-compiled / optimized / DLL files
+# --- Ignoring Python Cache Files
 **/__pycache__/
 **/*.py[cod]
 *$py.class
 .vscode/
 
-# Logs
+# --- Ignoring Logs
 *.log
 *.py.log
 logs/

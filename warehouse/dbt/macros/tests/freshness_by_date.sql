@@ -3,6 +3,8 @@
 -- Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 -- ##############################################
 
+-- --- Defining SQL Objects
+
 {% test freshness_by_date(model, date_column, max_days_old=7) %}
 
 with latest_partition as (

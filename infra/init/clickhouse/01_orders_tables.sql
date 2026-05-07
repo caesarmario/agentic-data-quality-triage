@@ -3,6 +3,9 @@
 -- Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 -- ##############################################
 
+-- --- Defining SQL Objects
+
+-- --- Creating dq.raw_orders Table
 CREATE TABLE IF NOT EXISTS dq.raw_orders
 (
     dt                         Date,
@@ -34,6 +37,7 @@ PARTITION BY dt
 ORDER BY (dt, country, channel, order_id, order_ts)
 SETTINGS index_granularity = 8192;
 
+-- --- Creating dq.stg_orders Table
 CREATE TABLE IF NOT EXISTS dq.stg_orders
 (
     dt                         Date,
@@ -63,6 +67,7 @@ ENGINE = MergeTree
 PARTITION BY dt
 ORDER BY (dt, country, channel, order_id);
 
+-- --- Creating dq.fct_orders_daily Table
 CREATE TABLE IF NOT EXISTS dq.fct_orders_daily
 (
     dt                         Date,

@@ -3,6 +3,7 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
@@ -17,9 +18,11 @@ from pipelines.seeding.config import OrdersSeedConfig, load_orders_config
 from pipelines.seeding.helpers import parse_date
 
 
+# --- Defining Constants
 DEFAULT_S3_ENDPOINT_URL = "http://localhost:8333"
 
 
+# --- Defining Functions
 def resolve_s3_endpoint(endpoint_url: str | None = None) -> str:
     """
     Resolve the S3 endpoint URL for local or Docker execution.
@@ -197,5 +200,6 @@ def main() -> None:
     print(json.dumps(summary, indent=2, default=str))
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

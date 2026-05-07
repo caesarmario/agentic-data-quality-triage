@@ -3,6 +3,7 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Defining Line Ending Rules
 *.sh        text eol=lf
 Makefile    text eol=lf
 *.sql       text eol=lf

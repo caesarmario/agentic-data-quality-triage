@@ -1,8 +1,9 @@
-﻿####
+####
 ## Pipeline Runs Tool for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
@@ -15,6 +16,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 
+# --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Add repo root before importing project packages when this file is executed by path.
@@ -30,12 +32,14 @@ from pipelines.common.logging import logger
 from pipelines.seeding.helpers import parse_date
 
 
+# --- Defining Constants
 TOOL_NAME             = "pipeline_runs"
 PIPELINE_RUNS_TABLE   = "dq.pipeline_runs"
 DEFAULT_LOOKBACK_DAYS = 7
 DEFAULT_LIMIT         = 100
 
 
+# --- Defining Functions
 def build_pipeline_runs_sql(
     dt: date,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
@@ -311,5 +315,6 @@ def main() -> None:
     print(json.dumps(result, indent=2, default=str))
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

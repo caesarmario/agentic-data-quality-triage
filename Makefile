@@ -2,6 +2,7 @@
 ## Makefile for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
+# --- Setting Make Runtime
 SHELL := /bin/sh
 
 MAKEFLAGS += --no-print-directory
@@ -11,9 +12,7 @@ COMPOSE_FILE := infra/docker-compose.yml
 ENV_FILE     := infra/.env
 DC           := docker compose --env-file $(ENV_FILE) -f $(COMPOSE_FILE)
 
-# -----------------------------
-# Services (keep in sync with docker-compose.yml)
-# -----------------------------
+# --- Services (keep in sync with docker-compose.yml)
 CH_SERVICE        := clickhouse
 CH_UI_SERVICE     := ch-ui
 
@@ -38,22 +37,21 @@ RUNNER_SERVICE    := dq-runner
 # Long-running services only (exclude one-shot init jobs)
 LONGRUN_SERVICES  := $(CH_SERVICE) $(CH_UI_SERVICE) $(SEAWEED_SERVICES) $(AIRFLOW_SERVICES) $(STREAMLIT_SERVICE) $(RUNNER_SERVICE)
 
-# -----------------------------
-# Optional params
-# -----------------------------
+# --- Optional params
 DT ?= $(shell date +%F 2>/dev/null || echo 2026-02-26)
 START ?= $(DT)
 END ?= $(DT)
+INCIDENT_SCENARIO ?= baseline
 ALERT_ID ?=
 ALERT_KEY ?= orders|dq_failure|2026-05-04|dq.raw_orders|row_count_positive|table
 TABLE ?= dq.stg_orders
 SQL ?= SELECT alert_key, severity FROM dq.alerts WHERE dt = toDate('2026-05-04') LIMIT 5
+TRIAGE_LIMIT ?= 5
+TRIAGE_STATUS ?= open
 TRIAGE_ALERT_ARG := $(if $(strip $(ALERT_ID)),--alert-id "$(ALERT_ID)",--alert-key "$(ALERT_KEY)")
 TRIAGE_ALERT_LOG := $(if $(strip $(ALERT_ID)),alert_id=$(ALERT_ID),alert_key=$(ALERT_KEY))
 
-# -----------------------------
-# Help
-# -----------------------------
+# --- Help
 .PHONY: help
 help:
 	echo ""
@@ -78,6 +76,8 @@ help:
 	echo "One-shot init jobs:"
 	echo "  make run-airflow-init        Run airflow-init once (db migrate + auth file)"
 	echo "  make run-s3-init             Run s3-init once (create buckets)"
+	echo "  make airflow-dags            List parsed Airflow DAGs"
+	echo "  make airflow-import-errors   List Airflow DAG import errors"
 	echo ""
 	echo "Force recreate (per service/group):"
 	echo "  make fr-all                 Force recreate all long-running services"
@@ -97,14 +97,16 @@ help:
 	echo "  make test                   Run pytest inside runner"
 	echo ""
 	echo "Pipelines:"
-	echo "  make seed DT=YYYY-MM-DD     Run daily seeding pipeline"
-	echo "  make seed-local DT=YYYY-MM-DD Generate local Parquet without S3 upload"
-	echo "  make backfill START=... END=...  Backfill date range"
+	echo "  make seed DT=YYYY-MM-DD INCIDENT_SCENARIO=baseline Run daily seeding pipeline"
+	echo "  make seed-local DT=YYYY-MM-DD INCIDENT_SCENARIO=baseline Generate local Parquet without S3 upload"
+	echo "  make backfill START=... END=... INCIDENT_SCENARIO=baseline Backfill date range"
 	echo "  make load DT=YYYY-MM-DD     Load one S3 partition to ClickHouse raw_orders"
 	echo "  make load-backfill START=... END=... Load S3 partitions to ClickHouse raw_orders"
 	echo "  make dbt-debug              dbt debug"
 	echo "  make dbt-run                dbt run"
 	echo "  make dbt-test               dbt test"
+	echo "  make dbt-flow DT=YYYY-MM-DD Run dbt debug/run/test and upload dbt artifacts"
+	echo "  make dbt-artifacts DT=YYYY-MM-DD Upload dbt artifacts to dq-artifacts"
 	echo "  make profile DT=YYYY-MM-DD  Write profile metrics to ClickHouse"
 	echo "  make dq-checks DT=YYYY-MM-DD Run deterministic DQ checks"
 	echo "  make alerts DT=YYYY-MM-DD   Generate alerts from DQ failures/warnings"
@@ -116,13 +118,12 @@ help:
 	echo "  make agent-dbt-lineage TABLE=dq.stg_orders Fetch dbt lineage evidence"
 	echo "  make agent-s3-smoke        Write a small artifact to dq-artifacts"
 	echo "  make triage ALERT_KEY=\"...\" Run LangGraph triage and store Markdown/JSON report artifacts"
+	echo "  make triage-alerts DT=YYYY-MM-DD Run agent triage for open alerts on a date"
 	echo ""
 	echo "  make urls                   Print local URLs"
 	echo ""
 
-# -----------------------------
-# Core compose commands
-# -----------------------------
+# --- Core compose commands
 .PHONY: up
 up:
 	$(DC) up -d --remove-orphans
@@ -159,9 +160,7 @@ build-runner:
 compose-check:
 	$(DC) config --quiet
 
-# -----------------------------
-# Logs
-# -----------------------------
+# --- Logs
 .PHONY: logs
 logs:
 	$(DC) logs -f --tail=200
@@ -182,9 +181,7 @@ logs-s3:
 logs-streamlit:
 	$(DC) logs -f --tail=200 $(STREAMLIT_SERVICE)
 
-# -----------------------------
-# One-shot init jobs
-# -----------------------------
+# --- One-shot init jobs
 .PHONY: run-airflow-init
 run-airflow-init:
 	$(DC) up -d --force-recreate $(AIRFLOW_INIT)
@@ -193,9 +190,15 @@ run-airflow-init:
 run-s3-init:
 	$(DC) up -d --force-recreate $(S3_INIT_SERVICE)
 
-# -----------------------------
-# Force recreate helpers
-# -----------------------------
+.PHONY: airflow-dags
+airflow-dags:
+	$(DC) exec -T $(AIRFLOW_WEB) airflow dags list
+
+.PHONY: airflow-import-errors
+airflow-import-errors:
+	$(DC) exec -T $(AIRFLOW_WEB) airflow dags list-import-errors
+
+# --- Force recreate helpers
 .PHONY: fr-all
 fr-all:
 	$(DC) up -d --remove-orphans --force-recreate $(LONGRUN_SERVICES)
@@ -225,9 +228,7 @@ fr-seaweed:
 fr-airflow:
 	$(DC) up -d --force-recreate $(AIRFLOW_SERVICES)
 
-# -----------------------------
-# Bootstrap helpers
-# -----------------------------
+# --- Bootstrap helpers
 .PHONY: ch-bootstrap
 ch-bootstrap:
 	echo "Applying modular ClickHouse bootstrap SQL..."
@@ -240,9 +241,7 @@ ch-bootstrap:
 ch-client:
 	docker exec -it dq_clickhouse clickhouse-client
 
-# -----------------------------
-# Python utilities (in dq-runner)
-# -----------------------------
+# --- Python utilities (in dq-runner)
 .PHONY: pip-freeze
 pip-freeze:
 	$(DC) exec -T $(RUNNER_SERVICE) python -m pip freeze
@@ -251,37 +250,33 @@ pip-freeze:
 test:
 	$(DC) exec -T $(RUNNER_SERVICE) pytest -q
 
-# -----------------------------
-# Pipelines
-# -----------------------------
+# --- Pipelines
 .PHONY: seed
 seed:
-	echo "Seeding for dt=$(DT) ..."
-	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/seeding/run_daily.py --dt $(DT)
+	echo "Seeding for dt=$(DT) incident_scenario=$(INCIDENT_SCENARIO) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.seeding.run_daily --dt $(DT) --incident-scenario $(INCIDENT_SCENARIO)
 
 .PHONY: seed-local
 seed-local:
-	echo "Generating local Parquet only for dt=$(DT) ..."
-	python -m pipelines.seeding.run_daily --dt $(DT) --no-upload
+	echo "Generating local Parquet only for dt=$(DT) incident_scenario=$(INCIDENT_SCENARIO) ..."
+	python -m pipelines.seeding.run_daily --dt $(DT) --incident-scenario $(INCIDENT_SCENARIO) --no-upload --skip-pipeline-log
 
 .PHONY: backfill
 backfill:
-	echo "Backfill from $(START) to $(END) ..."
-	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/seeding/run_daily.py --start $(START) --end $(END)
+	echo "Backfill from $(START) to $(END) incident_scenario=$(INCIDENT_SCENARIO) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.seeding.run_daily --start $(START) --end $(END) --incident-scenario $(INCIDENT_SCENARIO)
 
 .PHONY: load
 load:
 	echo "Loading ClickHouse raw_orders for dt=$(DT) ..."
-	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/loading/load_clickhouse.py --dt $(DT)
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.loading.load_clickhouse --dt $(DT)
 
 .PHONY: load-backfill
 load-backfill:
 	echo "Loading ClickHouse raw_orders from $(START) to $(END) ..."
-	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/loading/load_clickhouse.py --start $(START) --end $(END)
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.loading.load_clickhouse --start $(START) --end $(END)
 
-# -----------------------------
-# dbt (expects dbt project under warehouse/dbt)
-# -----------------------------
+# --- dbt (expects dbt project under warehouse/dbt)
 DBT_PROJECT_DIR := warehouse/dbt
 DBT_PROFILES_DIR := warehouse/dbt
 
@@ -297,45 +292,60 @@ dbt-run:
 dbt-test:
 	$(DC) exec -T $(RUNNER_SERVICE) dbt test --project-dir $(DBT_PROJECT_DIR) --profiles-dir $(DBT_PROFILES_DIR)
 
-# -----------------------------
-# DQ and profiling
-# -----------------------------
+.PHONY: dbt-debug-dt
+dbt-debug-dt:
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.dbt.run_dbt --dt $(DT) --step debug
+
+.PHONY: dbt-run-dt
+dbt-run-dt:
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.dbt.run_dbt --dt $(DT) --step run
+
+.PHONY: dbt-test-dt
+dbt-test-dt:
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.dbt.run_dbt --dt $(DT) --step test
+
+.PHONY: dbt-artifacts
+dbt-artifacts:
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.dbt.run_dbt --dt $(DT) --step upload-artifacts
+
+.PHONY: dbt-flow
+dbt-flow: dbt-debug-dt dbt-run-dt dbt-test-dt dbt-artifacts
+
+# --- DQ and profiling
 .PHONY: profile
 profile:
 	echo "Profiling orders tables for dt=$(DT) ..."
-	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/profiling/profile_orders.py --dt $(DT)
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.profiling.profile_orders --dt $(DT)
 
 .PHONY: profile-backfill
 profile-backfill:
 	echo "Profiling orders tables from $(START) to $(END) ..."
-	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/profiling/profile_orders.py --start $(START) --end $(END)
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.profiling.profile_orders --start $(START) --end $(END)
 
 .PHONY: dq-checks
 dq-checks:
 	echo "Running DQ checks for dt=$(DT) ..."
-	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/dq/run_checks.py --dt $(DT)
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.dq.run_checks --dt $(DT)
 
 .PHONY: dq-checks-backfill
 dq-checks-backfill:
 	echo "Running DQ checks from $(START) to $(END) ..."
-	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/dq/run_checks.py --start $(START) --end $(END)
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.dq.run_checks --start $(START) --end $(END)
 
 .PHONY: alerts
 alerts:
 	echo "Generating alerts for dt=$(DT) ..."
-	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/dq/generate_alerts.py --dt $(DT)
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.dq.generate_alerts --dt $(DT)
 
 .PHONY: alerts-backfill
 alerts-backfill:
 	echo "Generating alerts from $(START) to $(END) ..."
-	$(DC) exec -T $(RUNNER_SERVICE) python pipelines/dq/generate_alerts.py --start $(START) --end $(END)
+	$(DC) exec -T $(RUNNER_SERVICE) python -m pipelines.dq.generate_alerts --start $(START) --end $(END)
 
 .PHONY: dq-flow
 dq-flow: profile dq-checks alerts
 
-# -----------------------------
-# Agent
-# -----------------------------
+# --- Agent
 .PHONY: agent-alerts
 agent-alerts:
 	echo "Listing open alerts for dt=$(DT) ..."
@@ -371,9 +381,12 @@ triage:
 	echo "Running triage for $(TRIAGE_ALERT_LOG) ..."
 	$(DC) exec -T $(RUNNER_SERVICE) python scripts/run_triage_once.py $(TRIAGE_ALERT_ARG)
 
-# -----------------------------
-# Convenience
-# -----------------------------
+.PHONY: triage-alerts
+triage-alerts:
+	echo "Running batch triage for dt=$(DT) status=$(TRIAGE_STATUS) limit=$(TRIAGE_LIMIT) ..."
+	$(DC) exec -T $(RUNNER_SERVICE) python scripts/run_triage_alerts.py --dt $(DT) --status $(TRIAGE_STATUS) --limit $(TRIAGE_LIMIT)
+
+# --- Convenience
 .PHONY: urls
 urls:
 	echo "Airflow UI:      http://localhost:8080"

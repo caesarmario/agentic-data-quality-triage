@@ -1,21 +1,27 @@
-﻿####
+####
 ## Orders Data Quality Contract for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Defining Configuration
+
+# --- Defining Contract Metadata
 dataset: orders
 description: Data quality and profiling contract for synthetic ecommerce orders.
 
+# --- Defining Table Targets
 tables:
   raw_orders: dq.raw_orders
   stg_orders: dq.stg_orders
   fct_orders_daily: dq.fct_orders_daily
 
+# --- Defining Expected Domain Segments
 expected_segments:
   countries: [ID, SG, MY, TH, VN]
   channels: [organic, paid, referral, direct, affiliate]
   statuses: [paid, cancelled, refunded, pending]
 
+# --- Defining Profiling Rules
 profiling:
   enabled: true
   row_count_tables:
@@ -40,6 +46,7 @@ profiling:
   revenue_metric_table: dq.fct_orders_daily
   segment_metric_table: dq.fct_orders_daily
 
+# --- Defining Quality Rules
 quality:
   freshness:
     table_name: dq.stg_orders
@@ -105,6 +112,7 @@ quality:
     metric_column: recognized_revenue_usd
     severity: critical
 
+# --- Defining Alert Rules
 alerts:
   fail_statuses: [fail]
   warn_statuses: [warn]

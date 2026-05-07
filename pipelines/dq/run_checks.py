@@ -1,8 +1,9 @@
-﻿####
+####
 ## Orders Data Quality Check Runner for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
@@ -16,6 +17,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 
+# --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Add repo root before importing project packages when this file is executed by path.
@@ -35,6 +37,7 @@ from pipelines.dq.config import OrdersDqContract, load_orders_dq_contract
 from pipelines.seeding.helpers import iter_dates, parse_date
 
 
+# --- Defining Constants
 DQ_RESULTS_TABLE = "dq.dq_check_results"
 
 DQ_RESULT_COLUMNS = [
@@ -54,6 +57,7 @@ DQ_RESULT_COLUMNS = [
 ]
 
 
+# --- Defining Classes
 @dataclass(frozen=True)
 class DqCheckResult:
     """
@@ -113,6 +117,7 @@ class DqCheckResult:
         ]
 
 
+# --- Defining Functions
 def failure_status(severity: str) -> str:
     """
     Convert business severity into a DQ failure status.
@@ -891,5 +896,6 @@ def main() -> None:
     print(json.dumps(summary, indent=2, default=str))
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

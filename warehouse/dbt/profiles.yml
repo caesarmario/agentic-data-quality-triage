@@ -3,6 +3,8 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Defining Configuration
+
 agentic_dq_clickhouse:
   target: local
   outputs:

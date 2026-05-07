@@ -3,6 +3,7 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import streamlit as st
@@ -10,6 +11,7 @@ import streamlit as st
 from pipelines.common.logging import logger
 
 
+# --- Defining Functions
 def render_header() -> None:
     """
     Render the Streamlit page header.
@@ -37,5 +39,6 @@ def main() -> None:
     st.info("Streamlit is running. Alert browsing and triage actions will be added after the core pipeline is ready.")
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

@@ -1,8 +1,9 @@
-﻿####
+####
 ## Orders Data Profiler for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
@@ -16,6 +17,7 @@ from typing import Any
 from uuid import uuid4
 
 
+# --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Add repo root before importing project packages when this file is executed by path.
@@ -35,6 +37,7 @@ from pipelines.dq.config import OrdersDqContract, load_orders_dq_contract
 from pipelines.seeding.helpers import iter_dates, parse_date
 
 
+# --- Defining Constants
 PROFILE_RESULTS_TABLE = "dq.data_profile_results"
 
 PROFILE_RESULT_COLUMNS = [
@@ -50,6 +53,7 @@ PROFILE_RESULT_COLUMNS = [
 ]
 
 
+# --- Defining Classes
 @dataclass(frozen=True)
 class ProfileMetric:
     """
@@ -97,6 +101,7 @@ class ProfileMetric:
         ]
 
 
+# --- Defining Functions
 def build_metric(
     profile_run_id: str,
     run_at: datetime,
@@ -685,5 +690,6 @@ def main() -> None:
     print(json.dumps(summary, indent=2, default=str))
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

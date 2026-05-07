@@ -3,10 +3,14 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Defining Configuration
+
+# --- Defining Dataset Metadata
 dataset: orders
 description: Synthetic ecommerce order events used for local DQ triage scenarios.
 global_seed: 42
 
+# --- Defining Generation Behavior
 generation:
   timezone: UTC
   default_days: 60
@@ -19,6 +23,7 @@ generation:
   fx_noise_range: [0.995, 1.005]
   ingestion_delay_minutes: [1, 180]
 
+# --- Defining Seasonality Profile
 seasonality:
   monday: 1.00
   tuesday: 1.00
@@ -28,10 +33,12 @@ seasonality:
   saturday: 0.90
   sunday: 0.90
 
+# --- Defining Trend Profile
 trend:
   enabled: true
   total_growth_ratio: 0.08
 
+# --- Defining Source Mix And Noise
 order_count_noise_range: [0.90, 1.12]
 
 source_system_weights:
@@ -39,6 +46,7 @@ source_system_weights:
   mobile_checkout: 0.18
   partner_portal: 0.10
 
+# --- Defining Country Profiles
 countries:
   ID:
     base_orders: 320
@@ -66,6 +74,7 @@ countries:
     local_aov: 230000
     fx_to_usd: 0.000039215686
 
+# --- Defining Channel Profiles
 channels:
   organic:
     order_multiplier: 1.10
@@ -113,6 +122,7 @@ channels:
       refunded: 0.07
       pending: 0.05
 
+# --- Defining Landing Output
 output:
   local_dir: data/landing
   bucket: dq-landing

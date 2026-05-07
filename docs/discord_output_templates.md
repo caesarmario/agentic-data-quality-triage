@@ -9,6 +9,7 @@
 
 This document defines readable Discord message templates for the optional DQ triage bot. The goal is to keep bot responses easy to scan for business users, data engineers, and reviewers watching the demo.
 
+<!-- --- Defining Formatting Principles -->
 ## Formatting Principles
 
 - Use short headings with Discord Markdown: `#`, `##`, and `###`.
@@ -20,6 +21,7 @@ This document defines readable Discord message templates for the optional DQ tri
 - End every bot output with `### ----------------------------------------` so adjacent Discord messages are easier to separate visually.
 - Keep approval-gated actions explicit and never hide their side effects.
 
+<!-- --- Defining Emoji Map -->
 ## Emoji Map
 
 - Critical alert: `🚨`
@@ -34,6 +36,7 @@ This document defines readable Discord message templates for the optional DQ tri
 - Backfill: `🔁`
 - Daily summary: `📊`
 
+<!-- --- Defining Alert Summary Template -->
 ## Alert Summary Template
 
 ```text
@@ -67,6 +70,7 @@ Run triage to confirm whether this is a missing landing file, failed load, or up
 ### ----------------------------------------
 ```
 
+<!-- --- Defining Triage Result Template -->
 ## Triage Result Template
 
 ```text
@@ -102,6 +106,7 @@ s3://dq-artifacts/agent-reports/...
 ### ----------------------------------------
 ```
 
+<!-- --- Defining Daily Summary Template -->
 ## Daily Summary Template
 
 ```text
@@ -130,6 +135,7 @@ s3://dq-artifacts/agent-reports/...
 ### ----------------------------------------
 ```
 
+<!-- --- Defining Backfill Recommendation Template -->
 ## Backfill Recommendation Template
 
 ```text
@@ -158,6 +164,7 @@ s3://dq-artifacts/agent-reports/...
 ### ----------------------------------------
 ```
 
+<!-- --- Defining Approval Action Preview Template -->
 ## Approval Action Preview Template
 
 ```text

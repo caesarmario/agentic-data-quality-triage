@@ -1,8 +1,9 @@
-﻿####
+####
 ## DQ Alert Generator for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
@@ -16,6 +17,7 @@ from typing import Any
 from uuid import UUID
 
 
+# --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Add repo root before importing project packages when this file is executed by path.
@@ -28,6 +30,7 @@ from pipelines.dq.config import OrdersDqContract, load_orders_dq_contract
 from pipelines.seeding.helpers import iter_dates, parse_date
 
 
+# --- Defining Constants
 DQ_RESULTS_TABLE = "dq.dq_check_results"
 ALERTS_TABLE     = "dq.alerts"
 
@@ -48,6 +51,7 @@ ALERT_COLUMNS = [
 ]
 
 
+# --- Defining Classes
 @dataclass(frozen=True)
 class AlertCandidate:
     """
@@ -107,6 +111,7 @@ class AlertCandidate:
         ]
 
 
+# --- Defining Functions
 def parse_details(details_json: str) -> dict[str, Any]:
     """
     Parse a DQ result details_json string safely.
@@ -517,5 +522,6 @@ def main() -> None:
     print(json.dumps(summary, indent=2, default=str))
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

@@ -1,8 +1,9 @@
-﻿####
+####
 ## Guarded ClickHouse SQL Tool for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
@@ -19,6 +20,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field, model_validator
 
 
+# --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Add repo root before importing project packages when this file is executed by path.
@@ -30,6 +32,7 @@ from pipelines.common.clickhouse import build_clickhouse_client
 from pipelines.common.logging import logger
 
 
+# --- Defining Constants
 TOOL_NAME          = "clickhouse_sql"
 DEFAULT_HARD_LIMIT = 100
 MAX_HARD_LIMIT     = 1000
@@ -78,6 +81,7 @@ LARGE_TABLE_DATE_COLUMNS = {
 }
 
 
+# --- Defining Classes
 class GuardrailViolation(ValueError):
     """
     Raised when a SQL statement violates agent SQL guardrails.
@@ -146,6 +150,7 @@ class SqlExecutionResult(BaseModel):
         return self
 
 
+# --- Defining Functions
 def remove_sql_comments(sql: str) -> str:
     """
     Remove SQL comments before guardrail analysis.
@@ -653,5 +658,6 @@ def main() -> None:
     print(result.model_dump_json(indent=2))
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()
