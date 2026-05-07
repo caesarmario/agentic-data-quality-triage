@@ -3,6 +3,7 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 import argparse
 import json
 import random
@@ -32,6 +33,7 @@ from pipelines.seeding.helpers import (
 from pipelines.seeding.incidents import apply_incidents, choose_incidents
 
 
+# --- Defining Functions
 def generate_raw_orders(
     days: int,
     seed_value: int | None,
@@ -615,5 +617,6 @@ def main() -> None:
     )
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

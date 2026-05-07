@@ -1,8 +1,9 @@
-﻿####
+####
 ## ClickHouse Utility for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import os
@@ -12,6 +13,7 @@ from typing import Any
 from pipelines.common.logging import logger
 
 
+# --- Defining Constants
 DEFAULT_CLICKHOUSE_HOST = "localhost"
 DEFAULT_CLICKHOUSE_PORT = 8123
 DEFAULT_CLICKHOUSE_DB   = "dq"
@@ -21,6 +23,7 @@ DEFAULT_CLICKHOUSE_USER = "default"
 SAFE_IDENTIFIER_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 
 
+# --- Defining Functions
 def build_clickhouse_client(
     host: str | None = None,
     port: int | None = None,
@@ -174,6 +177,62 @@ def format_date_literal(value: date) -> str:
         ClickHouse date literal expression.
     """
     return f"toDate('{value.isoformat()}')"
+
+
+def drop_date_partition_if_exists(
+    client: Any,
+    table_name: str,
+    partition_dt: date,
+) -> bool:
+    """
+    Drop one Date-partition from a ClickHouse table when it exists.
+
+    Args:
+        client: clickhouse-connect client instance.
+        table_name: Fully qualified ClickHouse table name.
+        partition_dt: Business date partition to drop.
+
+    Returns:
+        True when an active partition was found and dropped, otherwise False.
+    """
+    database, table = split_table_name(table_name)
+    partition_id    = partition_dt.isoformat()
+
+    partition_count = scalar(
+        client=client,
+        query=f"""
+            SELECT count()
+            FROM system.parts
+            WHERE database = {quote_sql_literal(database)}
+              AND table = {quote_sql_literal(table)}
+              AND partition = {quote_sql_literal(partition_id)}
+              AND active
+        """,
+        default=0,
+    )
+
+    if int(partition_count or 0) == 0:
+        logger.info(
+            "ClickHouse partition does not exist; drop skipped | table=%s partition=%s",
+            table_name,
+            partition_id,
+        )
+
+        return False
+
+    logger.info(
+        "Dropping ClickHouse partition | table=%s partition=%s active_parts=%s",
+        table_name,
+        partition_id,
+        partition_count,
+    )
+
+    # partition_id is derived from a datetime.date object; table identifiers are validated above.
+    client.command(f"ALTER TABLE {table_name} DROP PARTITION {quote_sql_literal(partition_id)}")
+
+    logger.info("ClickHouse partition dropped | table=%s partition=%s", table_name, partition_id)
+
+    return True
 
 
 def result_rows(client: Any, query: str) -> list[tuple[Any, ...]]:

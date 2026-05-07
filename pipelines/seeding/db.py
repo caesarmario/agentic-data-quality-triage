@@ -3,6 +3,7 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 import json
 import os
 from typing import Dict, List
@@ -13,6 +14,7 @@ from psycopg2.extras import execute_values
 from pipelines.common.logging import logger
 
 
+# --- Defining Constants
 SCHEMA_SQL = """
 CREATE SCHEMA IF NOT EXISTS public;
 
@@ -122,6 +124,7 @@ RESTART IDENTITY;
 """
 
 
+# --- Defining Functions
 def get_conn_str() -> str:
     """
     Build the Postgres connection string for the legacy seeding flow.

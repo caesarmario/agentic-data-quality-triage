@@ -1,0 +1,36 @@
+####
+## Null Spike Incident Scenario for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+# --- Defining Scenario Metadata
+scenario_id: null_spike
+dataset: orders
+enabled: true
+incident_scenario: null_spike
+description: Blank a deterministic sample of required customer identifiers to simulate completeness degradation.
+
+# --- Defining Ground Truth Labels
+ground_truth:
+  root_cause_category: completeness_regression
+  expected_alert: true
+  expected_dq_signals:
+    - table_name: dq.stg_orders
+      check_name: not_null__customer_id
+      severity: critical
+  expected_agent_summary: Required customer identifiers are blank for a material sample of orders.
+
+# --- Defining Expected Pipeline Behavior
+expected_pipeline_behavior:
+  seed_to_s3: success
+  load_to_clickhouse: success
+  dbt_transform: success
+  dq_checks: critical_failure_expected
+  triage_required: true
+
+# --- Defining Demo Execution Defaults
+demo:
+  airflow_conf:
+    dt: "2026-05-04"
+    incident_scenario: null_spike
+  make_command: make seed DT=2026-05-04 INCIDENT_SCENARIO=null_spike

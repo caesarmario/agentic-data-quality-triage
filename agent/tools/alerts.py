@@ -1,8 +1,9 @@
-﻿####
+####
 ## Alert Lookup Tool for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
@@ -14,6 +15,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 
+# --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Add repo root before importing project packages when this file is executed by path.
@@ -28,10 +30,12 @@ from pipelines.common.logging import logger
 from pipelines.seeding.helpers import parse_date
 
 
+# --- Defining Constants
 TOOL_NAME    = "alerts"
 ALERTS_TABLE = "dq.alerts"
 
 
+# --- Defining Functions
 def build_alert_filters(
     alert_id: str | None = None,
     alert_key: str | None = None,
@@ -352,5 +356,6 @@ def main() -> None:
     print(json.dumps(result, indent=2, default=str))
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

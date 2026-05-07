@@ -3,6 +3,7 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
@@ -11,6 +12,7 @@ import sys
 from pathlib import Path
 
 
+# --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Add repo root before importing project packages when this file is executed by path.
@@ -27,6 +29,7 @@ from agent.graph import (
 from pipelines.common.logging import logger
 
 
+# --- Defining Functions
 def build_parser() -> argparse.ArgumentParser:
     """
     Build the command-line parser for the one-alert triage runner.
@@ -101,5 +104,6 @@ def main() -> None:
     print(json.dumps(output, indent=2, default=str))
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

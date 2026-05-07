@@ -3,19 +3,23 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
+from pipelines.common.clickhouse import build_clickhouse_client
 from pipelines.common.logging import logger
+from pipelines.common.pipeline_runs import write_pipeline_run
 from pipelines.seeding.config import OrdersSeedConfig, load_orders_config
 from pipelines.seeding.generate_orders import generate_and_write_orders
 from pipelines.seeding.helpers import iter_dates, parse_date
 
 
+# --- Defining Functions
 def resolve_run_dates(
     dt: str | None = None,
     start: str | None = None,
@@ -59,6 +63,9 @@ def run_orders_landing(
     upload: bool = True,
     endpoint_url: str | None = None,
     incident_scenario: str = "baseline",
+    clickhouse_host: str | None = None,
+    clickhouse_port: int | None = None,
+    log_pipeline_run: bool = True,
 ) -> dict[str, Any]:
     """
     Generate local Parquet files and optionally upload them to S3 landing storage.
@@ -69,6 +76,9 @@ def run_orders_landing(
         upload: Whether to upload generated files to SeaweedFS S3.
         endpoint_url: Optional explicit S3 endpoint URL.
         incident_scenario: Scenario label stored with generated rows.
+        clickhouse_host: Optional ClickHouse host override for pipeline run logging.
+        clickhouse_port: Optional ClickHouse HTTP port override for pipeline run logging.
+        log_pipeline_run: Whether to write dq.pipeline_runs observability records.
 
     Returns:
         Summary dictionary for the full run.
@@ -80,37 +90,95 @@ def run_orders_landing(
         incident_scenario,
     )
 
-    partitions = []
+    partitions       = []
+    client           = None
+    target_namespace = f"s3://{config.output.bucket}/orders"
+
+    if log_pipeline_run:
+        client = build_clickhouse_client(host=clickhouse_host, port=clickhouse_port)
 
     for run_dt in dates:
-        generated = generate_and_write_orders(
-            dt=run_dt,
-            config=config,
-            incident_scenario=incident_scenario,
-        )
+        started_at    = datetime.now(timezone.utc)
+        generated     = None
+        uploaded      = None
+        target_s3_uri = f"s3://{config.output.bucket}/{config.output.object_key(run_dt)}" if upload else ""
 
-        uploaded = None
-
-        if upload:
-            # Import lazily so local --no-upload smoke tests do not require boto3 on the host.
-            from pipelines.seeding.upload_to_s3 import upload_orders_partition
-
-            uploaded = upload_orders_partition(
+        try:
+            generated = generate_and_write_orders(
                 dt=run_dt,
                 config=config,
-                local_path=generated["local_path"],
-                endpoint_url=endpoint_url,
+                incident_scenario=incident_scenario,
             )
 
-        partitions.append(
-            {
-                "dt": run_dt.isoformat(),
-                "rows": generated["rows"],
-                "local_path": generated["local_path"],
-                "s3_uri": uploaded["s3_uri"] if uploaded else None,
-                "incident_scenario": incident_scenario,
-            }
-        )
+            if upload:
+                # Import lazily so local --no-upload smoke tests do not require boto3 on the host.
+                from pipelines.seeding.upload_to_s3 import upload_orders_partition
+
+                uploaded = upload_orders_partition(
+                    dt=run_dt,
+                    config=config,
+                    local_path=generated["local_path"],
+                    endpoint_url=endpoint_url,
+                )
+
+            ended_at = datetime.now(timezone.utc)
+
+            if client:
+                write_pipeline_run(
+                    client=client,
+                    job_name="seed_orders_to_s3",
+                    partition_dt=run_dt,
+                    status="success",
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    rows_read=generated["rows"],
+                    rows_written=generated["rows"],
+                    source_uri=generated["local_path"],
+                    target_table=target_namespace,
+                    metadata={
+                        "runner": "pipelines.seeding.run_daily",
+                        "upload_enabled": upload,
+                        "target_s3_uri": uploaded["s3_uri"] if uploaded else target_s3_uri,
+                        "incident_scenario": incident_scenario,
+                    },
+                )
+
+            partitions.append(
+                {
+                    "dt": run_dt.isoformat(),
+                    "rows": generated["rows"],
+                    "local_path": generated["local_path"],
+                    "s3_uri": uploaded["s3_uri"] if uploaded else None,
+                    "incident_scenario": incident_scenario,
+                }
+            )
+
+        except Exception as exc:
+            ended_at = datetime.now(timezone.utc)
+            logger.exception("Orders landing partition failed | dt=%s scenario=%s", run_dt, incident_scenario)
+
+            if client:
+                write_pipeline_run(
+                    client=client,
+                    job_name="seed_orders_to_s3",
+                    partition_dt=run_dt,
+                    status="failed",
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    rows_read=generated["rows"] if generated else None,
+                    rows_written=generated["rows"] if generated and uploaded else None,
+                    source_uri=generated["local_path"] if generated else "",
+                    target_table=target_namespace,
+                    error_message=str(exc)[:1000],
+                    metadata={
+                        "runner": "pipelines.seeding.run_daily",
+                        "upload_enabled": upload,
+                        "target_s3_uri": target_s3_uri,
+                        "incident_scenario": incident_scenario,
+                    },
+                )
+
+            raise
 
     total_rows = sum(item["rows"] for item in partitions)
 
@@ -144,6 +212,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-upload", action="store_true", help="Generate local Parquet but skip S3 upload.")
     parser.add_argument("--endpoint-url", default=None, help="Optional S3 endpoint URL override.")
     parser.add_argument("--incident-scenario", default="baseline", help="Scenario label stored with generated rows.")
+    parser.add_argument("--clickhouse-host", default=None, help="Optional ClickHouse host override for pipeline logging.")
+    parser.add_argument("--clickhouse-port", type=int, default=None, help="Optional ClickHouse HTTP port override.")
+    parser.add_argument("--skip-pipeline-log", action="store_true", help="Skip dq.pipeline_runs observability writes.")
 
     return parser
 
@@ -171,10 +242,14 @@ def main() -> None:
         upload=not args.no_upload,
         endpoint_url=args.endpoint_url,
         incident_scenario=args.incident_scenario,
+        clickhouse_host=args.clickhouse_host,
+        clickhouse_port=args.clickhouse_port,
+        log_pipeline_run=not args.skip_pipeline_log,
     )
 
     print(json.dumps(summary, indent=2, default=str))
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

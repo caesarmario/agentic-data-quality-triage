@@ -3,6 +3,7 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
@@ -16,6 +17,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 
+# --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Add repo root before importing project packages when this file is executed by path.
@@ -29,11 +31,13 @@ from pipelines.common.logging import logger
 from pipelines.seeding.upload_to_s3 import build_s3_client
 
 
+# --- Defining Constants
 TOOL_NAME                = "s3_artifacts"
 DEFAULT_ARTIFACTS_BUCKET = "dq-artifacts"
 DEFAULT_REPORT_PREFIX    = "agent-reports"
 
 
+# --- Defining Functions
 def resolve_artifacts_bucket(bucket: str | None = None) -> str:
     """
     Resolve the S3 bucket used for agent report artifacts.
@@ -361,5 +365,6 @@ def main() -> None:
     print(json.dumps({"status": "success", "s3_uri": uri}, indent=2))
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()

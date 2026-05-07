@@ -3,6 +3,9 @@
 -- Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 -- ##############################################
 
+-- --- Defining SQL Objects
+
+-- --- Creating dq.data_profile_results Table
 CREATE TABLE IF NOT EXISTS dq.data_profile_results
 (
     profile_run_id     UUID DEFAULT generateUUIDv4(),
@@ -20,6 +23,7 @@ ENGINE = MergeTree
 PARTITION BY toYYYYMM(run_at)
 ORDER BY (table_name, ifNull(dt, toDate('1970-01-01')), column_name, metric_name, run_at);
 
+-- --- Creating dq.dq_check_results Table
 CREATE TABLE IF NOT EXISTS dq.dq_check_results
 (
     check_run_id       UUID DEFAULT generateUUIDv4(),
@@ -41,6 +45,7 @@ ENGINE = MergeTree
 PARTITION BY toYYYYMM(run_at)
 ORDER BY (table_name, ifNull(dt, toDate('1970-01-01')), status, check_name, run_at);
 
+-- --- Creating dq.alerts Table
 CREATE TABLE IF NOT EXISTS dq.alerts
 (
     alert_id              UUID DEFAULT generateUUIDv4(),
@@ -67,6 +72,7 @@ ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (alert_key, status, severity, created_at);
 
+-- --- Creating dq.pipeline_runs Table
 CREATE TABLE IF NOT EXISTS dq.pipeline_runs
 (
     run_id             UUID DEFAULT generateUUIDv4(),

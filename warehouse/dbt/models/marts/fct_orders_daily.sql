@@ -3,6 +3,8 @@
 -- Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 -- ##############################################
 
+-- --- Defining SQL Objects
+
 {{ config(alias='fct_orders_daily') }}
 
 with orders as (

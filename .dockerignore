@@ -3,22 +3,27 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Ignoring Git And IDE Metadata
 .git
 .github
 .vscode
 
+# --- Ignoring Local Runtime Outputs
 data
 logs
 todo
 
+# --- Ignoring Python Cache And Logs
 **/__pycache__
 **/*.pyc
 **/*.pyo
 **/*.log
 
+# --- Ignoring Local Secrets
 infra/.env
 infra/airflow/auth
 
+# --- Ignoring dbt Artifacts
 warehouse/dbt/target
 warehouse/dbt/dbt_packages
 

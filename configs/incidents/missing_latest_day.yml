@@ -1,0 +1,42 @@
+####
+## Missing Latest Day Incident Scenario for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+# --- Defining Scenario Metadata
+scenario_id: missing_latest_day
+dataset: orders
+enabled: true
+incident_scenario: missing_latest_day
+description: Generate an empty latest-day orders partition to simulate upstream delivery failure.
+
+# --- Defining Ground Truth Labels
+ground_truth:
+  root_cause_category: missing_partition_or_empty_partition
+  expected_alert: true
+  expected_dq_signals:
+    - table_name: dq.raw_orders
+      check_name: row_count_positive
+      severity: critical
+    - table_name: dq.stg_orders
+      check_name: row_count_positive
+      severity: critical
+    - table_name: dq.fct_orders_daily
+      check_name: row_count_positive
+      severity: critical
+  expected_agent_summary: Latest orders data is missing or empty for the requested business date.
+
+# --- Defining Expected Pipeline Behavior
+expected_pipeline_behavior:
+  seed_to_s3: success_with_zero_rows
+  load_to_clickhouse: success_with_zero_rows
+  dbt_transform: success
+  dq_checks: critical_failures_expected
+  triage_required: true
+
+# --- Defining Demo Execution Defaults
+demo:
+  airflow_conf:
+    dt: "2026-05-04"
+    incident_scenario: missing_latest_day
+  make_command: make seed DT=2026-05-04 INCIDENT_SCENARIO=missing_latest_day

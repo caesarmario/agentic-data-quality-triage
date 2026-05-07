@@ -3,6 +3,9 @@
 -- Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 -- ##############################################
 
+-- --- Defining SQL Objects
+
+-- --- Creating dq.agent_audit_log Table
 CREATE TABLE IF NOT EXISTS dq.agent_audit_log
 (
     audit_id         UUID DEFAULT generateUUIDv4(),

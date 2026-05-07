@@ -3,6 +3,7 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 import random
 from datetime import date, timedelta
 from typing import Dict, List
@@ -10,14 +11,26 @@ from typing import Dict, List
 from pipelines.common.logging import logger
 
 
+# --- Defining Constants
 INCIDENT_POOL = [
     "missing_segment",
     "duplicate_orders",
     "cancelled_revenue_leak",
     "fx_rate_spike",
     "late_arriving_batch",
+    "null_spike",
     "missing_latest_day",
 ]
+
+
+BASELINE_INCIDENT_SCENARIOS = {"", "baseline", "clean", "none", "normal"}
+
+
+INCIDENT_ALIASES = {
+    "duplicates_spike": "duplicate_orders",
+    "duplicate_spike": "duplicate_orders",
+    "late_arriving": "late_arriving_batch",
+}
 
 
 INCIDENT_PROBABILITIES = {
@@ -26,7 +39,45 @@ INCIDENT_PROBABILITIES = {
     "cancelled_revenue_leak": 0.22,
     "fx_rate_spike": 0.20,
     "late_arriving_batch": 0.26,
+    "null_spike": 0.18,
 }
+
+
+# --- Defining Functions
+def resolve_incident_names(incident_scenario: str | None) -> List[str]:
+    """
+    Resolve a scenario label into concrete incident handler names.
+
+    Args:
+        incident_scenario: Scenario label from CLI/Airflow config. Multiple incidents can
+            be separated with commas, plus signs, or pipes.
+
+    Returns:
+        List of canonical incident handler names. Baseline-like labels return an empty list.
+
+    Raises:
+        ValueError: If the scenario contains an unsupported incident name.
+    """
+    scenario = (incident_scenario or "baseline").strip()
+
+    if scenario.lower() in BASELINE_INCIDENT_SCENARIOS:
+        logger.info("Resolved baseline incident scenario | scenario=%s", scenario)
+
+        return []
+
+    # Support small CLI-friendly separators without requiring users to remember one exact format.
+    normalized = scenario.replace("+", ",").replace("|", ",")
+    requested  = [item.strip().lower() for item in normalized.split(",") if item.strip()]
+    resolved   = [INCIDENT_ALIASES.get(item, item) for item in requested]
+    invalid    = [item for item in resolved if item not in INCIDENT_HANDLERS]
+
+    if invalid:
+        logger.error("Unsupported incident scenario | scenario=%s invalid=%s", scenario, invalid)
+        raise ValueError(f"Unsupported incident scenario(s): {invalid}")
+
+    logger.info("Resolved incident scenario | scenario=%s incidents=%s", scenario, resolved)
+
+    return resolved
 
 
 def choose_incidents(
@@ -46,7 +97,11 @@ def choose_incidents(
         List of incident names understood by INCIDENT_HANDLERS.
     """
     if forced_incidents:
-        cleaned = [x.strip() for x in forced_incidents if x.strip()]
+        cleaned = []
+
+        for item in forced_incidents:
+            cleaned.extend(resolve_incident_names(item))
+
         logger.info("Using forced incident selection | incidents=%s", cleaned)
 
         return cleaned
@@ -385,6 +440,48 @@ def apply_late_arriving_batch(
     return result
 
 
+def apply_null_spike(
+    rows: List[Dict],
+    incident_date: date,
+    rng: random.Random,
+) -> Dict:
+    """
+    Blank required customer identifiers for a sample of orders.
+
+    Args:
+        rows: Mutable list of raw order dictionaries.
+        incident_date: Business date where completeness issues should be injected.
+        rng: Random generator used to sample affected rows.
+
+    Returns:
+        Incident result metadata including affected row count and column name.
+    """
+    candidates = [row for row in rows if row["order_date"] == incident_date]
+
+    if not candidates:
+        logger.info("Incident skipped | incident=null_spike dt=%s reason=no_candidates", incident_date)
+
+        return {"incident": "null_spike", "applied": False}
+
+    affected_count = max(1, int(len(candidates) * rng.uniform(0.05, 0.10)))
+    sampled        = rng.sample(candidates, min(affected_count, len(candidates)))
+
+    # ClickHouse raw strings are non-nullable, so blanks intentionally simulate null-like bad data.
+    for row in sampled:
+        row["customer_id"] = ""
+
+    result = {
+        "incident": "null_spike",
+        "applied": True,
+        "incident_date": str(incident_date),
+        "column_name": "customer_id",
+        "affected_rows": len(sampled),
+    }
+    logger.info("Incident applied | result=%s", result)
+
+    return result
+
+
 INCIDENT_HANDLERS = {
     "missing_segment": apply_missing_segment,
     "missing_latest_day": apply_missing_latest_day,
@@ -392,6 +489,7 @@ INCIDENT_HANDLERS = {
     "cancelled_revenue_leak": apply_cancelled_revenue_leak,
     "fx_rate_spike": apply_fx_rate_spike,
     "late_arriving_batch": apply_late_arriving_batch,
+    "null_spike": apply_null_spike,
 }
 
 

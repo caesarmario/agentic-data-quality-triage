@@ -3,11 +3,14 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Defining Project Name
 name: agentic-dq-triage
 
+# --- Defining Shared Environment Files
 x-env-file: &env-file
   - ./.env
 
+# --- Defining Application Environment
 x-app-env: &app-env
   PYTHONUNBUFFERED: "1"
   PYTHONDONTWRITEBYTECODE: "1"
@@ -29,6 +32,7 @@ x-app-env: &app-env
   DQFAILURES_BUCKET: ${DQFAILURES_BUCKET:-dq-dqfailures}
   AUDIT_BUCKET: ${AUDIT_BUCKET:-dq-audit}
 
+# --- Defining Python Runner Template
 x-python-runner: &python-runner
   image: ${PYTHON_RUNNER_IMAGE:-agentic-dq-python:local}
   build:
@@ -53,6 +57,7 @@ x-python-runner: &python-runner
       sleep infinity
   restart: unless-stopped
 
+# --- Defining Airflow Service Template
 x-airflow-common: &airflow-common
   image: apache/airflow:${AIRFLOW_VERSION:-3.1.7}
   env_file: *env-file
@@ -68,7 +73,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CELERY__BROKER_URL: ${AIRFLOW__CELERY__BROKER_URL:-redis://airflow-redis:6379/0}
     AIRFLOW__CELERY__RESULT_BACKEND: ${AIRFLOW__CELERY__RESULT_BACKEND:-db+postgresql://airflow:airflow@airflow-postgres:5432/airflow}
     AIRFLOW__CELERY__WORKER_CONCURRENCY: ${AIRFLOW__CELERY__WORKER_CONCURRENCY:-2}
-    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: ${AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL:-30}
+    AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: ${AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL:-30}
     _PIP_ADDITIONAL_REQUIREMENTS: ${AIRFLOW_PIP_ADDITIONAL_REQUIREMENTS:-}
     <<: *app-env
   volumes:
@@ -84,6 +89,7 @@ x-airflow-common: &airflow-common
       condition: service_healthy
   restart: unless-stopped
 
+# --- Defining Services
 services:
   clickhouse:
     image: clickhouse/clickhouse-server:25.3-alpine
@@ -396,6 +402,7 @@ services:
         set -eu
         python apps/discord_bot/bot.py
 
+# --- Defining Volumes
 volumes:
   ch_data:
   ch_logs:
@@ -405,6 +412,7 @@ volumes:
   sw_filer:
   airflow_pgdata:
 
+# --- Defining Networks
 networks:
   default:
     name: agentic_dq_net

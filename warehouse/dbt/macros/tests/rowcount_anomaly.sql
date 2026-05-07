@@ -3,6 +3,8 @@
 -- Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 -- ##############################################
 
+-- --- Defining SQL Objects
+
 {% test rowcount_anomaly(
     model,
     date_column,

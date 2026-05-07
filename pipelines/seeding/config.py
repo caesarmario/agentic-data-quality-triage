@@ -3,6 +3,7 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import hashlib
@@ -15,6 +16,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
+# --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Add repo root before importing project packages when this file is executed by path.
@@ -24,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from pipelines.common.logging import logger
 
 
+# --- Defining Constants
 DEFAULT_ORDERS_CONFIG_PATH = PROJECT_ROOT / "configs" / "seeding" / "orders.yml"
 WEEKDAY_KEYS               = [
     "monday",
@@ -42,6 +45,7 @@ CompressionCodec = Literal["snappy", "gzip", "brotli", "zstd", "none"]
 PartitionColumn  = Literal["dt"]
 
 
+# --- Defining Classes
 class GenerationConfig(BaseModel):
     """
     Runtime controls for deterministic order-event generation.
@@ -365,6 +369,7 @@ class OrdersSeedConfig(BaseModel):
         return int(hashlib.sha256(seed_input).hexdigest()[:16], 16)
 
 
+# --- Defining Functions
 def load_orders_config(path: str | Path | None = None) -> OrdersSeedConfig:
     """
     Load and validate the orders seeding YAML config.
@@ -479,6 +484,7 @@ def _validate_weights(value: Dict[str, float], field_name: str) -> Dict[str, flo
     return value
 
 
+# --- Running CLI Entrypoint
 if __name__ == "__main__":
     config = load_orders_config()
     print(

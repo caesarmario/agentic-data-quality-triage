@@ -1,8 +1,9 @@
-﻿####
+####
 ## Guarded SQL Tests for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from agent.tools.clickhouse_sql import GuardrailViolation, SqlGuardrailConfig, guard_sql
 
 
+# --- Defining Functions
 def test_guard_sql_allows_date_filtered_alert_query() -> None:
     """
     Validate that a date-filtered alert query passes SQL guardrails.

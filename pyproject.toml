@@ -3,6 +3,7 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Defining Pytest Configuration
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths  = ["tests"]

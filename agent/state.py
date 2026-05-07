@@ -1,8 +1,9 @@
-﻿####
+####
 ## Agent State Models for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import json
@@ -16,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pipelines.common.logging import logger
 
 
+# --- Defining Classes
 class AlertStatus(str, Enum):
     """
     Supported alert lifecycle statuses.
@@ -464,6 +466,7 @@ class TriageState(BaseModel):
         return self
 
 
+# --- Defining Functions
 def parse_json_object(value: str | dict[str, Any] | None) -> dict[str, Any]:
     """
     Parse a JSON object from a string or return an existing dictionary.

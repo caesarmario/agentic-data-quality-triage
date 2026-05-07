@@ -3,16 +3,19 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 from __future__ import annotations
 
 import logging
 import sys
 
 
+# --- Defining Constants
 LOG_FORMAT          = "%(asctime)s - %(filename)s - Line: %(lineno)d - %(levelname)s - %(message)s"
 DEFAULT_LOGGER_NAME = "agentic_dq"
 
 
+# --- Defining Functions
 def configure_logger(name: str = DEFAULT_LOGGER_NAME, level: int = logging.INFO) -> logging.Logger:
     """
     Build a stdout logger for local Docker and Airflow task execution.
@@ -42,4 +45,5 @@ def configure_logger(name: str = DEFAULT_LOGGER_NAME, level: int = logging.INFO)
     return logger
 
 
+# --- Getting Logger
 logger = configure_logger()

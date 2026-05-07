@@ -3,6 +3,7 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
+# --- Importing Libraries
 import random
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Dict
@@ -11,6 +12,7 @@ from pipelines.common.logging import logger
 from pipelines.seeding.config import OrdersSeedConfig
 
 
+# --- Defining Constants
 COUNTRIES = ["ID", "SG", "MY", "TH", "VN"]
 CHANNELS  = ["organic", "paid", "referral", "direct", "affiliate"]
 STATUSES  = ["paid", "cancelled", "refunded", "pending"]
@@ -84,6 +86,7 @@ CHANNEL_PROFILES: Dict[str, Dict] = {
 }
 
 
+# --- Defining Functions
 def utc_now() -> datetime:
     """
     Return the current UTC timestamp.

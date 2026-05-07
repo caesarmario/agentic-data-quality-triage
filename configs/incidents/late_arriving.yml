@@ -1,0 +1,36 @@
+####
+## Late Arriving Batch Incident Scenario for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+# --- Defining Scenario Metadata
+scenario_id: late_arriving
+dataset: orders
+enabled: true
+incident_scenario: late_arriving
+description: Delay ingestion timestamps for one country-channel batch to simulate late-arriving data.
+
+# --- Defining Ground Truth Labels
+ground_truth:
+  root_cause_category: late_arriving_batch
+  expected_alert: true
+  expected_dq_signals:
+    - table_name: dq.fct_orders_daily
+      check_name: late_arriving_rate__daily_total
+      severity: warning
+  expected_agent_summary: A material share of orders arrived after the source business day.
+
+# --- Defining Expected Pipeline Behavior
+expected_pipeline_behavior:
+  seed_to_s3: success
+  load_to_clickhouse: success
+  dbt_transform: success
+  dq_checks: warning_expected
+  triage_required: true
+
+# --- Defining Demo Execution Defaults
+demo:
+  airflow_conf:
+    dt: "2026-05-04"
+    incident_scenario: late_arriving
+  make_command: make seed DT=2026-05-04 INCIDENT_SCENARIO=late_arriving
