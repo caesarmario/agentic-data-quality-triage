@@ -9,9 +9,11 @@ from __future__ import annotations
 import logging
 import os
 import textwrap
-from datetime import datetime
+from datetime import timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
+import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.sdk import Param
@@ -25,8 +27,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_OWNER            = "data-engineering"
 DEFAULT_RETRIES          = 1
 DEFAULT_RUNNER_CONTAINER = "dq_runner"
-DEFAULT_START_DATE       = datetime(2026, 5, 1)
 DEFAULT_DOCKER_EXEC      = "/usr/bin/docker"
+DEFAULT_TIMEZONE         = "Asia/Bangkok"
+DEFAULT_START_DATE       = pendulum.datetime(2026, 5, 1, tz=DEFAULT_TIMEZONE)
+DAILY_PLATFORM_SCHEDULE  = "5 0 * * *"
 
 
 # --- Defining Functions
@@ -47,6 +51,61 @@ def default_dag_args(owner: str = DEFAULT_OWNER, retries: int = DEFAULT_RETRIES)
     }
 
 
+def bangkok_ds(logical_date: Any) -> str:
+    """
+    Convert an Airflow logical date into the platform business date.
+
+    Args:
+        logical_date: Airflow logical date from the template context.
+
+    Returns:
+        Date string in YYYY-MM-DD format using Asia/Bangkok timezone.
+    """
+    if logical_date is None:
+        return ""
+
+    if logical_date.tzinfo is None:
+        logical_date = logical_date.replace(tzinfo=timezone.utc)
+
+    return logical_date.astimezone(ZoneInfo(DEFAULT_TIMEZONE)).date().isoformat()
+
+
+def default_user_defined_macros() -> dict[str, Any]:
+    """
+    Build user-defined Jinja macros shared by all platform DAGs.
+
+    Returns:
+        Dictionary of macro names to Python callables.
+    """
+    return {
+        "bangkok_ds": bangkok_ds,
+        "default_incident_scenario": default_incident_scenario,
+    }
+
+
+def default_incident_scenario(dag_run: Any) -> str:
+    """
+    Resolve default incident scenario for Airflow scheduled versus manual runs.
+
+    Args:
+        dag_run: Airflow DagRun object from the template context.
+
+    Returns:
+        "auto" for scheduled daily runs, explicit dag_run.conf value when provided,
+        otherwise "baseline" for manual/testing runs.
+    """
+    if dag_run and dag_run.conf and dag_run.conf.get("incident_scenario"):
+        return dag_run.conf["incident_scenario"]
+
+    run_type = str(getattr(dag_run, "run_type", "")).lower()
+
+    # Scheduled daily runs should feel production-like; manual runs stay clean unless overridden.
+    if "scheduled" in run_type:
+        return "auto"
+
+    return "baseline"
+
+
 def common_dag_params() -> dict[str, Param]:
     """
     Build shared manual-run parameters for operational DAGs.
@@ -58,7 +117,7 @@ def common_dag_params() -> dict[str, Param]:
         "dt": Param(
             "",
             type="string",
-            description="Single business date to process. Defaults to Airflow ds when blank.",
+            description="Single business date to process. Defaults to the Airflow logical date in Asia/Bangkok when blank.",
         ),
         "start_date": Param(
             "",
@@ -73,7 +132,7 @@ def common_dag_params() -> dict[str, Param]:
         "incident_scenario": Param(
             "baseline",
             type="string",
-            description="Synthetic incident scenario label used by the seeding pipeline.",
+            description="Synthetic scenario label. Scheduled runs default to auto; manual runs default to baseline.",
         ),
         "run_mode": Param(
             "daily",
@@ -155,7 +214,7 @@ def date_argument_shell_snippet() -> str:
     """
     return textwrap.dedent(
         """
-        RUN_DT="{{ dag_run.conf.get("dt") or ds }}"
+        RUN_DT="{{ dag_run.conf.get("dt") or bangkok_ds(dag_run.logical_date) }}"
         START_DATE="{{ dag_run.conf.get("start_date", "") }}"
         END_DATE="{{ dag_run.conf.get("end_date", "") }}"
 
@@ -165,7 +224,7 @@ def date_argument_shell_snippet() -> str:
           DATE_ARGS="--dt $RUN_DT"
         fi
 
-        INCIDENT_SCENARIO="{{ dag_run.conf.get("incident_scenario", "baseline") }}"
+        INCIDENT_SCENARIO="{{ default_incident_scenario(dag_run) }}"
         RUN_MODE="{{ dag_run.conf.get("run_mode", "daily") }}"
         """
     ).strip()
@@ -233,10 +292,10 @@ def single_date_conf() -> dict[str, str]:
         Conf dictionary forwarding date and scenario parameters.
     """
     return {
-        "dt": "{{ dag_run.conf.get(\"dt\") or ds }}",
+        "dt": "{{ dag_run.conf.get(\"dt\") or bangkok_ds(dag_run.logical_date) }}",
         "start_date": "{{ dag_run.conf.get(\"start_date\", \"\") }}",
         "end_date": "{{ dag_run.conf.get(\"end_date\", \"\") }}",
-        "incident_scenario": "{{ dag_run.conf.get(\"incident_scenario\", \"baseline\") }}",
+        "incident_scenario": "{{ default_incident_scenario(dag_run) }}",
         "run_mode": "{{ dag_run.conf.get(\"run_mode\", \"daily\") }}",
         "run_triage": "{{ dag_run.conf.get(\"run_triage\", false) }}",
     }

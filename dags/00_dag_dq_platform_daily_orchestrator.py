@@ -12,9 +12,11 @@ from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOpe
 from airflow.sdk import DAG, Param
 
 from dq_platform.helpers import (
+    DAILY_PLATFORM_SCHEDULE,
     DEFAULT_START_DATE,
     common_dag_params,
     default_dag_args,
+    default_user_defined_macros,
     finish_task,
     single_date_conf,
     start_task,
@@ -26,16 +28,18 @@ logger = logging.getLogger(__name__)
 
 
 # --- Defining DAG ID And Documentation
-DAG_ID             = "99_dag_dq_platform_daily_orchestrator"
-LANDING_DAG_ID     = "00_dag_dq_orders_landing_orchestrator"
-DBT_DAG_ID         = "01_dag_dq_orders_dbt_transform"
-QUALITY_DAG_ID     = "02_dag_dq_orders_quality_alerts"
-TRIAGE_DAG_ID      = "03_dag_dq_orders_triage_agent"
+DAG_ID             = "00_dag_dq_platform_daily_orchestrator"
+LANDING_DAG_ID     = "10_dag_dq_orders_landing_orchestrator"
+DBT_DAG_ID         = "20_dag_dq_orders_dbt_transform"
+QUALITY_DAG_ID     = "30_dag_dq_orders_quality_alerts"
+TRIAGE_DAG_ID      = "40_dag_dq_orders_triage_agent"
 
 DOC_MD = """
-# 99 - Full Daily DQ Platform Orchestrator
+# 00 - Full Daily DQ Platform Orchestrator
 
 Run the GitHub/LinkedIn demo path end-to-end:
+
+Schedule: every day at 00:05 Asia/Bangkok.
 
 1. Generate orders data and land Parquet in SeaweedFS S3.
 2. Load the S3 landing partition into ClickHouse raw.
@@ -43,6 +47,10 @@ Run the GitHub/LinkedIn demo path end-to-end:
 4. Upload dbt lineage artifacts to S3.
 5. Run profiling, deterministic DQ checks, and alert generation.
 6. Optionally run LangGraph agentic triage for open alerts.
+
+Scheduled runs use `incident_scenario=auto`, which resolves a deterministic random
+daily scenario from `configs/incidents/daily_policy.yml`. Manual runs default to
+`baseline` unless explicitly overridden.
 
 Manual `dag_run.conf` examples:
 
@@ -102,10 +110,12 @@ with DAG(
     dag_id=DAG_ID,
     description="Run the full local orders DQ platform path from landing through optional agent triage.",
     start_date=DEFAULT_START_DATE,
-    schedule="@daily",
+    schedule=DAILY_PLATFORM_SCHEDULE,
     catchup=False,
+    render_template_as_native_obj=True,
     max_active_runs=1,
     default_args=default_dag_args(),
+    user_defined_macros=default_user_defined_macros(),
     params=daily_orchestrator_params(),
     tags=["dq-platform", "orders", "daily", "orchestrator", "demo"],
     doc_md=DOC_MD,
@@ -123,7 +133,9 @@ with DAG(
         trigger_dag_id=LANDING_DAG_ID,
         trigger_run_id="daily_landing__{{ ts_nodash }}",
         conf=daily_child_conf(),
+        logical_date="{{ dag_run.logical_date.isoformat() }}",
         wait_for_completion=True,
+        deferrable=True,
         poke_interval=15,
         allowed_states=["success"],
         failed_states=["failed"],
@@ -135,7 +147,9 @@ with DAG(
         trigger_dag_id=DBT_DAG_ID,
         trigger_run_id="daily_dbt__{{ ts_nodash }}",
         conf=daily_child_conf(),
+        logical_date="{{ dag_run.logical_date.isoformat() }}",
         wait_for_completion=True,
+        deferrable=True,
         poke_interval=15,
         allowed_states=["success"],
         failed_states=["failed"],
@@ -147,7 +161,9 @@ with DAG(
         trigger_dag_id=QUALITY_DAG_ID,
         trigger_run_id="daily_quality__{{ ts_nodash }}",
         conf=daily_child_conf(),
+        logical_date="{{ dag_run.logical_date.isoformat() }}",
         wait_for_completion=True,
+        deferrable=True,
         poke_interval=15,
         allowed_states=["success"],
         failed_states=["failed"],
@@ -159,7 +175,9 @@ with DAG(
         trigger_dag_id=TRIAGE_DAG_ID,
         trigger_run_id="daily_triage__{{ ts_nodash }}",
         conf=daily_child_conf(),
+        logical_date="{{ dag_run.logical_date.isoformat() }}",
         wait_for_completion=True,
+        deferrable=True,
         poke_interval=15,
         allowed_states=["success"],
         failed_states=["failed"],

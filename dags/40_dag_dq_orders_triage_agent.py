@@ -15,6 +15,7 @@ from dq_platform.helpers import (
     DEFAULT_START_DATE,
     common_dag_params,
     default_dag_args,
+    default_user_defined_macros,
     finish_task,
     runner_bash_task,
     start_task,
@@ -26,15 +27,17 @@ logger = logging.getLogger(__name__)
 
 
 # --- Defining DAG ID And Documentation
-DAG_ID = "03_dag_dq_orders_triage_agent"
+DAG_ID = "40_dag_dq_orders_triage_agent"
 
 DOC_MD = """
-# 03 - Orders Agentic Triage
+# 40 - Orders Agentic Triage
 
 Run the LangGraph triage agent for one alert or a bounded list of open alerts.
 
 This DAG does not mutate data or trigger remediation. It collects evidence through guarded tools,
 stores Markdown/JSON reports in `dq-artifacts`, and writes audit events to ClickHouse.
+
+Schedule: none. This DAG is triggered by the platform daily orchestrator or manual runs.
 
 Manual `dag_run.conf` examples:
 
@@ -99,8 +102,10 @@ with DAG(
     start_date=DEFAULT_START_DATE,
     schedule=None,
     catchup=False,
+    render_template_as_native_obj=True,
     max_active_runs=1,
     default_args=default_dag_args(),
+    user_defined_macros=default_user_defined_macros(),
     params=triage_dag_params(),
     tags=["dq-platform", "orders", "agent", "triage", "manual"],
     doc_md=DOC_MD,

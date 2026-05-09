@@ -10,8 +10,9 @@ import json
 import logging
 import subprocess
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 # --- Getting Logger
@@ -19,19 +20,20 @@ logger = logging.getLogger(__name__)
 
 
 # --- Defining Constants
-DEFAULT_TARGET_DAG_ID      = "99_dag_dq_platform_daily_orchestrator"
+DEFAULT_TARGET_DAG_ID      = "00_dag_dq_platform_daily_orchestrator"
 DEFAULT_MAX_DATES          = 14
 DEFAULT_POLL_INTERVAL_SEC  = 15
 DEFAULT_WAIT_TIMEOUT_SEC   = 60 * 60
+BANGKOK_TIMEZONE           = ZoneInfo("Asia/Bangkok")
 
 ALLOWED_TARGET_DAG_IDS = {
-    "00_01_dag_dq_orders_seed_to_s3",
-    "00_02_dag_dq_orders_load_raw_clickhouse",
-    "00_dag_dq_orders_landing_orchestrator",
-    "01_dag_dq_orders_dbt_transform",
-    "02_dag_dq_orders_quality_alerts",
-    "03_dag_dq_orders_triage_agent",
-    "99_dag_dq_platform_daily_orchestrator",
+    "00_dag_dq_platform_daily_orchestrator",
+    "10_dag_dq_orders_landing_orchestrator",
+    "11_dag_dq_orders_seed_to_s3",
+    "12_dag_dq_orders_load_raw_clickhouse",
+    "20_dag_dq_orders_dbt_transform",
+    "30_dag_dq_orders_quality_alerts",
+    "40_dag_dq_orders_triage_agent",
 }
 
 
@@ -217,7 +219,7 @@ def build_child_conf(
         "requested_by": requested_by,
         "reason": reason,
         "reset_dag_run": reset_dag_run,
-        "backfill_dispatcher": "98_dag_dq_platform_backfill_dispatcher",
+        "backfill_dispatcher": "90_dag_dq_platform_backfill_dispatcher",
     }
 
 
@@ -298,7 +300,7 @@ def trigger_child_dag(
     Returns:
         Trigger metadata dictionary.
     """
-    logical_date = f"{run_dt.isoformat()}T00:00:00+00:00"
+    logical_date = f"{run_dt.isoformat()}T00:05:00+07:00"
     command      = [
         "airflow",
         "dags",
@@ -473,7 +475,7 @@ def run_backfill_dispatcher(**context: Any) -> dict[str, Any]:
         "reason": reason,
         "date_count": len(run_dates),
         "results": results,
-        "dispatched_at": datetime.now(timezone.utc).isoformat(),
+        "dispatched_at": datetime.now(BANGKOK_TIMEZONE).isoformat(),
     }
 
     print(json.dumps(summary, indent=2, default=str))

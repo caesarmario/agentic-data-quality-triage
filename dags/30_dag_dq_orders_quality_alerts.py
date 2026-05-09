@@ -15,6 +15,7 @@ from dq_platform.helpers import (
     DEFAULT_START_DATE,
     common_dag_params,
     default_dag_args,
+    default_user_defined_macros,
     finish_task,
     runner_bash_task,
     start_task,
@@ -26,12 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 # --- Defining DAG ID And Documentation
-DAG_ID = "02_dag_dq_orders_quality_alerts"
+DAG_ID = "30_dag_dq_orders_quality_alerts"
 
 DOC_MD = """
-# 02 - Orders Quality And Alerts
+# 30 - Orders Quality And Alerts
 
 Run deterministic quality observability after dbt has produced staging and mart tables:
+
+Schedule: none. This DAG is triggered by the platform daily orchestrator or manual runs.
 
 1. Profile raw, staging, and mart tables.
 2. Run deterministic DQ contract checks.
@@ -54,12 +57,14 @@ with DAG(
     dag_id=DAG_ID,
     description="Profile orders data, run deterministic DQ checks, and generate alerts.",
     start_date=DEFAULT_START_DATE,
-    schedule="@daily",
+    schedule=None,
     catchup=False,
+    render_template_as_native_obj=True,
     max_active_runs=1,
     default_args=default_dag_args(),
+    user_defined_macros=default_user_defined_macros(),
     params=common_dag_params(),
-    tags=["dq-platform", "orders", "dq", "alerts", "daily"],
+    tags=["dq-platform", "orders", "dq", "alerts", "triggered"],
     doc_md=DOC_MD,
 ) as dag:
     """

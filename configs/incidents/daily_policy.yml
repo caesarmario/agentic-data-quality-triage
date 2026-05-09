@@ -1,0 +1,23 @@
+####
+## Daily Incident Policy for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+# --- Defining Policy Metadata
+enabled: true
+mode: deterministic_random
+seed_salt: agentic-dq-demo-daily-policy-v1
+default_scenario: baseline
+
+# --- Defining Daily Scenario Weights
+# Weights are normalized by the resolver, so they may sum to 1.0 or any positive total.
+scenario_weights:
+  baseline: 0.60
+  missing_segment: 0.10
+  missing_latest_day: 0.08
+  late_arriving: 0.08
+  duplicates_spike: 0.07
+  null_spike: 0.07
+
+# --- Defining Dates That Should Always Stay Clean
+protected_dates: []
