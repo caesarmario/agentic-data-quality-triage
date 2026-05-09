@@ -13,7 +13,13 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG, Param
 
 from dq_platform.backfill_dispatcher import DEFAULT_MAX_DATES, DEFAULT_TARGET_DAG_ID, run_backfill_dispatcher
-from dq_platform.helpers import DEFAULT_START_DATE, default_dag_args, finish_task, start_task
+from dq_platform.helpers import (
+    DEFAULT_START_DATE,
+    default_dag_args,
+    default_user_defined_macros,
+    finish_task,
+    start_task,
+)
 
 
 # --- Getting Logger
@@ -21,12 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 # --- Defining DAG ID And Documentation
-DAG_ID = "98_dag_dq_platform_backfill_dispatcher"
+DAG_ID = "90_dag_dq_platform_backfill_dispatcher"
 
 DOC_MD = """
-# 98 - Backfill Dispatcher
+# 90 - Backfill Dispatcher
 
 Approval-gated/manual dispatcher for Airflow backfills.
+
+Schedule: none. This DAG is always manual/approval-gated.
 
 This DAG accepts an inclusive date range and triggers the selected target DAG once per date.
 That design keeps each business date isolated in its own child DAG run, making Airflow logs,
@@ -41,7 +49,7 @@ Manual `dag_run.conf` example:
 {
   "start_date": "2026-05-06",
   "end_date": "2026-05-09",
-  "target_dag_id": "99_dag_dq_platform_daily_orchestrator",
+  "target_dag_id": "00_dag_dq_platform_daily_orchestrator",
   "requested_by": "mario",
   "reason": "agent recommended backfill for missing latest-day orders data",
   "dry_run": true,
@@ -184,8 +192,10 @@ with DAG(
     start_date=DEFAULT_START_DATE,
     schedule=None,
     catchup=False,
+    render_template_as_native_obj=True,
     max_active_runs=1,
     default_args=default_dag_args(),
+    user_defined_macros=default_user_defined_macros(),
     params=backfill_dispatcher_params(),
     tags=["dq-platform", "backfill", "dispatcher", "manual", "approval-gated"],
     doc_md=DOC_MD,

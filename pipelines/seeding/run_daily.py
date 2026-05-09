@@ -17,6 +17,7 @@ from pipelines.common.pipeline_runs import write_pipeline_run
 from pipelines.seeding.config import OrdersSeedConfig, load_orders_config
 from pipelines.seeding.generate_orders import generate_and_write_orders
 from pipelines.seeding.helpers import iter_dates, parse_date
+from pipelines.seeding.incident_policy import IncidentResolution, write_incident_ground_truth_to_s3
 
 
 # --- Defining Functions
@@ -84,7 +85,7 @@ def run_orders_landing(
         Summary dictionary for the full run.
     """
     logger.info(
-        "Starting orders landing run | dates=%s upload=%s scenario=%s",
+        "Starting orders landing run | dates=%s upload=%s requested_scenario=%s",
         [item.isoformat() for item in dates],
         upload,
         incident_scenario,
@@ -110,6 +111,17 @@ def run_orders_landing(
                 incident_scenario=incident_scenario,
             )
 
+            resolved_scenario = generated.get("resolved_incident_scenario", incident_scenario)
+            ground_truth_uri  = None
+
+            logger.info(
+                "Orders landing partition generated | dt=%s requested_scenario=%s resolved_scenario=%s rows=%s",
+                run_dt,
+                incident_scenario,
+                resolved_scenario,
+                generated["rows"],
+            )
+
             if upload:
                 # Import lazily so local --no-upload smoke tests do not require boto3 on the host.
                 from pipelines.seeding.upload_to_s3 import upload_orders_partition
@@ -118,6 +130,14 @@ def run_orders_landing(
                     dt=run_dt,
                     config=config,
                     local_path=generated["local_path"],
+                    endpoint_url=endpoint_url,
+                )
+
+                incident_resolution = IncidentResolution.model_validate(generated["incident_resolution"])
+                ground_truth_uri    = write_incident_ground_truth_to_s3(
+                    resolution=incident_resolution,
+                    generated_summary=generated,
+                    uploaded_summary=uploaded,
                     endpoint_url=endpoint_url,
                 )
 
@@ -139,7 +159,11 @@ def run_orders_landing(
                         "runner": "pipelines.seeding.run_daily",
                         "upload_enabled": upload,
                         "target_s3_uri": uploaded["s3_uri"] if uploaded else target_s3_uri,
-                        "incident_scenario": incident_scenario,
+                        "requested_incident_scenario": incident_scenario,
+                        "resolved_incident_scenario": resolved_scenario,
+                        "selected_incidents": generated.get("incident_resolution", {}).get("selected_incidents", []),
+                        "incident_results": generated.get("incident_results", []),
+                        "ground_truth_s3_uri": ground_truth_uri,
                     },
                 )
 
@@ -149,7 +173,11 @@ def run_orders_landing(
                     "rows": generated["rows"],
                     "local_path": generated["local_path"],
                     "s3_uri": uploaded["s3_uri"] if uploaded else None,
-                    "incident_scenario": incident_scenario,
+                    "incident_scenario": resolved_scenario,
+                    "requested_incident_scenario": incident_scenario,
+                    "resolved_incident_scenario": resolved_scenario,
+                    "selected_incidents": generated.get("incident_resolution", {}).get("selected_incidents", []),
+                    "ground_truth_s3_uri": ground_truth_uri,
                 }
             )
 
@@ -174,7 +202,8 @@ def run_orders_landing(
                         "runner": "pipelines.seeding.run_daily",
                         "upload_enabled": upload,
                         "target_s3_uri": target_s3_uri,
-                        "incident_scenario": incident_scenario,
+                        "requested_incident_scenario": incident_scenario,
+                        "resolved_incident_scenario": generated.get("resolved_incident_scenario") if generated else "",
                     },
                 )
 

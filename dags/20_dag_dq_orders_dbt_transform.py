@@ -15,6 +15,7 @@ from dq_platform.helpers import (
     DEFAULT_START_DATE,
     common_dag_params,
     default_dag_args,
+    default_user_defined_macros,
     finish_task,
     runner_bash_task,
     start_task,
@@ -26,12 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 # --- Defining DAG ID And Documentation
-DAG_ID = "01_dag_dq_orders_dbt_transform"
+DAG_ID = "20_dag_dq_orders_dbt_transform"
 
 DOC_MD = """
-# 01 - Orders dbt Transform
+# 20 - Orders dbt Transform
 
 Run the dbt transformation layer for the orders dataset:
+
+Schedule: none. This DAG is triggered by the platform daily orchestrator or manual runs.
 
 1. Validate dbt connectivity with `dbt debug`.
 2. Build staging and mart models for the requested date window.
@@ -55,12 +58,14 @@ with DAG(
     dag_id=DAG_ID,
     description="Run dbt orders transforms/tests and upload dbt artifacts to SeaweedFS S3.",
     start_date=DEFAULT_START_DATE,
-    schedule="@daily",
+    schedule=None,
     catchup=False,
+    render_template_as_native_obj=True,
     max_active_runs=1,
     default_args=default_dag_args(),
+    user_defined_macros=default_user_defined_macros(),
     params=common_dag_params(),
-    tags=["dq-platform", "orders", "dbt", "transform", "daily"],
+    tags=["dq-platform", "orders", "dbt", "transform", "triggered"],
     doc_md=DOC_MD,
 ) as dag:
     """

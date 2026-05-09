@@ -15,6 +15,7 @@ from dq_platform.helpers import (
     DEFAULT_START_DATE,
     common_dag_params,
     default_dag_args,
+    default_user_defined_macros,
     finish_task,
     runner_bash_task,
     start_task,
@@ -26,13 +27,15 @@ logger = logging.getLogger(__name__)
 
 
 # --- Defining DAG ID And Documentation
-DAG_ID = "00_02_dag_dq_orders_load_raw_clickhouse"
+DAG_ID = "12_dag_dq_orders_load_raw_clickhouse"
 
 DOC_MD = """
-# 00.02 - Orders S3 To ClickHouse Raw
+# 12 - Orders S3 To ClickHouse Raw
 
 Load orders Parquet partition(s) from SeaweedFS S3 into `dq.raw_orders`.
 The loader is idempotent by date: it drops/replaces the target `dt` partition before insert.
+
+Schedule: none. This DAG is triggered by the landing orchestrator or manual runs.
 
 Manual `dag_run.conf` examples:
 
@@ -52,12 +55,14 @@ with DAG(
     dag_id=DAG_ID,
     description="Load orders landing partitions from SeaweedFS S3 into ClickHouse raw_orders.",
     start_date=DEFAULT_START_DATE,
-    schedule="@daily",
+    schedule=None,
     catchup=False,
+    render_template_as_native_obj=True,
     max_active_runs=1,
     default_args=default_dag_args(),
+    user_defined_macros=default_user_defined_macros(),
     params=common_dag_params(),
-    tags=["dq-platform", "orders", "clickhouse", "raw", "daily"],
+    tags=["dq-platform", "orders", "clickhouse", "raw", "triggered"],
     doc_md=DOC_MD,
 ) as dag:
     """

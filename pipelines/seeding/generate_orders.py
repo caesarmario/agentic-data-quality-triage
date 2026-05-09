@@ -23,6 +23,7 @@ from pipelines.seeding.helpers import (
     parse_date,
     stable_day_index,
 )
+from pipelines.seeding.incident_policy import resolve_incident_scenario_for_date
 from pipelines.seeding.incidents import apply_incidents, resolve_incident_names
 
 
@@ -69,15 +70,18 @@ def generate_orders_for_date(
     Returns:
         DataFrame with event-level order rows following the raw_orders contract.
     """
-    total_days = config.generation.default_total_days_for_trend
-    day_index  = stable_day_index(dt, total_days)
-    seed_value = config.seed_for_date(dt, namespace=f"orders.generate.{incident_scenario}")
+    resolution                  = resolve_incident_scenario_for_date(dt=dt, requested_scenario=incident_scenario)
+    resolved_incident_scenario  = resolution.resolved_scenario
+    total_days                  = config.generation.default_total_days_for_trend
+    day_index                   = stable_day_index(dt, total_days)
+    seed_value                  = config.seed_for_date(dt, namespace=f"orders.generate.{resolved_incident_scenario}")
 
     logger.info(
-        "Generating orders partition | dt=%s seed=%s scenario=%s day_index=%d total_days=%d",
+        "Generating orders partition | dt=%s seed=%s requested_scenario=%s resolved_scenario=%s day_index=%d total_days=%d",
         dt,
         seed_value,
         incident_scenario,
+        resolved_incident_scenario,
         day_index,
         total_days,
     )
@@ -109,23 +113,24 @@ def generate_orders_for_date(
                         day_index=day_index,
                         total_days=total_days,
                         config=config,
-                        incident_scenario=incident_scenario,
+                        incident_scenario=resolved_incident_scenario,
                     )
                 )
                 sequence += 1
 
-    incident_names     = resolve_incident_names(incident_scenario)
+    incident_names     = resolve_incident_names(resolved_incident_scenario)
     incident_results   = []
     incident_row_count = len(rows)
 
     if incident_names:
-        incident_seed = config.seed_for_date(dt, namespace=f"orders.incidents.{incident_scenario}")
+        incident_seed = config.seed_for_date(dt, namespace=f"orders.incidents.{resolved_incident_scenario}")
         incident_rng  = random.Random(incident_seed)
 
         logger.info(
-            "Injecting order incidents | dt=%s scenario=%s seed=%s incidents=%s input_rows=%d",
+            "Injecting order incidents | dt=%s requested_scenario=%s resolved_scenario=%s seed=%s incidents=%s input_rows=%d",
             dt,
             incident_scenario,
+            resolved_incident_scenario,
             incident_seed,
             incident_names,
             incident_row_count,
@@ -140,14 +145,18 @@ def generate_orders_for_date(
         )
 
     frame = pd.DataFrame.from_records(rows, columns=ORDER_COLUMNS)
-    frame.attrs["incident_results"] = incident_results
+    frame.attrs["incident_results"]             = incident_results
+    frame.attrs["incident_resolution"]          = resolution.model_dump(mode="json")
+    frame.attrs["requested_incident_scenario"]  = incident_scenario
+    frame.attrs["resolved_incident_scenario"]   = resolved_incident_scenario
 
     logger.info(
-        "Orders partition generated | dt=%s rows=%d countries=%d channels=%d incidents=%s",
+        "Orders partition generated | dt=%s rows=%d countries=%d channels=%d resolved_scenario=%s incidents=%s",
         dt,
         len(frame),
         len(config.country_codes),
         len(config.channel_names),
+        resolved_incident_scenario,
         incident_results,
     )
 
@@ -219,7 +228,10 @@ def generate_and_write_orders(
         "dt": dt.isoformat(),
         "rows": int(len(frame)),
         "local_path": str(parquet_path),
-        "incident_scenario": incident_scenario,
+        "incident_scenario": frame.attrs.get("resolved_incident_scenario", incident_scenario),
+        "requested_incident_scenario": frame.attrs.get("requested_incident_scenario", incident_scenario),
+        "resolved_incident_scenario": frame.attrs.get("resolved_incident_scenario", incident_scenario),
+        "incident_resolution": frame.attrs.get("incident_resolution", {}),
         "incident_results": frame.attrs.get("incident_results", []),
         "s3_bucket": config.output.bucket,
         "s3_key": config.output.object_key(dt),
