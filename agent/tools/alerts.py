@@ -1,4 +1,4 @@
-####
+﻿####
 ## Alert Lookup Tool for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
@@ -25,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from agent.state import Alert
 from agent.tools.audit_log import write_agent_audit_event
 from agent.tools.clickhouse_sql import rows_to_dicts
+from pipelines.common.alert_identity import build_alert_ref, is_alert_ref
 from pipelines.common.clickhouse import build_clickhouse_client, format_date_literal, quote_sql_literal
 from pipelines.common.logging import logger
 from pipelines.seeding.helpers import parse_date
@@ -47,7 +48,7 @@ def build_alert_filters(
 
     Args:
         alert_id: Optional alert UUID string.
-        alert_key: Optional stable alert key.
+        alert_key: Optional stable alert key or human-facing alert reference.
         status: Optional alert status filter.
         dt: Optional business date in YYYY-MM-DD format.
 
@@ -60,7 +61,17 @@ def build_alert_filters(
         filters.append(f"alert_id = toUUID({quote_sql_literal(str(alert_id))})")
 
     if alert_key:
-        filters.append(f"alert_key = {quote_sql_literal(alert_key)}")
+        normalized_alert_key = alert_key.strip()
+
+        if is_alert_ref(normalized_alert_key):
+            display_id_filter = (
+                f"alert_display_id = {quote_sql_literal(normalized_alert_key.upper())} "
+                f"OR alert_key = {quote_sql_literal(normalized_alert_key)}"
+            )
+            filters.append(f"({display_id_filter})")
+
+        else:
+            filters.append(f"alert_key = {quote_sql_literal(normalized_alert_key)}")
 
     if status:
         filters.append(f"status = {quote_sql_literal(status)}")
@@ -83,7 +94,7 @@ def build_alert_lookup_sql(
 
     Args:
         alert_id: Optional alert UUID string.
-        alert_key: Optional stable alert key.
+        alert_key: Optional stable alert key or human-facing alert reference.
         status: Optional alert status filter.
         dt: Optional business date in YYYY-MM-DD format.
         limit: Maximum alerts to return.
@@ -99,6 +110,7 @@ def build_alert_lookup_sql(
         SELECT
             alert_id,
             alert_key,
+            alert_display_id,
             created_at,
             updated_at,
             status,
@@ -135,7 +147,7 @@ def query_alert_rows(
     Args:
         client: clickhouse-connect client instance.
         alert_id: Optional alert UUID string.
-        alert_key: Optional stable alert key.
+        alert_key: Optional stable alert key or human-facing alert reference.
         status: Optional alert status filter.
         dt: Optional business date in YYYY-MM-DD format.
         limit: Maximum alerts to return.
@@ -147,6 +159,13 @@ def query_alert_rows(
     result    = client.query(sql)
     columns   = list(result.column_names or [])
     rows      = rows_to_dicts(columns=columns, rows=result.result_rows)
+
+    for row in rows:
+        if not row.get("alert_display_id"):
+            row["alert_display_id"] = build_alert_ref(
+                alert_key=str(row.get("alert_key") or ""),
+                dt=row.get("dt"),
+            )
 
     logger.info("Queried alerts | rows=%d status=%s dt=%s", len(rows), status, dt)
 
@@ -272,12 +291,21 @@ def load_alert(
             tool_name=TOOL_NAME,
             duration_ms=duration_ms,
             input_payload={"alert_id": alert_id, "alert_key": alert_key},
-            output_payload={"loaded_alert_key": alert.alert_key, "severity": alert.severity},
+            output_payload={
+                "loaded_alert_key": alert.alert_key,
+                "alert_display_id": alert.alert_display_id,
+                "severity": alert.severity,
+            },
             sql=sql,
             row_count=1,
         )
 
-        logger.info("Loaded alert | alert_key=%s severity=%s", alert.alert_key, alert.severity)
+        logger.info(
+            "Loaded alert | alert_display_id=%s alert_key=%s severity=%s",
+            alert.alert_display_id,
+            alert.alert_key,
+            alert.severity,
+        )
 
         return alert
 
@@ -359,3 +387,4 @@ def main() -> None:
 # --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()
+

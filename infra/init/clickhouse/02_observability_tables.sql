@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS dq.alerts
 (
     alert_id              UUID DEFAULT generateUUIDv4(),
     alert_key             String,
+    alert_display_id      String,
     created_at            DateTime64(3, 'UTC') DEFAULT now64(3),
     updated_at            DateTime64(3, 'UTC') DEFAULT now64(3),
     status                LowCardinality(String) DEFAULT 'open',
@@ -70,7 +71,7 @@ CREATE TABLE IF NOT EXISTS dq.alerts
 )
 ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(created_at)
-ORDER BY (alert_key, status, severity, created_at);
+ORDER BY (alert_key);
 
 -- --- Creating dq.pipeline_runs Table
 CREATE TABLE IF NOT EXISTS dq.pipeline_runs

@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
@@ -33,14 +32,20 @@ from agent.state import (
     TriageReport,
     TriageState,
 )
-from agent.tools.alerts import load_alert
-from agent.tools.audit_log import write_agent_audit_event
-from agent.tools.clickhouse_sql import run_guarded_sql
-from agent.tools.dbt_lineage import collect_dbt_lineage_evidence
-from agent.tools.dq_history import collect_dq_history_evidence
-from agent.tools.pipeline_runs import collect_pipeline_runs_evidence
-from agent.tools.s3 import store_triage_report
-from pipelines.common.clickhouse import build_clickhouse_client, format_date_literal, validate_qualified_table_name
+from agent.checkpointing import (
+    CHECKPOINT_MODE_OFF,
+    build_checkpoint_config,
+    checkpoint_exists,
+    load_checkpoint_settings,
+    open_checkpoint_saver,
+    resume_checkpointed_graph,
+)
+from agent.display import build_alert_one_liner, build_alert_ref, build_alert_title, build_report_id
+from agent.llm.client import LlmResponse, run_llm_task
+from agent.nodes import TriageNodeFactory
+from agent.planning.evidence import EVIDENCE_PLANNING_ROUTE, build_evidence_plan_for_state
+from agent.reasoning.hypotheses import HYPOTHESIS_FRAMING_ROUTE, frame_hypotheses_for_state
+from pipelines.common.clickhouse import format_date_literal, validate_qualified_table_name
 from pipelines.common.logging import logger
 
 
@@ -49,6 +54,7 @@ TOOL_NAME                 = "langgraph_triage"
 DEFAULT_CONFIDENCE_TARGET = 0.70
 DEFAULT_MAX_EVIDENCE_LOOP = 2
 DEFAULT_REPORT_PREFIX     = "agent-reports"
+REPORT_NARRATIVE_ROUTE    = "triage_reasoning"
 
 
 # --- Defining Classes
@@ -478,6 +484,130 @@ def build_approval_actions(state: TriageState, top_hypothesis: Hypothesis | None
     ]
 
 
+def build_report_narrative_context(state: TriageState) -> dict[str, Any]:
+    """
+    Build bounded context for optional LLM-assisted report narrative.
+
+    Args:
+        state: Current triage state.
+
+    Returns:
+        Dictionary with alert, top hypothesis, compact evidence summaries, and errors.
+    """
+    alert           = state.alert
+    top_hypothesis  = state.top_hypothesis
+    evidence_rows   = [
+        {
+            "tool_name": item.tool_name,
+            "summary": item.summary,
+            "row_count": item.row_count,
+        }
+        for item in state.evidence[:8]
+    ]
+
+    return {
+        "alert": alert.model_dump(mode="json") if alert else {},
+        "top_hypothesis": top_hypothesis.model_dump(mode="json") if top_hypothesis else {},
+        "evidence": evidence_rows,
+        "confidence": top_hypothesis.confidence if top_hypothesis else 0.0,
+        "errors": state.errors,
+    }
+
+
+def build_report_narrative_prompt(state: TriageState) -> str:
+    """
+    Build the prompt for optional LLM-assisted report narrative.
+
+    Args:
+        state: Current triage state.
+
+    Returns:
+        Prompt text for the routed LLM client.
+    """
+    alert = state.alert
+    top   = state.top_hypothesis
+
+    return (
+        "Write a concise senior data engineering triage narrative for this DQ alert. "
+        "Use only the provided evidence. Mention the likely root cause, likely impact, "
+        "and why remediation must stay approval-gated. "
+        f"Alert table={alert.table_name if alert else 'unknown'}, "
+        f"metric={alert.metric if alert else 'unknown'}, "
+        f"dt={alert.dt if alert else 'unknown'}, "
+        f"top_hypothesis={top.title if top else 'unknown'}."
+    )
+
+
+def build_llm_report_narrative(state: TriageState) -> LlmResponse:
+    """
+    Build optional LLM-assisted narrative text for the final report.
+
+    Args:
+        state: Current triage state.
+
+    Returns:
+        LlmResponse with content, model, token, fallback, and cost metadata.
+    """
+    logger.info("Building optional LLM report narrative | agent_run_id=%s", state.agent_run_id)
+
+    return run_llm_task(
+        route_name=REPORT_NARRATIVE_ROUTE,
+        prompt=build_report_narrative_prompt(state=state),
+        system_prompt=(
+            "You are a data reliability copilot. Keep the answer evidence-driven, concise, "
+            "and safe for an incident report. Do not invent facts."
+        ),
+        context=build_report_narrative_context(state=state),
+        agent_run_id=state.agent_run_id,
+    )
+
+
+def llm_response_to_evidence(response: LlmResponse) -> EvidenceItem:
+    """
+    Convert an LLM routing response into auditable report evidence.
+
+    Args:
+        response: Routed LLM response.
+
+    Returns:
+        EvidenceItem that captures route, provider, model, token, and cost metadata.
+    """
+    return EvidenceItem(
+        evidence_type=EvidenceType.NOTE,
+        tool_name="llm_router",
+        description="Optional LLM-assisted report narrative generated from collected evidence.",
+        rows=[
+            {
+                "route_name": response.route_name,
+                "requested_route": response.metadata.get("requested_route", response.route_name),
+                "executed_route": response.metadata.get("executed_route", response.route_name),
+                "attempted_routes": response.metadata.get("attempted_routes", [response.route_name]),
+                "provider": response.provider,
+                "model": response.model,
+                "used_heuristic": response.used_heuristic,
+                "fallback_reason": response.fallback_reason,
+                "input_tokens": response.input_tokens,
+                "output_tokens": response.output_tokens,
+                "estimated_cost_usd": response.estimated_cost_usd,
+                "duration_ms": response.duration_ms,
+                "structured_output_requested": response.metadata.get("structured_output_requested", False),
+                "structured_output_mode": response.metadata.get("structured_output_mode", ""),
+                "structured_output_status": response.metadata.get("structured_output_status", ""),
+                "structured_output_provider_fallback": response.metadata.get(
+                    "structured_output_provider_fallback",
+                    False,
+                ),
+                "provider_failures": response.metadata.get("provider_failures", []),
+            }
+        ],
+        row_count=1,
+        summary=(
+            f"LLM route {response.route_name} used provider {response.provider}/{response.model} "
+            f"with estimated cost USD {response.estimated_cost_usd:.8f}."
+        ),
+    )
+
+
 def render_markdown_report(report: TriageReport) -> str:
     """
     Render the final triage report as Markdown.
@@ -488,16 +618,25 @@ def render_markdown_report(report: TriageReport) -> str:
     Returns:
         Markdown report body.
     """
-    alert = report.alert
+    alert       = report.alert
+    alert_ref   = alert.alert_display_id or build_alert_ref(alert.alert_key, alert.dt)
+    issue_title = build_alert_title(alert)
+    issue_text  = build_alert_one_liner(alert)
+    report_id   = report.report_id or build_report_id(report.agent_run_id, alert.alert_key)
+
     lines = [
-        f"# Data Quality Triage Report - {alert.alert_key}",
+        f"# {issue_title}",
+        "",
+        f"Report ID: `{report_id}`",
+        f"Alert Ref: `{alert_ref}`",
         "",
         "## Summary",
         report.summary,
         "",
+        "## Plain-English Readout",
+        issue_text,
+        "",
         "## Alert Context",
-        f"- Alert Key: `{alert.alert_key}`",
-        f"- Alert ID: `{alert.alert_id}`",
         f"- Severity: `{alert.severity}`",
         f"- Status: `{alert.status}`",
         f"- Table: `{alert.table_name}`",
@@ -509,8 +648,28 @@ def render_markdown_report(report: TriageReport) -> str:
         "## Impact",
         report.impact,
         "",
-        "## Evidence Reviewed",
+        "## Evidence Plan",
     ]
+
+    if report.evidence_plan:
+        lines.extend(
+            [
+                f"- Planner Source: `{report.evidence_plan.planner_source}`",
+                f"- Investigation Question: {report.evidence_plan.investigation_question}",
+                f"- Model Route: `{report.evidence_plan.llm_route or 'none'}`",
+                f"- Policy Added: `{report.evidence_plan.policy_added_categories}`",
+                f"- Policy Priority Adjustments: `{report.evidence_plan.policy_adjusted_categories}`",
+            ]
+        )
+
+        for request in report.evidence_plan.requests:
+            lines.append(
+                f"- `{request.category}` priority `{request.priority}` required `{request.required}`: {request.reason}"
+            )
+    else:
+        lines.append("- No evidence plan was recorded; deterministic baseline collectors were used.")
+
+    lines.extend(["", "## Evidence Reviewed"])
 
     for index, evidence in enumerate(report.evidence, start=1):
         lines.extend(
@@ -521,6 +680,22 @@ def render_markdown_report(report: TriageReport) -> str:
             ]
         )
 
+    lines.extend(["", "## Hypothesis Framing"])
+
+    if report.hypothesis_framing:
+        lines.extend(
+            [
+                f"- Source: `{report.hypothesis_framing.source}`",
+                f"- Model Route: `{report.hypothesis_framing.requested_route or 'none'}`",
+                f"- Provider: `{report.hypothesis_framing.provider or 'deterministic fallback'}`",
+                f"- Model: `{report.hypothesis_framing.model or 'none'}`",
+                f"- Accepted Categories: `{report.hypothesis_framing.accepted_categories}`",
+                f"- Policy Adjustments: `{report.hypothesis_framing.policy_adjustments}`",
+            ]
+        )
+    else:
+        lines.append("- Deterministic hypothesis wording was used without model framing metadata.")
+
     lines.extend(["", "## Hypotheses"])
 
     for index, hypothesis in enumerate(report.hypotheses, start=1):
@@ -529,6 +704,7 @@ def render_markdown_report(report: TriageReport) -> str:
                 f"{index}. {hypothesis.title}",
                 f"   - Confidence: `{hypothesis.confidence:.2f}`",
                 f"   - Category: `{hypothesis.root_cause_category}`",
+                f"   - Wording Source: `{hypothesis.framing_source}`",
                 f"   - Why: {hypothesis.description}",
                 f"   - Action: {hypothesis.recommended_action}",
             ]
@@ -575,18 +751,24 @@ def render_markdown_report(report: TriageReport) -> str:
             "## Artifacts",
             "- Markdown Report: `{{MARKDOWN_REPORT_S3_URI}}`",
             "- JSON Report: `{{JSON_REPORT_S3_URI}}`",
+            "",
+            "## Technical Reference",
+            f"- System Alert Key: `{alert.alert_key}`",
+            f"- ClickHouse Alert ID: `{alert.alert_id}`",
+            f"- Agent Run ID: `{report.agent_run_id}`",
         ]
     )
 
     return "\n".join(lines).strip() + "\n"
 
 
-def build_report_from_state(state: TriageState) -> TriageReport:
+def build_report_from_state(state: TriageState, llm_narrative: LlmResponse | None = None) -> TriageReport:
     """
     Build the final TriageReport model from current state.
 
     Args:
         state: Current triage state.
+        llm_narrative: Optional routed LLM narrative response.
 
     Returns:
         Final triage report with Markdown body populated.
@@ -602,10 +784,12 @@ def build_report_from_state(state: TriageState) -> TriageReport:
 
     top_hypothesis = state.top_hypothesis
     confidence     = top_hypothesis.confidence if top_hypothesis else 0.0
+    report_id      = build_report_id(state.agent_run_id, state.alert.alert_key)
+    issue_title    = build_alert_title(state.alert)
 
     summary = (
-        f"{state.alert.severity} alert on {state.alert.table_name}.{state.alert.metric} "
-        f"for {state.alert.dt}; most likely cause is {top_hypothesis.title if top_hypothesis else 'unknown'}."
+        f"{state.alert.severity} alert: {issue_title}. "
+        f"Most likely cause is {top_hypothesis.title if top_hypothesis else 'unknown'}."
     )
     impact = (
         "Downstream staging, mart, DQ reporting, and dashboard metrics for the affected date may be incomplete "
@@ -615,6 +799,9 @@ def build_report_from_state(state: TriageState) -> TriageReport:
 
     if top_hypothesis and top_hypothesis.recommended_action:
         recommended_actions.append(top_hypothesis.recommended_action)
+
+    if llm_narrative and llm_narrative.content:
+        recommended_actions.append(f"LLM-assisted narrative: {llm_narrative.content}")
 
     recommended_actions.append("Review the stored evidence before approving any mutating remediation action.")
 
@@ -626,6 +813,8 @@ def build_report_from_state(state: TriageState) -> TriageReport:
         hypotheses=state.hypotheses,
         top_hypothesis=top_hypothesis,
         evidence=state.evidence,
+        evidence_plan=state.evidence_plan,
+        hypothesis_framing=state.hypothesis_framing,
         confidence=confidence,
         recommended_actions=recommended_actions,
         approval_gated_actions=build_approval_actions(state=state, top_hypothesis=top_hypothesis),
@@ -633,6 +822,7 @@ def build_report_from_state(state: TriageState) -> TriageReport:
             "The agent did not mutate production data; remediation still requires human approval.",
             "If source data is genuinely absent, backfill will not repair the issue without regenerating or restoring landing data.",
         ],
+        report_id=report_id,
     )
     report.markdown_report = render_markdown_report(report)
 
@@ -641,386 +831,60 @@ def build_report_from_state(state: TriageState) -> TriageReport:
     return report
 
 
-def build_triage_graph(config: TriageRuntimeConfig):
+def build_triage_graph(
+    config: TriageRuntimeConfig,
+    checkpointer: Any | None = None,
+):
     """
     Build the LangGraph workflow for evidence-driven triage.
 
     Args:
         config: Runtime dependencies and optional connection overrides.
+        checkpointer: Optional LangGraph saver used for persistent state.
 
     Returns:
         Compiled LangGraph application.
     """
     from langgraph.graph import END, StateGraph
 
-    def load_alert_node(graph_state: GraphState) -> GraphState:
-        """
-        Load alert context from ClickHouse.
-
-        Args:
-            graph_state: Current graph state.
-
-        Returns:
-            Updated graph state with alert populated.
-        """
-        state       = get_state(graph_state)
-        state.alert = load_alert(
-            alert_id=str(state.alert_id) if state.alert_id else None,
-            alert_key=state.alert_key or None,
-            agent_run_id=state.agent_run_id,
-            clickhouse_host=config.clickhouse_host,
-            clickhouse_port=config.clickhouse_port,
-        )
-
-        logger.info("Graph loaded alert | agent_run_id=%s alert_key=%s", state.agent_run_id, state.alert.alert_key)
-
-        return {"state": state}
-
-    def gather_context_node(graph_state: GraphState) -> GraphState:
-        """
-        Gather baseline evidence using deterministic tools.
-
-        Args:
-            graph_state: Current graph state.
-
-        Returns:
-            Updated graph state with evidence appended.
-        """
-        state = get_state(graph_state)
-
-        if not state.alert:
-            raise ValueError("Alert must be loaded before gathering context.")
-
-        evidence_builders = [
-            ("current_partition_row_count", collect_current_partition_evidence),
-            ("dq_history", collect_dq_history_for_state),
-            ("pipeline_runs", collect_pipeline_runs_for_state),
-            ("dbt_lineage", collect_lineage_evidence),
-        ]
-
-        for name, builder in evidence_builders:
-            try:
-                state.add_evidence(builder(state))
-
-            except Exception as exc:
-                append_error(state, f"{name} failed: {exc}")
-
-        return {"state": state}
-
-    def collect_current_partition_evidence(state: TriageState) -> EvidenceItem:
-        """
-        Collect current partition row count evidence.
-
-        Args:
-            state: Current triage state.
-
-        Returns:
-            EvidenceItem with one row_count result.
-        """
-        if not state.alert:
-            raise ValueError("Alert must be loaded before partition evidence.")
-
-        result = run_guarded_sql(
-            sql=current_partition_sql(state.alert),
-            agent_run_id=state.agent_run_id,
-            alert_id=state.alert.alert_id,
-            alert_key=state.alert.alert_key,
-            hard_limit=10,
-            require_date_filter=True,
-            clickhouse_host=config.clickhouse_host,
-            clickhouse_port=config.clickhouse_port,
-        )
-        row_count = int(result.rows[0].get("row_count", 0)) if result.rows else 0
-        summary   = f"Current partition row count for {state.alert.table_name} on {state.alert.dt} is {row_count}."
-
-        return sql_result_to_evidence(
-            result=result,
-            description="Current partition row count for the alert table/date.",
-            summary=summary,
-        )
-
-    def collect_dq_history_for_state(state: TriageState) -> EvidenceItem:
-        """
-        Collect DQ history evidence for the loaded alert.
-
-        Args:
-            state: Current triage state.
-
-        Returns:
-            EvidenceItem with recent DQ check history.
-        """
-        if not state.alert:
-            raise ValueError("Alert must be loaded before DQ history evidence.")
-
-        return collect_dq_history_evidence(
-            alert=state.alert,
-            agent_run_id=state.agent_run_id,
-            clickhouse_host=config.clickhouse_host,
-            clickhouse_port=config.clickhouse_port,
-        )
-
-    def collect_pipeline_runs_for_state(state: TriageState) -> EvidenceItem:
-        """
-        Collect pipeline run evidence for the loaded alert.
-
-        Args:
-            state: Current triage state.
-
-        Returns:
-            EvidenceItem with recent pipeline run history.
-        """
-        if not state.alert:
-            raise ValueError("Alert must be loaded before pipeline run evidence.")
-
-        return collect_pipeline_runs_evidence(
-            alert=state.alert,
-            agent_run_id=state.agent_run_id,
-            clickhouse_host=config.clickhouse_host,
-            clickhouse_port=config.clickhouse_port,
-        )
-
-    def collect_lineage_evidence(state: TriageState) -> EvidenceItem:
-        """
-        Collect dbt lineage evidence for the affected table.
-
-        Args:
-            state: Current triage state.
-
-        Returns:
-            EvidenceItem with lineage rows.
-        """
-        if not state.alert:
-            raise ValueError("Alert must be loaded before lineage evidence.")
-
-        return collect_dbt_lineage_evidence(
-            alert=state.alert,
-            agent_run_id=state.agent_run_id,
-            manifest_path=config.manifest_path,
-            manifest_s3_uri=config.manifest_s3_uri,
-            endpoint_url=config.s3_endpoint_url,
-            clickhouse_host=config.clickhouse_host,
-            clickhouse_port=config.clickhouse_port,
-        )
-
-    def generate_hypotheses_node(graph_state: GraphState) -> GraphState:
-        """
-        Generate hypotheses from the current alert and evidence.
-
-        Args:
-            graph_state: Current graph state.
-
-        Returns:
-            Updated graph state with ranked hypotheses.
-        """
-        state            = get_state(graph_state)
-        state.hypotheses = build_hypotheses_for_state(state)
-
-        logger.info("Generated hypotheses | agent_run_id=%s count=%d", state.agent_run_id, len(state.hypotheses))
-
-        return {"state": state}
-
-    def rank_hypotheses_node(graph_state: GraphState) -> GraphState:
-        """
-        Rank hypotheses by confidence.
-
-        Args:
-            graph_state: Current graph state.
-
-        Returns:
-            Updated graph state with hypotheses sorted descending.
-        """
-        state            = get_state(graph_state)
-        state.hypotheses = sorted(state.hypotheses, key=lambda item: item.confidence, reverse=True)
-        top              = state.top_hypothesis
-
-        logger.info(
-            "Ranked hypotheses | agent_run_id=%s top=%s confidence=%s",
-            state.agent_run_id,
-            top.title if top else "none",
-            top.confidence if top else None,
-        )
-
-        return {"state": state}
-
-    def collect_extra_evidence_node(graph_state: GraphState) -> GraphState:
-        """
-        Collect additional evidence when confidence is below threshold.
-
-        Args:
-            graph_state: Current graph state.
-
-        Returns:
-            Updated graph state with extra evidence appended.
-        """
-        state = get_state(graph_state)
-
-        if not state.alert:
-            raise ValueError("Alert must be loaded before extra evidence.")
-
-        try:
-            result = run_guarded_sql(
-                sql=recent_partition_sql(state.alert),
-                agent_run_id=state.agent_run_id,
-                alert_id=state.alert.alert_id,
-                alert_key=state.alert.alert_key,
-                hard_limit=20,
-                require_date_filter=True,
-                clickhouse_host=config.clickhouse_host,
-                clickhouse_port=config.clickhouse_port,
-            )
-            summary = f"Recent partition row counts collected for {state.alert.table_name} around {state.alert.dt}."
-            state.add_evidence(
-                sql_result_to_evidence(
-                    result=result,
-                    description="Recent partition row counts for bounded confidence improvement.",
-                    summary=summary,
-                )
-            )
-
-        except Exception as exc:
-            append_error(state, f"extra_partition_evidence failed: {exc}")
-
-        state.evidence_iterations += 1
-        logger.info(
-            "Extra evidence loop completed | agent_run_id=%s iteration=%d",
-            state.agent_run_id,
-            state.evidence_iterations,
-        )
-
-        return {"state": state}
-
-    def finalize_report_node(graph_state: GraphState) -> GraphState:
-        """
-        Finalize the in-memory triage report.
-
-        Args:
-            graph_state: Current graph state.
-
-        Returns:
-            Updated graph state with report populated.
-        """
-        state        = get_state(graph_state)
-        state.report = build_report_from_state(state)
-
-        return {"state": state}
-
-    def store_report_node(graph_state: GraphState) -> GraphState:
-        """
-        Store Markdown and JSON report artifacts to S3.
-
-        Args:
-            graph_state: Current graph state.
-
-        Returns:
-            Updated graph state with report S3 URIs populated.
-        """
-        state = get_state(graph_state)
-
-        if not state.report:
-            raise ValueError("Report must be finalized before storing artifacts.")
-
-        storage_result = store_triage_report(
-            report=state.report,
-            bucket=config.artifacts_bucket,
-            prefix=config.artifacts_prefix,
-            endpoint_url=config.s3_endpoint_url,
-            clickhouse_host=config.clickhouse_host,
-            clickhouse_port=config.clickhouse_port,
-        )
-        state.add_evidence(
-            EvidenceItem(
-                evidence_type=EvidenceType.ARTIFACT,
-                tool_name="s3_artifacts",
-                description="Stored final Markdown and JSON triage report artifacts.",
-                rows=[storage_result],
-                row_count=2,
-                summary=f"Stored report artifacts at {storage_result['markdown_report_s3_uri']}.",
-                s3_uri=storage_result["markdown_report_s3_uri"],
-            )
-        )
-
-        logger.info("Stored report node completed | agent_run_id=%s", state.agent_run_id)
-
-        return {"state": state}
-
-    def write_final_audit_node(graph_state: GraphState) -> GraphState:
-        """
-        Write the final triage completion audit event.
-
-        Args:
-            graph_state: Current graph state.
-
-        Returns:
-            Current graph state after audit logging.
-        """
-        state = get_state(graph_state)
-
-        if not state.alert or not state.report:
-            raise ValueError("Alert and report are required before final audit logging.")
-
-        client       = build_clickhouse_client(host=config.clickhouse_host, port=config.clickhouse_port)
-        started_at   = time.monotonic()
-        duration_ms  = int((time.monotonic() - started_at) * 1000)
-
-        write_agent_audit_event(
-            client=client,
-            action="triage_completed",
-            status="success",
-            agent_run_id=state.agent_run_id,
-            alert_id=state.alert.alert_id,
-            alert_key=state.alert.alert_key,
-            tool_name=TOOL_NAME,
-            duration_ms=duration_ms,
-            input_payload={"alert_key": state.alert.alert_key},
-            output_payload={
-                "confidence": state.report.confidence,
-                "hypothesis_count": len(state.hypotheses),
-                "evidence_count": len(state.evidence),
-                "errors": state.errors,
-            },
-            row_count=len(state.evidence),
-            report_s3_uri=state.report.markdown_report_s3_uri,
-        )
-
-        logger.info("Triage completion audited | agent_run_id=%s", state.agent_run_id)
-
-        return {"state": state}
-
-    def route_after_rank(graph_state: GraphState) -> str:
-        """
-        Decide whether the workflow needs another evidence collection loop.
-
-        Args:
-            graph_state: Current graph state.
-
-        Returns:
-            Next route label.
-        """
-        state = get_state(graph_state)
-
-        if state.should_collect_more_evidence:
-            return "collect_extra_evidence"
-
-        return "finalize_report"
+    nodes = TriageNodeFactory(
+        config=config,
+        append_error=append_error,
+        current_partition_sql=current_partition_sql,
+        recent_partition_sql=recent_partition_sql,
+        sql_result_to_evidence=sql_result_to_evidence,
+        build_evidence_plan_for_state=build_evidence_plan_for_state,
+        build_hypotheses_for_state=build_hypotheses_for_state,
+        frame_hypotheses_for_state=frame_hypotheses_for_state,
+        build_llm_report_narrative=build_llm_report_narrative,
+        llm_response_to_evidence=llm_response_to_evidence,
+        build_report_from_state=build_report_from_state,
+        evidence_planning_route_name=EVIDENCE_PLANNING_ROUTE,
+        hypothesis_framing_route_name=HYPOTHESIS_FRAMING_ROUTE,
+        llm_route_name=REPORT_NARRATIVE_ROUTE,
+        tool_name=TOOL_NAME,
+    )
 
     workflow = StateGraph(GraphState)
 
-    workflow.add_node("load_alert", load_alert_node)
-    workflow.add_node("gather_context", gather_context_node)
-    workflow.add_node("generate_hypotheses", generate_hypotheses_node)
-    workflow.add_node("rank_hypotheses", rank_hypotheses_node)
-    workflow.add_node("collect_extra_evidence", collect_extra_evidence_node)
-    workflow.add_node("finalize_report", finalize_report_node)
-    workflow.add_node("store_report", store_report_node)
-    workflow.add_node("write_final_audit", write_final_audit_node)
+    workflow.add_node("load_alert", nodes.load_alert_node)
+    workflow.add_node("plan_evidence", nodes.plan_evidence_node)
+    workflow.add_node("gather_context", nodes.gather_context_node)
+    workflow.add_node("generate_hypotheses", nodes.generate_hypotheses_node)
+    workflow.add_node("rank_hypotheses", nodes.rank_hypotheses_node)
+    workflow.add_node("collect_extra_evidence", nodes.collect_extra_evidence_node)
+    workflow.add_node("finalize_report", nodes.finalize_report_node)
+    workflow.add_node("store_report", nodes.store_report_node)
+    workflow.add_node("write_final_audit", nodes.write_final_audit_node)
 
     workflow.set_entry_point("load_alert")
-    workflow.add_edge("load_alert", "gather_context")
+    workflow.add_edge("load_alert", "plan_evidence")
+    workflow.add_edge("plan_evidence", "gather_context")
     workflow.add_edge("gather_context", "generate_hypotheses")
     workflow.add_edge("generate_hypotheses", "rank_hypotheses")
     workflow.add_conditional_edges(
         "rank_hypotheses",
-        route_after_rank,
+        nodes.route_after_rank,
         {
             "collect_extra_evidence": "collect_extra_evidence",
             "finalize_report": "finalize_report",
@@ -1033,7 +897,32 @@ def build_triage_graph(config: TriageRuntimeConfig):
 
     logger.info("LangGraph triage workflow compiled")
 
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)
+
+
+def coerce_final_triage_state(result: dict[str, Any]) -> TriageState:
+    """
+    Coerce a LangGraph result into the project's typed triage state.
+
+    Args:
+        result: LangGraph output or persisted checkpoint values.
+
+    Returns:
+        Validated TriageState instance.
+
+    Raises:
+        ValueError: If the graph result does not contain a state channel.
+        pydantic.ValidationError: If persisted state does not match the contract.
+    """
+    raw_state = result.get("state")
+
+    if raw_state is None:
+        raise ValueError("Triage graph result does not contain state.")
+
+    if isinstance(raw_state, TriageState):
+        return raw_state
+
+    return TriageState.model_validate(raw_state)
 
 
 def run_triage(
@@ -1042,6 +931,11 @@ def run_triage(
     confidence_threshold: float = DEFAULT_CONFIDENCE_TARGET,
     max_evidence_iterations: int = DEFAULT_MAX_EVIDENCE_LOOP,
     config: TriageRuntimeConfig | None = None,
+    checkpoint_mode: str | None = None,
+    checkpoint_sqlite_path: str | None = None,
+    checkpoint_busy_timeout_ms: int | None = None,
+    checkpoint_thread_id: str | None = None,
+    checkpoint_resume: bool = False,
 ) -> TriageReport:
     """
     Run one bounded LangGraph triage workflow for an alert.
@@ -1052,39 +946,93 @@ def run_triage(
         confidence_threshold: Confidence needed before skipping extra evidence.
         max_evidence_iterations: Maximum extra evidence loop count.
         config: Optional runtime config.
+        checkpoint_mode: Optional checkpoint mode override. Defaults to environment or off.
+        checkpoint_sqlite_path: Optional absolute SQLite checkpoint path.
+        checkpoint_busy_timeout_ms: Optional SQLite lock timeout in milliseconds.
+        checkpoint_thread_id: Required stable thread id when checkpointing is enabled.
+        checkpoint_resume: Resume the latest persisted state instead of starting a new thread.
 
     Returns:
         Final triage report with S3 URIs populated.
 
     Raises:
-        ValueError: If no alert identifier is provided or report generation fails.
+        ValueError: If identifiers, checkpoint settings, or report generation are invalid.
     """
     if not alert_id and not alert_key:
         raise ValueError("Provide alert_id or alert_key to run triage.")
 
-    runtime_config = config or TriageRuntimeConfig()
-    state          = TriageState(
+    runtime_config      = config or TriageRuntimeConfig()
+    checkpoint_settings = load_checkpoint_settings(
+        mode=checkpoint_mode,
+        sqlite_path=checkpoint_sqlite_path,
+        busy_timeout_ms=checkpoint_busy_timeout_ms,
+    )
+    state = TriageState(
         agent_run_id=uuid4(),
         alert_id=UUID(str(alert_id)) if alert_id else None,
         alert_key=alert_key or "",
         confidence_threshold=confidence_threshold,
         max_evidence_iterations=max_evidence_iterations,
     )
-    graph          = build_triage_graph(runtime_config)
 
-    logger.info("Starting triage graph | agent_run_id=%s alert_key=%s", state.agent_run_id, alert_key)
+    if checkpoint_settings.enabled and not checkpoint_thread_id:
+        raise ValueError("checkpoint_thread_id is required when persistent checkpointing is enabled.")
 
-    result      = graph.invoke({"state": state})
-    final_state = result["state"]
+    if checkpoint_resume and not checkpoint_settings.enabled:
+        raise ValueError("checkpoint_resume requires an enabled checkpoint backend.")
+
+    if checkpoint_settings.mode == CHECKPOINT_MODE_OFF and checkpoint_thread_id:
+        logger.info("Ignoring checkpoint thread id because checkpoint mode is off")
+
+    logger.info(
+        "Starting triage graph | agent_run_id=%s alert_key=%s checkpoint_mode=%s checkpoint_thread_id=%s resume=%s",
+        state.agent_run_id,
+        alert_key,
+        checkpoint_settings.mode,
+        checkpoint_thread_id or "disabled",
+        checkpoint_resume,
+    )
+
+    with open_checkpoint_saver(checkpoint_settings) as checkpointer:
+        graph = build_triage_graph(runtime_config, checkpointer=checkpointer)
+
+        if checkpointer is None:
+            result = graph.invoke({"state": state})
+
+        else:
+            graph_config = build_checkpoint_config(checkpoint_thread_id or "")
+
+            if checkpoint_resume:
+                result, executed_pending_nodes = resume_checkpointed_graph(
+                    graph=graph,
+                    checkpointer=checkpointer,
+                    config=graph_config,
+                )
+                logger.info(
+                    "Checkpoint resume resolved | thread_id=%s executed_pending_nodes=%s",
+                    checkpoint_thread_id,
+                    executed_pending_nodes,
+                )
+
+            else:
+                if checkpoint_exists(checkpointer=checkpointer, config=graph_config):
+                    raise ValueError(
+                        "Checkpoint thread already exists; use checkpoint_resume or select a new run namespace."
+                    )
+
+                result = graph.invoke({"state": state}, config=graph_config)
+
+    final_state = coerce_final_triage_state(dict(result))
 
     if not final_state.report:
         raise ValueError("Triage graph completed without a report.")
 
     logger.info(
-        "Triage graph completed | agent_run_id=%s confidence=%.2f markdown_uri=%s",
+        "Triage graph completed | agent_run_id=%s confidence=%.2f markdown_uri=%s checkpoint_thread_id=%s",
         final_state.agent_run_id,
         final_state.report.confidence,
         final_state.report.markdown_report_s3_uri,
+        checkpoint_thread_id or "disabled",
     )
 
     return final_state.report
@@ -1110,6 +1058,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifacts-prefix", default=DEFAULT_REPORT_PREFIX, help="S3 prefix for report artifacts.")
     parser.add_argument("--clickhouse-host", default=None, help="Optional ClickHouse host override.")
     parser.add_argument("--clickhouse-port", type=int, default=None, help="Optional ClickHouse HTTP port override.")
+    parser.add_argument("--checkpoint-mode", default=None, help="Checkpoint mode: off or sqlite.")
+    parser.add_argument("--checkpoint-sqlite-path", default=None, help="Absolute SQLite checkpoint path.")
+    parser.add_argument("--checkpoint-thread-id", default=None, help="Stable checkpoint thread identifier.")
+    parser.add_argument("--checkpoint-resume", action="store_true", help="Resume an existing checkpoint thread.")
 
     return parser
 
@@ -1138,6 +1090,10 @@ def main() -> None:
         confidence_threshold=args.confidence_threshold,
         max_evidence_iterations=args.max_evidence_iterations,
         config=config,
+        checkpoint_mode=args.checkpoint_mode,
+        checkpoint_sqlite_path=args.checkpoint_sqlite_path,
+        checkpoint_thread_id=args.checkpoint_thread_id,
+        checkpoint_resume=args.checkpoint_resume,
     )
     summary = {
         "status": "success",

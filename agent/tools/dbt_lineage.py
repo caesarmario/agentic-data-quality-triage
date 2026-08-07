@@ -10,6 +10,7 @@ import argparse
 import json
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -31,8 +32,21 @@ from pipelines.seeding.upload_to_s3 import build_s3_client
 
 
 # --- Defining Constants
-TOOL_NAME                   = "dbt_lineage"
-DEFAULT_LOCAL_MANIFEST_PATH = PROJECT_ROOT / "warehouse" / "dbt" / "target" / "manifest.json"
+TOOL_NAME                    = "dbt_lineage"
+BLAST_RADIUS_TOOL_NAME       = "dbt_blast_radius"
+DEFAULT_LOCAL_MANIFEST_PATH  = PROJECT_ROOT / "warehouse" / "dbt" / "target" / "manifest.json"
+DEFAULT_BLAST_RADIUS_DEPTH   = 5
+DEFAULT_BLAST_RADIUS_NODES   = 100
+MAX_BLAST_RADIUS_DEPTH       = 10
+MAX_BLAST_RADIUS_NODES       = 250
+LINEAGE_RESOURCE_COLLECTIONS = (
+    "nodes",
+    "sources",
+    "exposures",
+    "metrics",
+    "semantic_models",
+    "saved_queries",
+)
 
 
 # --- Defining Functions
@@ -190,9 +204,9 @@ def node_to_summary(unique_id: str, node: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def combined_nodes(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def combined_table_nodes(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """
-    Combine dbt model/test nodes and sources into one lookup mapping.
+    Combine dbt model/test nodes and sources used for table matching.
 
     Args:
         manifest: Parsed dbt manifest dictionary.
@@ -203,6 +217,27 @@ def combined_nodes(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     nodes = {}
     nodes.update(manifest.get("nodes", {}))
     nodes.update(manifest.get("sources", {}))
+
+    return nodes
+
+
+def combined_nodes(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """
+    Combine dbt lineage resource collections into one lookup mapping.
+
+    Args:
+        manifest: Parsed dbt manifest dictionary.
+
+    Returns:
+        Mapping of dbt unique_id to model, source, test, exposure, or semantic metadata.
+    """
+    nodes: dict[str, dict[str, Any]] = {}
+
+    for collection_name in LINEAGE_RESOURCE_COLLECTIONS:
+        collection = manifest.get(collection_name, {})
+
+        if isinstance(collection, dict):
+            nodes.update(collection)
 
     return nodes
 
@@ -221,7 +256,7 @@ def find_node_for_table(manifest: dict[str, Any], table_name: str) -> tuple[str,
     normalized_table = normalize_relation_name(table_name)
     table_tail       = normalized_table.split(".")[-1]
 
-    for unique_id, node in combined_nodes(manifest).items():
+    for unique_id, node in combined_table_nodes(manifest).items():
         candidates = [
             node.get("relation_name", ""),
             f"{node.get('schema', '')}.{node.get('alias') or node.get('name', '')}",
@@ -281,6 +316,232 @@ def build_lineage_summary(manifest: dict[str, Any], table_name: str) -> dict[str
         "parents": parents,
         "children": children,
         "tests": tests,
+    }
+
+
+def validate_blast_radius_bounds(max_depth: int, max_nodes: int) -> tuple[int, int]:
+    """
+    Validate bounded downstream traversal settings.
+
+    Args:
+        max_depth: Maximum child-map depth below the selected dbt node.
+        max_nodes: Maximum downstream nodes returned, excluding the root node.
+
+    Returns:
+        Validated max_depth and max_nodes values.
+
+    Raises:
+        ValueError: If either traversal setting is outside the supported range.
+    """
+    if not 1 <= max_depth <= MAX_BLAST_RADIUS_DEPTH:
+        raise ValueError(
+            f"max_depth must be between 1 and {MAX_BLAST_RADIUS_DEPTH}."
+        )
+
+    if not 1 <= max_nodes <= MAX_BLAST_RADIUS_NODES:
+        raise ValueError(
+            f"max_nodes must be between 1 and {MAX_BLAST_RADIUS_NODES}."
+        )
+
+    return max_depth, max_nodes
+
+
+def impact_node_to_summary(
+    unique_id: str,
+    node: dict[str, Any] | None,
+    depth: int,
+    parent_unique_id: str,
+    path: tuple[str, ...],
+) -> dict[str, Any]:
+    """
+    Convert one traversed child into bounded blast-radius metadata.
+
+    Args:
+        unique_id: dbt unique identifier for the downstream node.
+        node: Optional manifest node metadata when the identifier is resolvable.
+        depth: Shortest downstream distance from the selected root node.
+        parent_unique_id: Parent used by the breadth-first traversal.
+        path: Shortest unique-id path from the root to this node.
+
+    Returns:
+        Compact downstream node summary without raw or compiled SQL.
+    """
+    summary = node_to_summary(unique_id, node or {})
+    summary.update(
+        {
+            "resource_type": summary.get("resource_type") or "unknown",
+            "depth": depth,
+            "parent_unique_id": parent_unique_id,
+            "lineage_path": list(path),
+        }
+    )
+
+    return summary
+
+
+def build_blast_radius_summary(
+    manifest: dict[str, Any],
+    table_name: str,
+    max_depth: int = DEFAULT_BLAST_RADIUS_DEPTH,
+    max_nodes: int = DEFAULT_BLAST_RADIUS_NODES,
+) -> dict[str, Any]:
+    """
+    Build a bounded transitive downstream blast radius from a dbt manifest.
+
+    The traversal is deterministic, breadth-first, cycle-safe, and excludes raw
+    or compiled SQL from its output. dbt tests are separated from downstream
+    data assets so operators can distinguish business impact from validation
+    coverage.
+
+    Args:
+        manifest: Parsed dbt manifest dictionary.
+        table_name: Fully qualified ClickHouse table name.
+        max_depth: Maximum downstream child-map depth.
+        max_nodes: Maximum downstream nodes returned, excluding the root node.
+
+    Returns:
+        Bounded blast-radius summary with assets, tests, counts, and truncation state.
+    """
+    resolved_depth, resolved_nodes = validate_blast_radius_bounds(
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+    )
+    match = find_node_for_table(manifest=manifest, table_name=table_name)
+
+    if not match:
+        return {
+            "table_name": table_name,
+            "matched": False,
+            "node": None,
+            "max_depth": resolved_depth,
+            "max_nodes": resolved_nodes,
+            "max_depth_reached": 0,
+            "truncated": False,
+            "total_impacted_nodes": 0,
+            "impacted_asset_count": 0,
+            "impacted_test_count": 0,
+            "unresolved_node_count": 0,
+            "resource_type_counts": {},
+            "impacted_assets": [],
+            "impacted_tests": [],
+            "unresolved_nodes": [],
+            "summary": f"No dbt manifest node matched {table_name}.",
+        }
+
+    root_unique_id, root_node = match
+    nodes                     = combined_nodes(manifest)
+    child_map                 = manifest.get("child_map", {})
+    queue                     = deque()
+    visited                   = {root_unique_id}
+    impacted_assets: list[dict[str, Any]] = []
+    impacted_tests: list[dict[str, Any]]  = []
+    unresolved_nodes: list[dict[str, Any]] = []
+    resource_type_counts: dict[str, int]   = {}
+    max_depth_reached = 0
+    truncated         = False
+
+    for child_unique_id in sorted(child_map.get(root_unique_id, [])):
+        queue.append(
+            (
+                child_unique_id,
+                1,
+                root_unique_id,
+                (root_unique_id, child_unique_id),
+            )
+        )
+
+    while queue:
+        unique_id, depth, parent_unique_id, path = queue.popleft()
+
+        if unique_id in visited:
+            continue
+
+        if len(visited) - 1 >= resolved_nodes:
+            truncated = True
+            break
+
+        visited.add(unique_id)
+        max_depth_reached = max(max_depth_reached, depth)
+
+        node         = nodes.get(unique_id)
+        node_summary = impact_node_to_summary(
+            unique_id=unique_id,
+            node=node,
+            depth=depth,
+            parent_unique_id=parent_unique_id,
+            path=path,
+        )
+        resource_type = str(node_summary["resource_type"])
+        resource_type_counts[resource_type] = resource_type_counts.get(resource_type, 0) + 1
+
+        if node is None:
+            unresolved_nodes.append(node_summary)
+
+        elif resource_type == "test":
+            impacted_tests.append(node_summary)
+
+        else:
+            impacted_assets.append(node_summary)
+
+        child_ids = [
+            child_id
+            for child_id in sorted(child_map.get(unique_id, []))
+            if child_id not in visited
+        ]
+
+        if depth >= resolved_depth:
+            truncated = truncated or bool(child_ids)
+            continue
+
+        for child_unique_id in child_ids:
+            queue.append(
+                (
+                    child_unique_id,
+                    depth + 1,
+                    unique_id,
+                    (*path, child_unique_id),
+                )
+            )
+
+    total_impacted_nodes = len(impacted_assets) + len(impacted_tests) + len(unresolved_nodes)
+    summary = (
+        f"{table_name} impacts {len(impacted_assets)} downstream data assets and "
+        f"{len(impacted_tests)} dbt tests across {max_depth_reached} levels."
+    )
+
+    if unresolved_nodes:
+        summary += f" {len(unresolved_nodes)} manifest references could not be resolved."
+
+    if truncated:
+        summary += " Result truncated by traversal bounds."
+
+    logger.info(
+        "Built dbt blast radius | table=%s assets=%d tests=%d unresolved=%d depth=%d truncated=%s",
+        table_name,
+        len(impacted_assets),
+        len(impacted_tests),
+        len(unresolved_nodes),
+        max_depth_reached,
+        truncated,
+    )
+
+    return {
+        "table_name": table_name,
+        "matched": True,
+        "node": node_to_summary(root_unique_id, root_node),
+        "max_depth": resolved_depth,
+        "max_nodes": resolved_nodes,
+        "max_depth_reached": max_depth_reached,
+        "truncated": truncated,
+        "total_impacted_nodes": total_impacted_nodes,
+        "impacted_asset_count": len(impacted_assets),
+        "impacted_test_count": len(impacted_tests),
+        "unresolved_node_count": len(unresolved_nodes),
+        "resource_type_counts": dict(sorted(resource_type_counts.items())),
+        "impacted_assets": impacted_assets,
+        "impacted_tests": impacted_tests,
+        "unresolved_nodes": unresolved_nodes,
+        "summary": summary,
     }
 
 
@@ -371,6 +632,121 @@ def fetch_dbt_lineage(
         raise
 
 
+def fetch_dbt_blast_radius(
+    table_name: str,
+    agent_run_id: UUID | str | None = None,
+    alert_key: str = "",
+    manifest_path: str | Path | None = None,
+    manifest_s3_uri: str | None = None,
+    endpoint_url: str | None = None,
+    max_depth: int = DEFAULT_BLAST_RADIUS_DEPTH,
+    max_nodes: int = DEFAULT_BLAST_RADIUS_NODES,
+    clickhouse_host: str | None = None,
+    clickhouse_port: int | None = None,
+) -> dict[str, Any]:
+    """
+    Fetch and audit a bounded transitive dbt blast-radius analysis.
+
+    Args:
+        table_name: Fully qualified ClickHouse table name.
+        agent_run_id: Optional agent run UUID for audit correlation.
+        alert_key: Optional alert key for audit context.
+        manifest_path: Optional local manifest path.
+        manifest_s3_uri: Optional S3 URI for manifest.json.
+        endpoint_url: Optional S3 endpoint URL override.
+        max_depth: Maximum downstream child-map depth.
+        max_nodes: Maximum downstream nodes returned, excluding the root node.
+        clickhouse_host: Optional ClickHouse host override for audit logging.
+        clickhouse_port: Optional ClickHouse HTTP port override for audit logging.
+
+    Returns:
+        Bounded blast-radius summary with manifest source metadata.
+    """
+    resolved_depth, resolved_nodes = validate_blast_radius_bounds(
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+    )
+    client                = build_clickhouse_client(host=clickhouse_host, port=clickhouse_port)
+    resolved_agent_run_id = UUID(str(agent_run_id)) if agent_run_id else uuid4()
+    started_monotonic     = time.monotonic()
+
+    try:
+        manifest, source = load_manifest(
+            manifest_path=manifest_path,
+            manifest_s3_uri=manifest_s3_uri,
+            endpoint_url=endpoint_url,
+        )
+        blast_radius = build_blast_radius_summary(
+            manifest=manifest,
+            table_name=table_name,
+            max_depth=resolved_depth,
+            max_nodes=resolved_nodes,
+        )
+        duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+
+        write_agent_audit_event(
+            client=client,
+            action="fetch_dbt_blast_radius",
+            status="success",
+            agent_run_id=resolved_agent_run_id,
+            alert_key=alert_key,
+            tool_name=BLAST_RADIUS_TOOL_NAME,
+            duration_ms=duration_ms,
+            input_payload={
+                "table_name": table_name,
+                "manifest_source": source,
+                "manifest_s3_uri": manifest_s3_uri,
+                "max_depth": resolved_depth,
+                "max_nodes": resolved_nodes,
+            },
+            output_payload={
+                "matched": blast_radius["matched"],
+                "impacted_asset_count": blast_radius["impacted_asset_count"],
+                "impacted_test_count": blast_radius["impacted_test_count"],
+                "unresolved_node_count": blast_radius["unresolved_node_count"],
+                "max_depth_reached": blast_radius["max_depth_reached"],
+                "truncated": blast_radius["truncated"],
+            },
+            row_count=blast_radius["total_impacted_nodes"],
+        )
+
+        blast_radius["manifest_source"] = source
+
+        logger.info(
+            "Fetched dbt blast radius | table=%s matched=%s impacted_nodes=%d truncated=%s",
+            table_name,
+            blast_radius["matched"],
+            blast_radius["total_impacted_nodes"],
+            blast_radius["truncated"],
+        )
+
+        return blast_radius
+
+    except Exception as exc:
+        duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+        logger.exception("Failed to fetch dbt blast radius | table=%s", table_name)
+
+        write_agent_audit_event(
+            client=client,
+            action="fetch_dbt_blast_radius",
+            status="failed",
+            agent_run_id=resolved_agent_run_id,
+            alert_key=alert_key,
+            tool_name=BLAST_RADIUS_TOOL_NAME,
+            duration_ms=duration_ms,
+            input_payload={
+                "table_name": table_name,
+                "manifest_s3_uri": manifest_s3_uri,
+                "max_depth": resolved_depth,
+                "max_nodes": resolved_nodes,
+            },
+            output_payload={"error_type": type(exc).__name__},
+            error_message=str(exc),
+        )
+
+        raise
+
+
 def collect_dbt_lineage_evidence(
     alert: Alert,
     agent_run_id: UUID | str | None = None,
@@ -435,6 +811,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest-s3-uri", default=None, help="Optional S3 URI for manifest.json.")
     parser.add_argument("--endpoint-url", default=None, help="Optional S3 endpoint URL override.")
     parser.add_argument("--agent-run-id", default=None, help="Optional agent run UUID.")
+    parser.add_argument(
+        "--blast-radius",
+        action="store_true",
+        help="Return bounded transitive downstream impact instead of direct lineage only.",
+    )
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=DEFAULT_BLAST_RADIUS_DEPTH,
+        help=f"Maximum downstream depth for blast radius, up to {MAX_BLAST_RADIUS_DEPTH}.",
+    )
+    parser.add_argument(
+        "--max-nodes",
+        type=int,
+        default=DEFAULT_BLAST_RADIUS_NODES,
+        help=f"Maximum downstream nodes for blast radius, up to {MAX_BLAST_RADIUS_NODES}.",
+    )
     parser.add_argument("--clickhouse-host", default=None, help="Optional ClickHouse host override.")
     parser.add_argument("--clickhouse-port", type=int, default=None, help="Optional ClickHouse HTTP port override.")
 
@@ -454,6 +847,24 @@ def main() -> None:
     if args.alert_key:
         resolved_agent_run_id = args.agent_run_id or str(uuid4())
         alert                 = load_alert(alert_key=args.alert_key, agent_run_id=resolved_agent_run_id)
+
+        if args.blast_radius:
+            blast_radius = fetch_dbt_blast_radius(
+                table_name=alert.table_name,
+                agent_run_id=resolved_agent_run_id,
+                alert_key=alert.alert_key,
+                manifest_path=args.manifest_path,
+                manifest_s3_uri=args.manifest_s3_uri,
+                endpoint_url=args.endpoint_url,
+                max_depth=args.max_depth,
+                max_nodes=args.max_nodes,
+                clickhouse_host=args.clickhouse_host,
+                clickhouse_port=args.clickhouse_port,
+            )
+            print(json.dumps(blast_radius, indent=2, default=str))
+
+            return
+
         evidence = collect_dbt_lineage_evidence(
             alert=alert,
             agent_run_id=resolved_agent_run_id,
@@ -470,15 +881,30 @@ def main() -> None:
     if not args.table_name:
         parser.error("Provide --alert-key or --table-name.")
 
-    lineage = fetch_dbt_lineage(
-        table_name=args.table_name,
-        agent_run_id=args.agent_run_id,
-        manifest_path=args.manifest_path,
-        manifest_s3_uri=args.manifest_s3_uri,
-        endpoint_url=args.endpoint_url,
-        clickhouse_host=args.clickhouse_host,
-        clickhouse_port=args.clickhouse_port,
-    )
+    if args.blast_radius:
+        lineage = fetch_dbt_blast_radius(
+            table_name=args.table_name,
+            agent_run_id=args.agent_run_id,
+            manifest_path=args.manifest_path,
+            manifest_s3_uri=args.manifest_s3_uri,
+            endpoint_url=args.endpoint_url,
+            max_depth=args.max_depth,
+            max_nodes=args.max_nodes,
+            clickhouse_host=args.clickhouse_host,
+            clickhouse_port=args.clickhouse_port,
+        )
+
+    else:
+        lineage = fetch_dbt_lineage(
+            table_name=args.table_name,
+            agent_run_id=args.agent_run_id,
+            manifest_path=args.manifest_path,
+            manifest_s3_uri=args.manifest_s3_uri,
+            endpoint_url=args.endpoint_url,
+            clickhouse_host=args.clickhouse_host,
+            clickhouse_port=args.clickhouse_port,
+        )
+
     print(json.dumps(lineage, indent=2, default=str))
 
 

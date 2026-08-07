@@ -37,6 +37,10 @@ Run the LangGraph triage agent for one alert or a bounded list of open alerts.
 This DAG does not mutate data or trigger remediation. It collects evidence through guarded tools,
 stores Markdown/JSON reports in `dq-artifacts`, and writes audit events to ClickHouse.
 
+Persistent LangGraph checkpoints are optional and default to `off`. When SQLite mode is enabled,
+the DAG derives one stable thread per alert from the DagRun namespace. Airflow task retries resume
+that thread instead of creating a second investigation.
+
 Schedule: none. This DAG is triggered by the platform daily orchestrator or manual runs.
 
 Manual `dag_run.conf` examples:
@@ -47,6 +51,10 @@ Manual `dag_run.conf` examples:
 
 ```json
 {"alert_key": "orders|dq_failure|2026-05-04|dq.raw_orders|row_count_positive|table", "run_triage": true}
+```
+
+```json
+{"alert_key": "orders|dq_failure|2026-05-04|dq.raw_orders|row_count_positive|table", "checkpoint_mode": "sqlite"}
 ```
 """
 
@@ -89,6 +97,22 @@ def triage_dag_params() -> dict[str, Param]:
                 maximum=20,
                 description="Maximum alerts to triage for a date/date range.",
             ),
+            "checkpoint_mode": Param(
+                "off",
+                type="string",
+                enum=["off", "sqlite"],
+                description="Optional LangGraph persistence backend. Off preserves existing behavior.",
+            ),
+            "checkpoint_namespace": Param(
+                "",
+                type="string",
+                description="Optional run namespace. Blank derives a stable value from DAG id and run id.",
+            ),
+            "checkpoint_resume": Param(
+                False,
+                type="boolean",
+                description="Resume existing threads. SQLite task retries enable this automatically.",
+            ),
         }
     )
 
@@ -127,6 +151,13 @@ with DAG(
             "--alert-id '{{ dag_run.conf.get(\"alert_id\", \"\") }}' "
             "--status '{{ dag_run.conf.get(\"alert_status\", \"open\") }}' "
             "--limit '{{ dag_run.conf.get(\"max_alerts\", 5) }}' "
+            "--checkpoint-mode '{{ dag_run.conf.get(\"checkpoint_mode\", \"off\") }}' "
+            "--checkpoint-namespace "
+            "'{{ dag_run.conf.get(\"checkpoint_namespace\", \"\") or (dag.dag_id ~ \":\" ~ run_id) }}' "
+            "{% if dag_run.conf.get(\"checkpoint_mode\", \"off\") == \"sqlite\" "
+            "and (dag_run.conf.get(\"checkpoint_resume\", false) or task_instance.try_number > 1) %}"
+            "--checkpoint-resume "
+            "{% endif %}"
             "--manifest-s3-uri s3://dq-artifacts/dbt-artifacts/orders/latest/manifest.json"
         ),
         execution_timeout=timedelta(minutes=30),

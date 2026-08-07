@@ -9,11 +9,12 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from pipelines.common.alert_identity import build_alert_ref
 from pipelines.common.logging import logger
 
 
@@ -71,6 +72,25 @@ class EvidenceType(str, Enum):
     NOTE         = "note"
 
 
+class EvidenceCategory(str, Enum):
+    """
+    Allowlisted evidence categories that an evidence plan may request.
+
+    Values:
+        CURRENT_PARTITION_ROW_COUNT: Guarded row count for the affected partition.
+        DQ_HISTORY: Recent deterministic DQ check history.
+        PIPELINE_RUNS: Recent Airflow/pipeline execution status.
+        DBT_LINEAGE: Upstream and downstream dbt lineage context.
+        RECENT_PARTITION_TREND: Guarded recent partition row-count trend.
+    """
+
+    CURRENT_PARTITION_ROW_COUNT = "current_partition_row_count"
+    DQ_HISTORY                 = "dq_history"
+    PIPELINE_RUNS              = "pipeline_runs"
+    DBT_LINEAGE                = "dbt_lineage"
+    RECENT_PARTITION_TREND     = "recent_partition_trend"
+
+
 class ToolStatus(str, Enum):
     """
     Tool execution status labels.
@@ -118,6 +138,7 @@ class Alert(BaseModel):
     Attributes:
         alert_id: ClickHouse alert UUID.
         alert_key: Stable idempotency key for the alert.
+        alert_display_id: Short human-facing alert reference for operators.
         created_at: UTC timestamp when the alert was created.
         updated_at: UTC timestamp when the alert was last updated.
         status: Alert lifecycle status.
@@ -139,6 +160,7 @@ class Alert(BaseModel):
 
     alert_id: UUID | None              = None
     alert_key: str
+    alert_display_id: str              = ""
     created_at: datetime | None        = None
     updated_at: datetime | None        = None
     status: AlertStatus | str          = AlertStatus.OPEN
@@ -171,9 +193,99 @@ class Alert(BaseModel):
         if "details_json" in payload and "details" not in payload:
             payload["details"] = parse_json_object(payload.pop("details_json"))
 
+        if not payload.get("alert_display_id"):
+            payload["alert_display_id"] = build_alert_ref(
+                alert_key=str(payload.get("alert_key") or ""),
+                dt=payload.get("dt"),
+            )
+
         logger.info("Building alert state from ClickHouse row | alert_key=%s", payload.get("alert_key"))
 
         return cls.model_validate(payload)
+
+    @model_validator(mode="after")
+    def ensure_alert_display_id(self) -> "Alert":
+        """
+        Ensure every Alert has a human-facing display identifier.
+
+        Returns:
+            Current Alert instance with alert_display_id populated.
+        """
+        if not self.alert_display_id:
+            self.alert_display_id = build_alert_ref(alert_key=self.alert_key, dt=self.dt)
+
+        return self
+
+
+class EvidenceRequest(BaseModel):
+    """
+    Describe one bounded evidence category requested by the planner.
+
+    Attributes:
+        category: Allowlisted evidence category; never raw SQL or a command.
+        reason: Short explanation of why this evidence helps the investigation.
+        priority: Relative collection priority where 1 is highest.
+        required: Whether deterministic policy requires this category.
+    """
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    category: EvidenceCategory
+    reason: str              = Field(min_length=8, max_length=320)
+    priority: int            = Field(default=3, ge=1, le=5)
+    required: bool           = False
+
+
+class EvidencePlan(BaseModel):
+    """
+    Typed and auditable plan used before deterministic evidence collection.
+
+    Attributes:
+        investigation_question: Human-readable question the evidence should answer.
+        requests: Unique allowlisted evidence requests in collection order.
+        planner_source: Whether the plan came from an LLM or a safe fallback.
+        policy_added_categories: Categories added by deterministic policy.
+        policy_adjusted_categories: Categories whose priority was corrected by policy.
+        llm_route: Model route requested by the planner.
+        llm_provider: Provider that handled the planning request.
+        llm_model: Model selected by the route.
+        created_at: UTC timestamp when the plan was finalized.
+    """
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    investigation_question: str = Field(min_length=8, max_length=320)
+    requests: list[EvidenceRequest] = Field(min_length=1, max_length=5)
+    planner_source: Literal[
+        "llm",
+        "llm_with_policy",
+        "provider_fallback",
+        "error_fallback",
+    ] = "provider_fallback"
+    policy_added_categories: list[EvidenceCategory] = Field(default_factory=list)
+    policy_adjusted_categories: list[EvidenceCategory] = Field(default_factory=list)
+    llm_route: str             = ""
+    llm_provider: str          = ""
+    llm_model: str             = ""
+    created_at: datetime       = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @model_validator(mode="after")
+    def validate_unique_categories(self) -> "EvidencePlan":
+        """
+        Reject duplicate categories before any collector is selected.
+
+        Returns:
+            Current plan when request categories are unique.
+
+        Raises:
+            ValueError: If one evidence category appears more than once.
+        """
+        categories = [str(item.category) for item in self.requests]
+
+        if len(categories) != len(set(categories)):
+            raise ValueError("Evidence plan categories must be unique")
+
+        return self
 
 
 class EvidenceItem(BaseModel):
@@ -236,6 +348,8 @@ class Hypothesis(BaseModel):
         supporting_evidence_ids: Evidence ids that support the hypothesis.
         opposing_evidence_ids: Evidence ids that weaken the hypothesis.
         recommended_action: Recommended next action if this hypothesis is true.
+        framing_source: Whether wording came from deterministic policy or a validated LLM proposal.
+        framing_notes: Policy notes applied while accepting or rejecting model-authored wording.
     """
 
     hypothesis_id: str                 = Field(default_factory=lambda: str(uuid4()))
@@ -247,6 +361,38 @@ class Hypothesis(BaseModel):
     supporting_evidence_ids: list[str] = Field(default_factory=list)
     opposing_evidence_ids: list[str]   = Field(default_factory=list)
     recommended_action: str            = ""
+    framing_source: Literal["deterministic", "llm"] = "deterministic"
+    framing_notes: list[str]                         = Field(default_factory=list)
+
+
+class HypothesisFraming(BaseModel):
+    """
+    Describe how candidate hypothesis wording was produced and policy-enforced.
+
+    Attributes:
+        source: Final framing path used for the current hypothesis set.
+        requested_route: Model route requested by the hypothesis specialist.
+        provider: Provider that handled the framing request or fallback.
+        model: Model selected by the resolved route.
+        accepted_categories: Root-cause categories whose model wording passed policy.
+        policy_adjustments: Sanitized changes made by deterministic policy.
+        created_at: UTC timestamp when framing completed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal[
+        "llm",
+        "llm_with_policy",
+        "provider_fallback",
+        "error_fallback",
+    ] = "provider_fallback"
+    requested_route: str             = ""
+    provider: str                    = ""
+    model: str                       = ""
+    accepted_categories: list[str]   = Field(default_factory=list)
+    policy_adjustments: list[str]    = Field(default_factory=list)
+    created_at: datetime             = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ApprovalGatedAction(BaseModel):
@@ -329,10 +475,13 @@ class TriageReport(BaseModel):
         hypotheses: Ranked hypotheses.
         top_hypothesis: Most likely root cause hypothesis.
         evidence: Evidence items reviewed.
+        evidence_plan: Bounded plan that selected deterministic evidence categories.
+        hypothesis_framing: Audit metadata for model-assisted hypothesis wording.
         confidence: Final confidence score from 0.0 to 1.0.
         recommended_actions: Non-mutating recommended next steps.
         approval_gated_actions: Actions that require user approval.
         residual_risks: Remaining risks or open questions.
+        report_id: Short operator-facing report identifier.
         markdown_report: Markdown report body.
         json_report_s3_uri: S3 URI for JSON report.
         markdown_report_s3_uri: S3 URI for Markdown report.
@@ -346,10 +495,13 @@ class TriageReport(BaseModel):
     hypotheses: list[Hypothesis]
     top_hypothesis: Hypothesis | None              = None
     evidence: list[EvidenceItem]                   = Field(default_factory=list)
+    evidence_plan: EvidencePlan | None             = None
+    hypothesis_framing: HypothesisFraming | None   = None
     confidence: float                              = Field(ge=0.0, le=1.0)
     recommended_actions: list[str]                 = Field(default_factory=list)
     approval_gated_actions: list[ApprovalGatedAction] = Field(default_factory=list)
     residual_risks: list[str]                      = Field(default_factory=list)
+    report_id: str                                 = ""
     markdown_report: str                           = ""
     json_report_s3_uri: str                        = ""
     markdown_report_s3_uri: str                    = ""
@@ -366,7 +518,9 @@ class TriageState(BaseModel):
         alert_key: Optional stable alert key to load.
         alert: Loaded alert context.
         evidence: Evidence collected so far.
+        evidence_plan: Typed plan controlling allowlisted evidence collection.
         hypotheses: Candidate hypotheses generated so far.
+        hypothesis_framing: Metadata for bounded model-assisted hypothesis wording.
         report: Final triage report.
         audit_events: In-memory tool audit events.
         errors: Non-fatal errors collected during triage.
@@ -380,7 +534,9 @@ class TriageState(BaseModel):
     alert_key: str                                  = ""
     alert: Alert | None                             = None
     evidence: list[EvidenceItem]                    = Field(default_factory=list)
+    evidence_plan: EvidencePlan | None              = None
     hypotheses: list[Hypothesis]                    = Field(default_factory=list)
+    hypothesis_framing: HypothesisFraming | None    = None
     report: TriageReport | None                     = None
     audit_events: list[ToolAuditEvent]              = Field(default_factory=list)
     errors: list[str]                               = Field(default_factory=list)

@@ -1,4 +1,4 @@
-####
+﻿####
 ## DQ Alert Generator for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
@@ -25,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from pipelines.common.clickhouse import build_clickhouse_client, format_date_literal, quote_sql_literal, scalar
+from pipelines.common.alert_identity import build_alert_ref
 from pipelines.common.logging import logger
 from pipelines.dq.config import OrdersDqContract, load_orders_dq_contract
 from pipelines.seeding.helpers import iter_dates, parse_date
@@ -36,6 +37,7 @@ ALERTS_TABLE     = "dq.alerts"
 
 ALERT_COLUMNS = [
     "alert_key",
+    "alert_display_id",
     "status",
     "alert_type",
     "severity",
@@ -59,6 +61,7 @@ class AlertCandidate:
 
     Attributes:
         alert_key: Stable idempotency key for the alert.
+        alert_display_id: Short human-facing reference for operators and Discord/UI users.
         status: Alert lifecycle status, usually open.
         alert_type: Alert type such as dq_failure.
         severity: Business severity copied from the DQ check.
@@ -74,6 +77,7 @@ class AlertCandidate:
     """
 
     alert_key: str
+    alert_display_id: str
     status: str
     alert_type: str
     severity: str
@@ -96,6 +100,7 @@ class AlertCandidate:
         """
         return [
             self.alert_key,
+            self.alert_display_id,
             self.status,
             self.alert_type,
             self.severity,
@@ -285,6 +290,7 @@ def build_alert_candidates(client: Any, contract: OrdersDqContract, dt: date) ->
         candidates.append(
             AlertCandidate(
                 alert_key=alert_key,
+                alert_display_id=build_alert_ref(alert_key=alert_key, dt=result["dt"]),
                 status=contract.alerts.open_status,
                 alert_type=contract.alerts.alert_type,
                 severity=result["severity"],
@@ -525,3 +531,4 @@ def main() -> None:
 # --- Running CLI Entrypoint
 if __name__ == "__main__":
     main()
+

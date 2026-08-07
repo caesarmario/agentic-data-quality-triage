@@ -28,6 +28,11 @@ from agent.graph import (
     TriageRuntimeConfig,
     run_triage,
 )
+from agent.checkpointing import (
+    CHECKPOINT_MODE_OFF,
+    build_checkpoint_thread_id,
+    load_checkpoint_settings,
+)
 from agent.tools.alerts import list_alerts
 from pipelines.common.logging import logger
 from pipelines.seeding.helpers import iter_dates, parse_date
@@ -160,7 +165,33 @@ def run_single_alert_triage(
     Returns:
         Compact triage result dictionary.
     """
-    logger.info("Running single alert triage | alert_id=%s alert_key=%s", alert_id, alert_key)
+    checkpoint_settings  = load_checkpoint_settings(
+        mode=args.checkpoint_mode,
+        sqlite_path=clean_optional(args.checkpoint_sqlite_path),
+        busy_timeout_ms=args.checkpoint_busy_timeout_ms,
+    )
+    checkpoint_thread_id = None
+
+    if checkpoint_settings.enabled:
+        checkpoint_namespace = clean_optional(args.checkpoint_namespace)
+        correlation_value    = alert_key or alert_id or ""
+
+        if not checkpoint_namespace:
+            raise ValueError("checkpoint_namespace is required when checkpointing is enabled.")
+
+        checkpoint_thread_id = build_checkpoint_thread_id(
+            namespace=checkpoint_namespace,
+            correlation_value=correlation_value,
+        )
+
+    logger.info(
+        "Running single alert triage | alert_id=%s alert_key=%s checkpoint_mode=%s checkpoint_thread_id=%s resume=%s",
+        alert_id,
+        alert_key,
+        checkpoint_settings.mode,
+        checkpoint_thread_id or "disabled",
+        args.checkpoint_resume,
+    )
 
     report = run_triage(
         alert_id=alert_id,
@@ -168,6 +199,11 @@ def run_single_alert_triage(
         confidence_threshold=args.confidence_threshold,
         max_evidence_iterations=args.max_evidence_iterations,
         config=config,
+        checkpoint_mode=checkpoint_settings.mode,
+        checkpoint_sqlite_path=checkpoint_settings.sqlite_path,
+        checkpoint_busy_timeout_ms=checkpoint_settings.busy_timeout_ms,
+        checkpoint_thread_id=checkpoint_thread_id,
+        checkpoint_resume=args.checkpoint_resume,
     )
 
     return {
@@ -180,6 +216,9 @@ def run_single_alert_triage(
         "top_hypothesis": report.top_hypothesis.title if report.top_hypothesis else None,
         "markdown_report_s3_uri": report.markdown_report_s3_uri,
         "json_report_s3_uri": report.json_report_s3_uri,
+        "checkpoint_mode": checkpoint_settings.mode,
+        "checkpoint_thread_id": checkpoint_thread_id or "",
+        "checkpoint_resume_requested": args.checkpoint_resume,
     }
 
 
@@ -312,6 +351,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifacts-prefix", default=DEFAULT_REPORT_PREFIX, help="S3 prefix for report artifacts.")
     parser.add_argument("--clickhouse-host", default=None, help="Optional ClickHouse host override.")
     parser.add_argument("--clickhouse-port", type=int, default=None, help="Optional ClickHouse HTTP port override.")
+    parser.add_argument(
+        "--checkpoint-mode",
+        default=CHECKPOINT_MODE_OFF,
+        help="Checkpoint mode: off or sqlite. Defaults to off.",
+    )
+    parser.add_argument(
+        "--checkpoint-namespace",
+        default=None,
+        help="Run-scoped namespace used to derive one safe thread id per alert.",
+    )
+    parser.add_argument(
+        "--checkpoint-sqlite-path",
+        default=None,
+        help="Optional absolute SQLite checkpoint path override.",
+    )
+    parser.add_argument(
+        "--checkpoint-busy-timeout-ms",
+        type=int,
+        default=None,
+        help="Optional SQLite lock timeout in milliseconds.",
+    )
+    parser.add_argument(
+        "--checkpoint-resume",
+        action="store_true",
+        help="Resume each derived checkpoint thread instead of starting it.",
+    )
 
     return parser
 

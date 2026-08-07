@@ -24,6 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from agent.display import build_report_id
 from agent.state import TriageReport
 from agent.tools.audit_log import write_agent_audit_event
 from pipelines.common.clickhouse import build_clickhouse_client
@@ -187,11 +188,13 @@ def build_report_artifact_keys(
     dt_token          = report.alert.dt.isoformat() if report.alert.dt else "unknown"
     alert_key_hash   = hash_text(report.alert.alert_key)
     agent_run_id     = str(report.agent_run_id)
+    report_id        = report.report_id or f"RPT-{hash_text(agent_run_id, length=8).upper()}"
     normalized_prefix = prefix.strip("/")
 
     base_key = (
         f"{normalized_prefix}/"
         f"dt={dt_token}/"
+        f"report_id={report_id}/"
         f"alert_key_hash={alert_key_hash}/"
         f"agent_run_id={agent_run_id}"
     )
@@ -246,6 +249,11 @@ def store_triage_report(
         clickhouse_connect.driver.exceptions.ClickHouseError: If audit logging fails.
     """
     resolved_bucket       = resolve_artifacts_bucket(bucket)
+
+    # Ensure manually constructed report objects still get a searchable operator id.
+    if not report.report_id:
+        report.report_id = build_report_id(report.agent_run_id, report.alert.alert_key)
+
     markdown_key, json_key = build_report_artifact_keys(report=report, prefix=prefix)
     client                = build_clickhouse_client(host=clickhouse_host, port=clickhouse_port)
     started_monotonic     = time.monotonic()
@@ -279,6 +287,7 @@ def store_triage_report(
         result = {
             "status": "success",
             "bucket": resolved_bucket,
+            "report_id": report.report_id,
             "markdown_key": markdown_key,
             "json_key": json_key,
             "markdown_report_s3_uri": markdown_uri,

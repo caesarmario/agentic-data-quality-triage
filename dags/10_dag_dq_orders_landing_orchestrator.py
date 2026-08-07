@@ -13,6 +13,7 @@ from airflow.sdk import DAG
 
 from dq_platform.helpers import (
     DEFAULT_START_DATE,
+    DEFAULT_TRIGGER_RESET_DAG_RUN,
     common_dag_params,
     default_dag_args,
     default_user_defined_macros,
@@ -91,7 +92,7 @@ with DAG(
         poke_interval=15,
         allowed_states=["success"],
         failed_states=["failed"],
-        reset_dag_run=False,
+        reset_dag_run=DEFAULT_TRIGGER_RESET_DAG_RUN,
     )
 
     t20_trigger_load_raw_clickhouse = TriggerDagRunOperator(
@@ -105,7 +106,7 @@ with DAG(
         poke_interval=15,
         allowed_states=["success"],
         failed_states=["failed"],
-        reset_dag_run=False,
+        reset_dag_run=DEFAULT_TRIGGER_RESET_DAG_RUN,
     )
 
     t90_finish = finish_task()

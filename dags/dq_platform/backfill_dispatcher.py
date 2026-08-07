@@ -8,11 +8,31 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
+import sys
 import time
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+
+
+# --- Configuring Project Path
+LOCAL_PROJECT_ROOT   = Path(__file__).resolve().parents[2]
+AIRFLOW_PROJECT_ROOT = Path(os.getenv("DQ_PROJECT_ROOT", "/opt/airflow/project"))
+PROJECT_ROOT         = AIRFLOW_PROJECT_ROOT if AIRFLOW_PROJECT_ROOT.is_dir() else LOCAL_PROJECT_ROOT
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from agent.tools.approval_queue import (
+    ApprovalExecutionStatus,
+    ApprovalRequest,
+    backfill_parameters_from_conf,
+    require_approved_backfill_request,
+    transition_approval_execution,
+)
 
 
 # --- Getting Logger
@@ -220,6 +240,7 @@ def build_child_conf(
         "reason": reason,
         "reset_dag_run": reset_dag_run,
         "backfill_dispatcher": "90_dag_dq_platform_backfill_dispatcher",
+        "approval_request_id": str(conf_value(parent_conf, "approval_request_id", "")).strip(),
     }
 
 
@@ -393,6 +414,88 @@ def wait_for_child_completion(
         time.sleep(poll_interval_sec)
 
 
+def validate_execution_approval(
+    parent_conf: dict[str, Any],
+    dry_run: bool,
+    target_dag_id: str,
+    start_date: date,
+    end_date: date,
+) -> ApprovalRequest | None:
+    """
+    Enforce a durable exact-scope approval before creating child DAG runs.
+
+    Args:
+        parent_conf: Raw dispatcher dag_run.conf dictionary.
+        dry_run: Whether the dispatcher is preview-only.
+        target_dag_id: Operational DAG proposed for execution.
+        start_date: Inclusive proposed start date.
+        end_date: Inclusive proposed end date.
+
+    Returns:
+        Matching approved request for real execution, otherwise None for dry-run.
+
+    Raises:
+        ValueError: If a real execution lacks a matching approved request.
+    """
+    if dry_run:
+        logger.info("Approval gate bypassed for non-mutating dry-run preview")
+        return None
+
+    approval_request_id = str(conf_value(parent_conf, "approval_request_id", "")).strip()
+    execution_parameters = backfill_parameters_from_conf(parent_conf)
+
+    approval = require_approved_backfill_request(
+        request_id=approval_request_id,
+        target_dag_id=target_dag_id,
+        start_date=start_date,
+        end_date=end_date,
+        parameters=execution_parameters,
+    )
+
+    logger.info(
+        "Backfill execution authorized by durable approval | request_id=%s decided_by=%s",
+        approval.request_id,
+        approval.decided_by,
+    )
+
+    return approval
+
+
+def mark_approval_execution_failed(
+    request_id: str,
+    parent_run_id: str,
+    requested_by: str,
+    error: Exception,
+) -> None:
+    """
+    Persist a failed approval execution without hiding the original dispatcher error.
+
+    Args:
+        request_id: Human-facing APR request identifier.
+        parent_run_id: Parent Airflow dispatcher DagRun identifier.
+        requested_by: Operator identity from dag_run.conf.
+        error: Original dispatch or child execution exception.
+
+    Returns:
+        None. Persistence failures are logged and remain secondary to the original error.
+    """
+    try:
+        transition_approval_execution(
+            request_id=request_id,
+            execution_status=ApprovalExecutionStatus.FAILED,
+            execution_dag_run_id=parent_run_id,
+            error_message=f"{type(error).__name__}: {error}",
+            actor=f"airflow:{requested_by}",
+        )
+
+    except Exception:
+        logger.exception(
+            "Failed to persist approval execution failure | request_id=%s parent_run_id=%s",
+            request_id,
+            parent_run_id,
+        )
+
+
 def run_backfill_dispatcher(**context: Any) -> dict[str, Any]:
     """
     Dispatch one target DAG run per date in the requested backfill window.
@@ -401,7 +504,10 @@ def run_backfill_dispatcher(**context: Any) -> dict[str, Any]:
         **context: Airflow task context containing dag_run and run metadata.
 
     Returns:
-        Summary dictionary with trigger previews/results.
+        Summary dictionary with trigger previews/results and execution state.
+
+    Raises:
+        RuntimeError: If a child run fails or dispatcher execution cannot complete.
     """
     dag_run     = context["dag_run"]
     parent_conf = dict(dag_run.conf or {})
@@ -420,51 +526,121 @@ def run_backfill_dispatcher(**context: Any) -> dict[str, Any]:
     poll_interval_sec   = parse_int(conf_value(parent_conf, "poll_interval_sec", DEFAULT_POLL_INTERVAL_SEC), DEFAULT_POLL_INTERVAL_SEC, 5, 300)
     timeout_sec         = parse_int(conf_value(parent_conf, "timeout_sec", DEFAULT_WAIT_TIMEOUT_SEC), DEFAULT_WAIT_TIMEOUT_SEC, 60, 86400)
     run_dates           = iter_backfill_dates(start_date=start_dt, end_date=end_dt, max_dates=max_dates)
+    approval            = validate_execution_approval(
+        parent_conf=parent_conf,
+        dry_run=dry_run,
+        target_dag_id=target_dag_id,
+        start_date=start_dt,
+        end_date=end_dt,
+    )
+    approval_request_id = approval.request_id if approval is not None else ""
 
     logger.info(
-        "Starting backfill dispatcher | target=%s start=%s end=%s dates=%d dry_run=%s requested_by=%s",
+        "Starting backfill dispatcher | target=%s start=%s end=%s dates=%d dry_run=%s requested_by=%s approval_request_id=%s",
         target_dag_id,
         start_dt,
         end_dt,
         len(run_dates),
         dry_run,
         requested_by,
+        approval_request_id or "not_required_for_dry_run",
     )
 
-    results = []
+    results          = []
+    child_failures   = []
+    approval_claimed = False
+    execution_status = "preview"
 
-    for run_dt in run_dates:
-        child_conf = build_child_conf(
-            parent_conf=parent_conf,
-            run_dt=run_dt,
-            target_dag_id=target_dag_id,
-            requested_by=requested_by,
-            reason=reason,
-            reset_dag_run=reset_dag_run,
-        )
-        run_id = build_child_run_id(target_dag_id=target_dag_id, run_dt=run_dt, parent_run_id=parent_id)
-        result = trigger_child_dag(
-            target_dag_id=target_dag_id,
-            run_id=run_id,
-            run_dt=run_dt,
-            child_conf=child_conf,
-            dry_run=dry_run,
-        )
+    try:
+        if approval is not None:
+            transition_approval_execution(
+                request_id=approval.request_id,
+                execution_status=ApprovalExecutionStatus.DISPATCHING,
+                execution_dag_run_id=parent_id,
+                actor=f"airflow:{requested_by}",
+            )
+            approval_claimed = True
 
-        if wait_for_completion and not dry_run:
-            final_state = wait_for_child_completion(
+            logger.info(
+                "Claimed approval request for single-use execution | request_id=%s parent_run_id=%s",
+                approval.request_id,
+                parent_id,
+            )
+
+        for run_dt in run_dates:
+            child_conf = build_child_conf(
+                parent_conf=parent_conf,
+                run_dt=run_dt,
+                target_dag_id=target_dag_id,
+                requested_by=requested_by,
+                reason=reason,
+                reset_dag_run=reset_dag_run,
+            )
+            run_id = build_child_run_id(target_dag_id=target_dag_id, run_dt=run_dt, parent_run_id=parent_id)
+            result = trigger_child_dag(
                 target_dag_id=target_dag_id,
                 run_id=run_id,
-                poll_interval_sec=poll_interval_sec,
-                timeout_sec=timeout_sec,
+                run_dt=run_dt,
+                child_conf=child_conf,
+                dry_run=dry_run,
             )
-            result["final_state"] = final_state
 
-            if final_state == "failed" and fail_fast:
-                results.append(result)
-                raise RuntimeError(f"Child DAG failed and fail_fast=true: {target_dag_id}:{run_id}")
+            if wait_for_completion and not dry_run:
+                final_state = wait_for_child_completion(
+                    target_dag_id=target_dag_id,
+                    run_id=run_id,
+                    poll_interval_sec=poll_interval_sec,
+                    timeout_sec=timeout_sec,
+                )
+                result["final_state"] = final_state
 
-        results.append(result)
+                if final_state != "success":
+                    child_failures.append(f"{target_dag_id}:{run_id}:{final_state}")
+
+                    if fail_fast:
+                        results.append(result)
+                        raise RuntimeError(
+                            f"Child DAG failed and fail_fast=true: {target_dag_id}:{run_id}"
+                        )
+
+            results.append(result)
+
+        if child_failures:
+            raise RuntimeError(
+                "One or more child DAG runs failed after complete date-range dispatch: "
+                + ", ".join(child_failures)
+            )
+
+        if approval is not None:
+            final_execution_status = (
+                ApprovalExecutionStatus.SUCCEEDED
+                if wait_for_completion
+                else ApprovalExecutionStatus.DISPATCHED
+            )
+            final_approval, _ = transition_approval_execution(
+                request_id=approval.request_id,
+                execution_status=final_execution_status,
+                execution_dag_run_id=parent_id,
+                actor=f"airflow:{requested_by}",
+            )
+            execution_status = final_execution_status.value
+
+    except Exception as exc:
+        if approval_claimed and approval_request_id:
+            mark_approval_execution_failed(
+                request_id=approval_request_id,
+                parent_run_id=parent_id,
+                requested_by=requested_by,
+                error=exc,
+            )
+
+        logger.exception(
+            "Backfill dispatcher failed | target=%s approval_request_id=%s parent_run_id=%s",
+            target_dag_id,
+            approval_request_id,
+            parent_id,
+        )
+        raise
 
     summary = {
         "status": "success",
@@ -473,6 +649,8 @@ def run_backfill_dispatcher(**context: Any) -> dict[str, Any]:
         "target_dag_id": target_dag_id,
         "requested_by": requested_by,
         "reason": reason,
+        "approval_request_id": approval_request_id,
+        "execution_status": execution_status,
         "date_count": len(run_dates),
         "results": results,
         "dispatched_at": datetime.now(BANGKOK_TIMEZONE).isoformat(),

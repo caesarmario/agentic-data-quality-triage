@@ -41,7 +41,7 @@ That design keeps each business date isolated in its own child DAG run, making A
 pipeline observability, and agent recommendations easier to audit.
 
 Default behavior is `dry_run=true`, so the first run previews what would be triggered.
-Set `dry_run=false` only after approval.
+Set `dry_run=false` only with an approved, exact-scope `approval_request_id`.
 
 Manual `dag_run.conf` example:
 
@@ -52,6 +52,7 @@ Manual `dag_run.conf` example:
   "target_dag_id": "00_dag_dq_platform_daily_orchestrator",
   "requested_by": "mario",
   "reason": "agent recommended backfill for missing latest-day orders data",
+  "approval_request_id": "",
   "dry_run": true,
   "reset_dag_run": false,
   "wait_for_completion": false,
@@ -98,6 +99,14 @@ def backfill_dispatcher_params() -> dict[str, Param]:
             "manual_backfill",
             type="string",
             description="Business reason for audit and approval review.",
+        ),
+        "approval_request_id": Param(
+            "",
+            type="string",
+            description=(
+                "Durable approval reference required when dry_run=false. "
+                "The approved DAG, date range, and execution flags must match exactly."
+            ),
         ),
         "dry_run": Param(
             True,

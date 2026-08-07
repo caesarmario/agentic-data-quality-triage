@@ -13,6 +13,7 @@ from airflow.sdk import DAG, Param
 
 from dq_platform.helpers import (
     DAILY_PLATFORM_SCHEDULE,
+    DEFAULT_TRIGGER_RESET_DAG_RUN,
     DEFAULT_START_DATE,
     common_dag_params,
     default_dag_args,
@@ -139,7 +140,7 @@ with DAG(
         poke_interval=15,
         allowed_states=["success"],
         failed_states=["failed"],
-        reset_dag_run=False,
+        reset_dag_run=DEFAULT_TRIGGER_RESET_DAG_RUN,
     )
 
     t20_trigger_dbt_transform = TriggerDagRunOperator(
@@ -153,7 +154,7 @@ with DAG(
         poke_interval=15,
         allowed_states=["success"],
         failed_states=["failed"],
-        reset_dag_run=False,
+        reset_dag_run=DEFAULT_TRIGGER_RESET_DAG_RUN,
     )
 
     t30_trigger_quality_alerts = TriggerDagRunOperator(
@@ -167,7 +168,7 @@ with DAG(
         poke_interval=15,
         allowed_states=["success"],
         failed_states=["failed"],
-        reset_dag_run=False,
+        reset_dag_run=DEFAULT_TRIGGER_RESET_DAG_RUN,
     )
 
     t40_trigger_agentic_triage = TriggerDagRunOperator(
@@ -181,7 +182,7 @@ with DAG(
         poke_interval=15,
         allowed_states=["success"],
         failed_states=["failed"],
-        reset_dag_run=False,
+        reset_dag_run=DEFAULT_TRIGGER_RESET_DAG_RUN,
     )
 
     t90_finish = finish_task()

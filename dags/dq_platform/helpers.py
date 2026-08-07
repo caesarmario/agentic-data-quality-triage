@@ -30,7 +30,8 @@ DEFAULT_RUNNER_CONTAINER = "dq_runner"
 DEFAULT_DOCKER_EXEC      = "/usr/bin/docker"
 DEFAULT_TIMEZONE         = "Asia/Bangkok"
 DEFAULT_START_DATE       = pendulum.datetime(2026, 5, 1, tz=DEFAULT_TIMEZONE)
-DAILY_PLATFORM_SCHEDULE  = "5 0 * * *"
+DAILY_PLATFORM_SCHEDULE      = "5 0 * * *"
+DEFAULT_TRIGGER_RESET_DAG_RUN = True
 
 
 # --- Defining Functions
@@ -220,8 +221,10 @@ def date_argument_shell_snippet() -> str:
 
         if [ -n "$START_DATE" ] && [ -n "$END_DATE" ]; then
           DATE_ARGS="--start $START_DATE --end $END_DATE"
-        else
+        elif [ -n "$RUN_DT" ]; then
           DATE_ARGS="--dt $RUN_DT"
+        else
+          DATE_ARGS=""
         fi
 
         INCIDENT_SCENARIO="{{ default_incident_scenario(dag_run) }}"
@@ -259,6 +262,32 @@ def build_runner_bash_command(project_command: str) -> str:
     return command
 
 
+def build_runner_plain_bash_command(project_command: str) -> str:
+    """
+    Build a runner command without pipeline date or incident context.
+
+    Args:
+        project_command: Command to run from /app inside the Python runner container.
+
+    Returns:
+        Bash command string for code validation and administrative tasks.
+    """
+    container = runner_container_name()
+    docker    = docker_exec_binary()
+
+    command = textwrap.dedent(
+        f"""
+        set -euo pipefail
+
+        {docker} exec {container} /bin/sh -lc "cd /app && {project_command}"
+        """
+    ).strip()
+
+    logger.info("Built plain runner command | container=%s command=%s", container, project_command)
+
+    return command
+
+
 def runner_bash_task(
     task_id: str,
     project_command: str,
@@ -280,6 +309,31 @@ def runner_bash_task(
     return BashOperator(
         task_id=task_id,
         bash_command=build_runner_bash_command(project_command),
+        execution_timeout=execution_timeout,
+    )
+
+
+def runner_plain_bash_task(
+    task_id: str,
+    project_command: str,
+    execution_timeout: Any | None = None,
+) -> BashOperator:
+    """
+    Create a BashOperator for non-pipeline commands inside dq_runner.
+
+    Args:
+        task_id: Airflow task id.
+        project_command: Command to execute from /app in dq_runner.
+        execution_timeout: Optional Airflow task timeout.
+
+    Returns:
+        Configured BashOperator without date-context shell variables.
+    """
+    logger.info("Creating plain runner task | task_id=%s", task_id)
+
+    return BashOperator(
+        task_id=task_id,
+        bash_command=build_runner_plain_bash_command(project_command),
         execution_timeout=execution_timeout,
     )
 

@@ -32,6 +32,10 @@ x-app-env: &app-env
   DQREPORTS_BUCKET: ${DQREPORTS_BUCKET:-dq-dqreports}
   DQFAILURES_BUCKET: ${DQFAILURES_BUCKET:-dq-dqfailures}
   AUDIT_BUCKET: ${AUDIT_BUCKET:-dq-audit}
+  AGENT_CHECKPOINT_MODE: ${AGENT_CHECKPOINT_MODE:-off}
+  AGENT_CHECKPOINT_SQLITE_PATH: ${AGENT_CHECKPOINT_SQLITE_PATH:-/var/lib/agent-checkpoints/triage.sqlite3}
+  AGENT_CHECKPOINT_BUSY_TIMEOUT_MS: ${AGENT_CHECKPOINT_BUSY_TIMEOUT_MS:-5000}
+  LANGGRAPH_STRICT_MSGPACK: ${LANGGRAPH_STRICT_MSGPACK:-true}
 
 # --- Defining Python Runner Template
 x-python-runner: &python-runner
@@ -43,6 +47,7 @@ x-python-runner: &python-runner
   working_dir: /app
   volumes:
     - ../:/app
+    - agent_checkpoints:/var/lib/agent-checkpoints
   environment:
     <<: *app-env
   depends_on:
@@ -146,7 +151,7 @@ services:
     restart: "no"
 
   ch-ui:
-    image: ${CH_UI_IMAGE:-ghcr.io/caioricciuti/ch-ui:v1.6.4}
+    image: ${CH_UI_IMAGE:-ghcr.io/caioricciuti/ch-ui:v2.5.1}
     container_name: dq_ch_ui
     environment:
       CLICKHOUSE_URL: ${CHUI_CLICKHOUSE_URL:-http://clickhouse:8123}
@@ -161,6 +166,12 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "ch-ui", "server", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
     restart: unless-stopped
 
   seaweed-master:
@@ -389,6 +400,10 @@ services:
     container_name: dq_streamlit
     ports:
       - "${STREAMLIT_PORT:-8501}:8501"
+    environment:
+      <<: *app-env
+      CONTROL_PLANE_API_URL: ${CONTROL_PLANE_API_URL:-http://api:8000}
+      COPILOT_API_TIMEOUT_SECONDS: ${COPILOT_API_TIMEOUT_SECONDS:-15}
     command:
       - /bin/sh
       - -lc
@@ -396,16 +411,39 @@ services:
         set -eu
         python -m streamlit run apps/streamlit/app.py --server.address 0.0.0.0 --server.port 8501
 
-  discord-bot:
+  api:
     <<: *python-runner
-    container_name: dq_discord_bot
-    profiles: ["discord"]
+    container_name: dq_api
+    profiles: ["api"]
+    ports:
+      - "${API_PORT:-8000}:8000"
     command:
       - /bin/sh
       - -lc
       - |
         set -eu
-        python apps/discord_bot/bot.py
+        python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  discord-bot:
+    <<: *python-runner
+    container_name: dq_discord_bot
+    profiles: ["discord"]
+    environment:
+      <<: *app-env
+      CONTROL_PLANE_API_URL: ${CONTROL_PLANE_API_URL:-http://api:8000}
+      COPILOT_API_TIMEOUT_SECONDS: ${COPILOT_API_TIMEOUT_SECONDS:-15}
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eu
+        python -m apps.discord_bot.bot
 
 # --- Defining Volumes
 volumes:
@@ -416,6 +454,7 @@ volumes:
   sw_volume:
   sw_filer:
   airflow_pgdata:
+  agent_checkpoints:
 
 # --- Defining Networks
 networks:

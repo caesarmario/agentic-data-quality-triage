@@ -207,6 +207,95 @@ def write_agent_audit_event(
     return resolved_agent_run_id
 
 
+def build_llm_route_audit_payload(response: Any) -> dict[str, Any]:
+    """
+    Build a non-sensitive audit payload from a normalized LLM response.
+
+    Args:
+        response: LlmResponse-like object returned by the provider router.
+
+    Returns:
+        Dictionary containing provider, model, route, token, cost, fallback,
+        duration, structured-output status, and sanitized provider failure metadata.
+    """
+    metadata = dict(getattr(response, "metadata", {}) or {})
+
+    return {
+        "requested_route": metadata.get("requested_route", getattr(response, "route_name", "")),
+        "executed_route": metadata.get("executed_route", getattr(response, "route_name", "")),
+        "attempted_routes": metadata.get("attempted_routes", []),
+        "provider": getattr(response, "provider", ""),
+        "model": getattr(response, "model", ""),
+        "input_tokens": int(getattr(response, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(response, "output_tokens", 0) or 0),
+        "estimated_cost_usd": float(getattr(response, "estimated_cost_usd", 0.0) or 0.0),
+        "used_heuristic": bool(getattr(response, "used_heuristic", False)),
+        "fallback_reason": str(getattr(response, "fallback_reason", "") or ""),
+        "duration_ms": int(getattr(response, "duration_ms", 0) or 0),
+        "finish_reason": str(metadata.get("finish_reason", "") or ""),
+        "reasoning_tokens": int(metadata.get("reasoning_tokens", 0) or 0),
+        "force_heuristic": bool(metadata.get("force_heuristic", False)),
+        "structured_output_requested": bool(metadata.get("structured_output_requested", False)),
+        "structured_output_mode": str(metadata.get("structured_output_mode", "") or ""),
+        "structured_output_status": str(metadata.get("structured_output_status", "") or ""),
+        "structured_output_validation_errors": metadata.get("structured_output_validation_errors", []),
+        "structured_output_provider_fallback": bool(
+            metadata.get("structured_output_provider_fallback", False)
+        ),
+        "provider_failures": metadata.get("provider_failures", []),
+    }
+
+
+def write_llm_route_audit_event(
+    client: Any,
+    response: Any,
+    agent_run_id: UUID | str,
+    alert_id: UUID | str | None,
+    alert_key: str,
+) -> UUID:
+    """
+    Persist one completed LLM route decision to ClickHouse audit storage.
+
+    Args:
+        client: clickhouse-connect client instance.
+        response: LlmResponse-like object returned by the provider router.
+        agent_run_id: Agent run UUID used for correlation.
+        alert_id: Optional alert UUID related to the route call.
+        alert_key: Stable alert key related to the route call.
+
+    Returns:
+        Agent run UUID associated with the audit event.
+    """
+    output_payload = build_llm_route_audit_payload(response=response)
+    input_payload  = {
+        "requested_route": output_payload["requested_route"],
+        "force_heuristic": output_payload["force_heuristic"],
+    }
+
+    logger.info(
+        "Writing LLM route audit event | agent_run_id=%s alert_key=%s route=%s provider=%s model=%s heuristic=%s",
+        agent_run_id,
+        alert_key,
+        output_payload["executed_route"],
+        output_payload["provider"],
+        output_payload["model"],
+        output_payload["used_heuristic"],
+    )
+
+    return write_agent_audit_event(
+        client=client,
+        action="llm_route_completed",
+        status="success",
+        agent_run_id=agent_run_id,
+        alert_id=alert_id,
+        alert_key=alert_key,
+        tool_name="llm_router",
+        duration_ms=output_payload["duration_ms"],
+        input_payload=input_payload,
+        output_payload=output_payload,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """
     Build the command-line parser for audit log smoke testing.

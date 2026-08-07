@@ -1,0 +1,85 @@
+####
+## Orders Metadata Contract for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+# --- Defining Registry Identity
+contract_version: 1
+registry_name: orders
+dataset: orders
+description: Trusted ownership, operational, and usage metadata for the orders data product.
+
+
+# --- Defining Data Assets
+assets:
+  - qualified_name: dq.raw_orders
+    database_name: dq
+    table_name: raw_orders
+    display_name: Raw Orders
+    description: Event-level orders loaded idempotently from daily SeaweedFS landing partitions.
+    domain: commerce
+    data_layer: raw
+    technical_owner: Data Platform Engineering
+    business_owner: Commerce Analytics
+    grain: One row per order event.
+    refresh_frequency: daily
+    sla_time: "00:45"
+    sla_timezone: Asia/Bangkok
+    criticality: high
+    sensitivity: internal
+    contains_pii: false
+    certification_status: candidate
+    lifecycle_status: active
+    tags:
+      - clickhouse
+      - landing-derived
+      - orders
+      - raw
+
+  - qualified_name: dq.stg_orders
+    database_name: dq
+    table_name: stg_orders
+    display_name: Staged Orders
+    description: Typed and normalized order records prepared by dbt for downstream analytical models.
+    domain: commerce
+    data_layer: staging
+    technical_owner: Analytics Engineering
+    business_owner: Commerce Analytics
+    grain: One row per normalized order event.
+    refresh_frequency: daily
+    sla_time: "01:00"
+    sla_timezone: Asia/Bangkok
+    criticality: high
+    sensitivity: internal
+    contains_pii: false
+    certification_status: candidate
+    lifecycle_status: active
+    tags:
+      - dbt
+      - orders
+      - staging
+      - trusted-input
+
+  - qualified_name: dq.fct_orders_daily
+    database_name: dq
+    table_name: fct_orders_daily
+    display_name: Daily Orders Fact
+    description: Curated daily order metrics grouped by business date, country, and channel.
+    domain: commerce
+    data_layer: mart
+    technical_owner: Analytics Engineering
+    business_owner: Commerce Analytics
+    grain: One row per business date, country, and channel.
+    refresh_frequency: daily
+    sla_time: "01:15"
+    sla_timezone: Asia/Bangkok
+    criticality: critical
+    sensitivity: internal
+    contains_pii: false
+    certification_status: certified
+    lifecycle_status: active
+    tags:
+      - analytics-ready
+      - dbt
+      - mart
+      - orders

@@ -39,6 +39,11 @@ Schedule: none. This DAG is triggered by the platform daily orchestrator or manu
 1. Profile raw, staging, and mart tables.
 2. Run deterministic DQ contract checks.
 3. Generate stable-key alerts from latest failed/warning DQ results.
+4. Push newly discovered alerts through the optional idempotent Discord webhook.
+
+The Discord task succeeds with an explicit `skipped` result when
+`DISCORD_ALERT_WEBHOOK_URL` is not configured. When configured, delivery
+failures remain visible as Airflow task failures and can use normal task retry.
 
 Manual `dag_run.conf` examples:
 
@@ -93,6 +98,12 @@ with DAG(
         execution_timeout=timedelta(minutes=10),
     )
 
+    t40_push_discord_alerts = runner_bash_task(
+        task_id="t40_push_discord_alerts",
+        project_command="python -m apps.discord_bot.webhook $DATE_ARGS",
+        execution_timeout=timedelta(minutes=5),
+    )
+
     t90_finish = finish_task()
 
     (
@@ -100,6 +111,7 @@ with DAG(
         >> t10_profile_orders_tables
         >> t20_run_orders_dq_checks
         >> t30_generate_orders_alerts
+        >> t40_push_discord_alerts
         >> t90_finish
     )
 

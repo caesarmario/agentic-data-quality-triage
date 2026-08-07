@@ -26,6 +26,7 @@ from agent.graph import (
     TriageRuntimeConfig,
     run_triage,
 )
+from agent.checkpointing import CHECKPOINT_MODE_OFF
 from pipelines.common.logging import logger
 
 
@@ -50,6 +51,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifacts-prefix", default=DEFAULT_REPORT_PREFIX, help="S3 prefix for report artifacts.")
     parser.add_argument("--clickhouse-host", default=None, help="Optional ClickHouse host override.")
     parser.add_argument("--clickhouse-port", type=int, default=None, help="Optional ClickHouse HTTP port override.")
+    parser.add_argument("--checkpoint-mode", default=CHECKPOINT_MODE_OFF, help="Checkpoint mode: off or sqlite.")
+    parser.add_argument("--checkpoint-sqlite-path", default=None, help="Absolute SQLite checkpoint path override.")
+    parser.add_argument("--checkpoint-thread-id", default=None, help="Stable checkpoint thread identifier.")
+    parser.add_argument("--checkpoint-resume", action="store_true", help="Resume an existing checkpoint thread.")
 
     return parser
 
@@ -88,6 +93,10 @@ def main() -> None:
         confidence_threshold=args.confidence_threshold,
         max_evidence_iterations=args.max_evidence_iterations,
         config=config,
+        checkpoint_mode=args.checkpoint_mode,
+        checkpoint_sqlite_path=args.checkpoint_sqlite_path,
+        checkpoint_thread_id=args.checkpoint_thread_id,
+        checkpoint_resume=args.checkpoint_resume,
     )
     output = {
         "status": "success",
@@ -99,6 +108,9 @@ def main() -> None:
         "markdown_report_s3_uri": report.markdown_report_s3_uri,
         "json_report_s3_uri": report.json_report_s3_uri,
         "approval_gated_actions": [action.model_dump(mode="json") for action in report.approval_gated_actions],
+        "checkpoint_mode": args.checkpoint_mode,
+        "checkpoint_thread_id": args.checkpoint_thread_id or "",
+        "checkpoint_resume_requested": args.checkpoint_resume,
     }
 
     print(json.dumps(output, indent=2, default=str))

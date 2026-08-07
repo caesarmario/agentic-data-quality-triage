@@ -34,6 +34,7 @@ from pipelines.common.clickhouse import (
 )
 from pipelines.common.logging import logger
 from pipelines.dq.config import OrdersDqContract, load_orders_dq_contract
+from pipelines.dq.evidence import DEFAULT_EVIDENCE_PREFIX, export_failure_evidence_for_results
 from pipelines.seeding.helpers import iter_dates, parse_date
 
 
@@ -800,6 +801,10 @@ def run_dq_checks(
     contract: OrdersDqContract,
     clickhouse_host: str | None = None,
     clickhouse_port: int | None = None,
+    export_evidence: bool = True,
+    evidence_bucket: str | None = None,
+    evidence_prefix: str = DEFAULT_EVIDENCE_PREFIX,
+    s3_endpoint_url: str | None = None,
 ) -> dict[str, Any]:
     """
     Run deterministic DQ checks for one or more business dates.
@@ -809,6 +814,10 @@ def run_dq_checks(
         contract: Validated orders DQ contract.
         clickhouse_host: Optional ClickHouse host override.
         clickhouse_port: Optional ClickHouse HTTP port override.
+        export_evidence: Whether failed/warning results should export evidence artifacts.
+        evidence_bucket: Optional S3 bucket for evidence artifacts.
+        evidence_prefix: S3 prefix for evidence artifacts.
+        s3_endpoint_url: Optional S3 endpoint override.
 
     Returns:
         Summary dictionary for the DQ run.
@@ -817,11 +826,32 @@ def run_dq_checks(
     started_monotonic = time.monotonic()
     all_results       = []
     partition_results = []
+    evidence_exported = 0
 
     logger.info("Starting DQ check run | dates=%s", [item.isoformat() for item in dates])
 
     for run_dt in dates:
-        results       = build_check_results_for_date(client=client, contract=contract, dt=run_dt)
+        results = build_check_results_for_date(client=client, contract=contract, dt=run_dt)
+
+        if export_evidence:
+            results, evidence_summary = export_failure_evidence_for_results(
+                client=client,
+                results=results,
+                bucket=evidence_bucket,
+                prefix=evidence_prefix,
+                endpoint_url=s3_endpoint_url,
+            )
+            evidence_exported += int(evidence_summary["exported"])
+
+        else:
+            evidence_summary = {
+                "status": "skipped",
+                "reason": "evidence_export_disabled",
+                "exported": 0,
+                "skipped": len(results),
+            }
+            logger.info("DQ evidence export skipped | dt=%s", run_dt)
+
         rows_inserted = insert_check_results(client=client, results=results)
         all_results.extend(results)
 
@@ -831,6 +861,7 @@ def run_dq_checks(
                 "checks": len(results),
                 "rows_inserted": rows_inserted,
                 "statuses": summarize_statuses(results),
+                "evidence_export": evidence_summary,
             }
         )
 
@@ -840,6 +871,7 @@ def run_dq_checks(
         "status": "success",
         "partition_count": len(dates),
         "rows_inserted": len(all_results),
+        "evidence_exported": evidence_exported,
         "duration_ms": duration_ms,
         "statuses": summarize_statuses(all_results),
         "partitions": partition_results,
@@ -865,6 +897,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--contract", default=None, help="Optional path to orders DQ contract YAML.")
     parser.add_argument("--clickhouse-host", default=None, help="Optional ClickHouse host override.")
     parser.add_argument("--clickhouse-port", type=int, default=None, help="Optional ClickHouse HTTP port override.")
+    parser.add_argument("--skip-evidence-export", action="store_true", help="Skip writing DQ failure evidence to S3.")
+    parser.add_argument("--evidence-bucket", default=None, help="Optional S3 bucket for DQ failure evidence.")
+    parser.add_argument("--evidence-prefix", default=DEFAULT_EVIDENCE_PREFIX, help="Optional S3 prefix for evidence artifacts.")
+    parser.add_argument("--s3-endpoint-url", default=None, help="Optional S3 endpoint URL override for evidence export.")
 
     return parser
 
@@ -891,6 +927,10 @@ def main() -> None:
         contract=contract,
         clickhouse_host=args.clickhouse_host,
         clickhouse_port=args.clickhouse_port,
+        export_evidence=not args.skip_evidence_export,
+        evidence_bucket=args.evidence_bucket,
+        evidence_prefix=args.evidence_prefix,
+        s3_endpoint_url=args.s3_endpoint_url,
     )
 
     print(json.dumps(summary, indent=2, default=str))
