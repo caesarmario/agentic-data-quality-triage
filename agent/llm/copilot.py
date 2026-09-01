@@ -25,11 +25,12 @@ from pipelines.common.logging import logger
 
 
 # --- Defining Constants
-COPILOT_ROUTE         = "cheap_summary"
-MAX_CONTEXT_ALERTS    = 5
-MAX_CONTEXT_EVIDENCE  = 5
-MAX_CONTEXT_AUDIT     = 5
-MAX_CONTEXT_TEXT      = 1600
+COPILOT_ROUTE                = "cheap_summary"
+MAX_CONTEXT_ALERTS           = 5
+MAX_CONTEXT_EVIDENCE         = 5
+MAX_CONTEXT_AUDIT            = 5
+MAX_CONTEXT_INCIDENT_HISTORY = 5
+MAX_CONTEXT_TEXT             = 1600
 
 COPILOT_SYSTEM_PROMPT = (
     "You are a data reliability copilot for a local warehouse quality platform. "
@@ -344,6 +345,7 @@ def build_operator_answer_fallback(
     report_context: dict[str, Any] | None = None,
     evidence_rows: list[dict[str, Any]] | None = None,
     audit_rows: list[dict[str, Any]] | None = None,
+    incident_history_rows: list[dict[str, Any]] | None = None,
 ) -> str:
     """
     Build a natural local fallback for evidence-aware operator questions.
@@ -354,6 +356,8 @@ def build_operator_answer_fallback(
         report_context: Optional bounded triage report summary.
         evidence_rows: Optional evidence summaries collected by guarded tools.
         audit_rows: Optional recent audit events for the alert.
+        incident_history_rows: Optional sanitized outcomes from earlier investigations
+            of the same exact Alert Ref.
 
     Returns:
         Natural language answer bounded by available context.
@@ -376,8 +380,60 @@ def build_operator_answer_fallback(
         allowed_fields=("ts", "action", "tool_name", "status", "error_message", "report_s3_uri"),
         limit=MAX_CONTEXT_AUDIT,
     )
+    compact_history       = compact_context_rows(
+        incident_history_rows,
+        allowed_fields=(
+            "recorded_at",
+            "outcome_status",
+            "summary",
+            "confidence",
+            "top_hypothesis_category",
+            "report_id",
+            "requires_human_approval",
+            "evidence_reference_count",
+            "approval_state",
+        ),
+        limit=MAX_CONTEXT_INCIDENT_HISTORY,
+    )
     normalized_question = question.strip().lower()
     alert_ref           = compact_alert_context["alert_ref"]
+
+    history_intent = any(
+        phrase in normalized_question
+        for phrase in (
+            "history",
+            "previous investigation",
+            "prior investigation",
+            "investigated before",
+            "happened before",
+            "recurring",
+            "recurrence",
+        )
+    )
+
+    if history_intent:
+        if not compact_history:
+            return (
+                f"I found no earlier investigation record for Alert Ref `{alert_ref}` "
+                "within the bounded history window. "
+                "That does not prove the underlying data issue never occurred under another alert. "
+                "Use the current triage evidence before deciding on remediation."
+            )
+
+        latest_history = compact_history[0]
+        latest_summary = str(
+            latest_history.get("summary")
+            or "The latest prior investigation has no readable summary."
+        )
+        latest_report = str(latest_history.get("report_id") or "not recorded")
+
+        return (
+            f"I found `{len(compact_history)}` earlier investigation record(s) "
+            f"for the same Alert Ref `{alert_ref}`. "
+            f"The latest prior record says: {latest_summary} Report reference: `{latest_report}`. "
+            "This history is comparison context only. It does not prove the current root cause, "
+            "and it does not establish recurrence across different dates or alerts."
+        )
 
     if "evidence" in normalized_question:
         if not compact_evidence:
@@ -565,6 +621,7 @@ def build_operator_answer(
     report_context: dict[str, Any] | None = None,
     evidence_rows: list[dict[str, Any]] | None = None,
     audit_rows: list[dict[str, Any]] | None = None,
+    incident_history_rows: list[dict[str, Any]] | None = None,
     agent_run_id: UUID | str | None = None,
 ) -> str:
     """
@@ -576,6 +633,8 @@ def build_operator_answer(
         report_context: Optional bounded triage report summary.
         evidence_rows: Optional evidence summaries from guarded tools.
         audit_rows: Optional recent audit events for the selected alert.
+        incident_history_rows: Optional sanitized prior outcomes for the same
+            exact alert identity.
         agent_run_id: Optional correlation UUID shared with API or workflow audit events.
 
     Returns:
@@ -592,12 +651,28 @@ def build_operator_answer(
         allowed_fields=("ts", "action", "tool_name", "status", "error_message", "report_s3_uri"),
         limit=MAX_CONTEXT_AUDIT,
     )
+    compact_history  = compact_context_rows(
+        incident_history_rows,
+        allowed_fields=(
+            "recorded_at",
+            "outcome_status",
+            "summary",
+            "confidence",
+            "top_hypothesis_category",
+            "report_id",
+            "requires_human_approval",
+            "evidence_reference_count",
+            "approval_state",
+        ),
+        limit=MAX_CONTEXT_INCIDENT_HISTORY,
+    )
     fallback_text = build_operator_answer_fallback(
         question=question,
         alert=alert,
         report_context=compact_report,
         evidence_rows=compact_evidence,
         audit_rows=compact_audit,
+        incident_history_rows=compact_history,
     )
     context = {
         "question": question,
@@ -605,6 +680,7 @@ def build_operator_answer(
         "report": compact_report,
         "evidence": compact_evidence,
         "audit_events": compact_audit,
+        "prior_investigations": compact_history,
         "allowed_actions": [
             "explain_alert",
             "summarize_evidence",
@@ -619,7 +695,9 @@ def build_operator_answer(
     }
     prompt = (
         "Answer the operator question directly in plain language. "
-        "Use the selected alert, report, evidence, and audit context when available. "
+        "Use the selected alert, report, evidence, audit, and prior-investigation context when available. "
+        "Treat prior investigations as comparison context only, never as proof "
+        "of the current root cause or cross-date recurrence. "
         "Distinguish observed evidence from hypotheses and say exactly what is missing instead of guessing. "
         "Recommend one safe next step, do not expose raw system keys, and do not imply remediation has executed."
     )

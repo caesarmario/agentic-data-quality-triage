@@ -17,11 +17,18 @@ from pipelines.common.logging import logger
 
 # --- Defining Planning Policy
 EVIDENCE_PLANNING_ROUTE = "evidence_planning"
-MAX_EVIDENCE_REQUESTS   = 5
+MAX_EVIDENCE_REQUESTS   = 6
 
 BASELINE_EVIDENCE_CATEGORIES = (
     EvidenceCategory.CURRENT_PARTITION_ROW_COUNT,
     EvidenceCategory.DQ_HISTORY,
+    EvidenceCategory.INCIDENT_HISTORY,
+    EvidenceCategory.PIPELINE_RUNS,
+    EvidenceCategory.DBT_LINEAGE,
+)
+SCHEMA_DRIFT_EVIDENCE_CATEGORIES = (
+    EvidenceCategory.SCHEMA_DRIFT,
+    EvidenceCategory.INCIDENT_HISTORY,
     EvidenceCategory.PIPELINE_RUNS,
     EvidenceCategory.DBT_LINEAGE,
 )
@@ -33,8 +40,10 @@ TREND_METRIC_MARKERS = (
 )
 CATEGORY_PRIORITIES = {
     EvidenceCategory.CURRENT_PARTITION_ROW_COUNT.value: 1,
+    EvidenceCategory.SCHEMA_DRIFT.value: 1,
     EvidenceCategory.DQ_HISTORY.value: 2,
     EvidenceCategory.RECENT_PARTITION_TREND.value: 2,
+    EvidenceCategory.INCIDENT_HISTORY.value: 3,
     EvidenceCategory.PIPELINE_RUNS.value: 3,
     EvidenceCategory.DBT_LINEAGE.value: 4,
 }
@@ -113,6 +122,12 @@ def build_default_investigation_question(alert: Alert) -> str:
     Returns:
         Human-readable question without exposing the raw system alert key.
     """
+    if alert.is_schema_drift:
+        return (
+            f"Which schema contract expectations changed on {alert.table_name}, "
+            "and which downstream assets may be affected?"
+        )
+
     return (
         f"What evidence best explains {alert.metric} on {alert.table_name} "
         f"for {alert.dt}, and what downstream data may be affected?"
@@ -140,11 +155,18 @@ def build_policy_request(
         EvidenceCategory.DQ_HISTORY: (
             f"Compare {alert.metric} with recent deterministic check outcomes and repeated failures."
         ),
+        EvidenceCategory.INCIDENT_HISTORY: (
+            "Compare bounded prior investigation outcomes for this exact alert identity without "
+            "treating earlier conclusions as proof of the current root cause."
+        ),
         EvidenceCategory.PIPELINE_RUNS: (
             "Check whether upstream generation, load, transformation, or DQ stages failed or were delayed."
         ),
         EvidenceCategory.DBT_LINEAGE: (
             f"Identify upstream dependencies and downstream impact connected to {alert.table_name}."
+        ),
+        EvidenceCategory.SCHEMA_DRIFT: (
+            "Read the exact persisted schema snapshot and contract findings referenced by this alert."
         ),
         EvidenceCategory.RECENT_PARTITION_TREND: (
             "Compare bounded recent partition volumes to distinguish an isolated gap from a broader trend."
@@ -170,6 +192,9 @@ def required_categories_for_alert(alert: Alert) -> tuple[EvidenceCategory, ...]:
     Returns:
         Ordered tuple of mandatory categories, optionally including recent trend evidence.
     """
+    if alert.is_schema_drift:
+        return SCHEMA_DRIFT_EVIDENCE_CATEGORIES
+
     categories = list(BASELINE_EVIDENCE_CATEGORIES)
     metric     = alert.metric.lower()
 
@@ -177,6 +202,25 @@ def required_categories_for_alert(alert: Alert) -> tuple[EvidenceCategory, ...]:
         categories.append(EvidenceCategory.RECENT_PARTITION_TREND)
 
     return tuple(categories)
+
+
+def allowed_categories_for_alert(alert: Alert) -> tuple[EvidenceCategory, ...]:
+    """
+    Restrict optional model planning to categories relevant to the alert type.
+
+    Args:
+        alert: Loaded data reliability alert.
+
+    Returns:
+        Ordered tuple of categories the planner may request for this alert.
+    """
+    if alert.is_schema_drift:
+        return SCHEMA_DRIFT_EVIDENCE_CATEGORIES
+
+    return (
+        *BASELINE_EVIDENCE_CATEGORIES,
+        EvidenceCategory.RECENT_PARTITION_TREND,
+    )
 
 
 def build_policy_requests(alert: Alert) -> list[EvidenceRequest]:
@@ -216,7 +260,7 @@ def build_planning_context(alert: Alert) -> dict[str, object]:
         "dimension": alert.dimension,
         "observed_value": alert.observed_value,
         "expected_value": alert.expected_value,
-        "allowed_categories": [category.value for category in EvidenceCategory],
+        "allowed_categories": [category.value for category in allowed_categories_for_alert(alert)],
         "maximum_requests": MAX_EVIDENCE_REQUESTS,
         "blocked_outputs": ["raw_sql", "shell_command", "remediation_execution"],
     }
@@ -241,6 +285,10 @@ def merge_proposal_with_policy(
     proposed_by_category = {
         category_value(item.category): item
         for item in proposal.requests
+    }
+    allowed_categories = {
+        category.value
+        for category in allowed_categories_for_alert(alert)
     }
     selected: list[EvidenceRequest] = []
     selected_categories: set[str]  = set()
@@ -273,7 +321,11 @@ def merge_proposal_with_policy(
     for proposal_request in proposal.requests:
         value = category_value(proposal_request.category)
 
-        if value in selected_categories or len(selected) >= MAX_EVIDENCE_REQUESTS:
+        if (
+            value not in allowed_categories
+            or value in selected_categories
+            or len(selected) >= MAX_EVIDENCE_REQUESTS
+        ):
             continue
 
         selected.append(
@@ -351,7 +403,9 @@ def build_evidence_plan_for_state(state: TriageState) -> EvidencePlanningResult:
     prompt = (
         "Plan evidence collection for this data quality alert. Select only from allowed_categories. "
         "Prioritize evidence that distinguishes upstream failure, missing partition, repeated DQ failure, "
-        "and downstream impact. Do not write SQL, commands, remediation actions, or hidden reasoning."
+        "recurring prior incidents, and downstream impact. Prior investigation outcomes are comparison "
+        "context only and cannot override current evidence. Do not write SQL, commands, remediation "
+        "actions, or hidden reasoning."
     )
 
     try:

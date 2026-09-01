@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 from uuid import UUID
 
@@ -16,11 +17,18 @@ import pytest
 from agent.llm import client as llm_client
 from agent.llm.client import LlmResponse
 from agent.llm.config import load_model_routing_config
+from agent.supervisor.budgets import active_supervisor_llm_budget
 from agent.tools.audit_log import AGENT_AUDIT_LOG_COLUMNS
-from dags.dq_platform.llm_smoke import LLM_SMOKE_ROUTE_NAMES, emit_llm_smoke_summary
+from dags.dq_platform.llm_smoke import emit_llm_smoke_summary
 from scripts.smoke_llm_provider import (
+    MAX_EXTERNAL_SMOKE_ESTIMATED_COST_USD,
+    MAX_EXTERNAL_SMOKE_LATENCY_MS,
+    MAX_EXTERNAL_SMOKE_MODEL_CALLS,
+    MAX_EXTERNAL_SMOKE_TOTAL_TOKENS,
+    ProviderSmokeBudgetError,
     ProviderSmokeExecutionError,
     ProviderSmokeRequirementError,
+    SMOKE_ROUTE_NAMES,
     build_content_preview,
     run_provider_smoke,
 )
@@ -74,7 +82,7 @@ class FakeDagRun:
 
     dag_id = "92_dag_dq_llm_provider_smoke"
     run_id = "manual__llm_smoke_summary_test"
-    conf   = {"route_name": "cheap_summary", "require_provider": False}
+    conf   = {"route_name": "cheap_summary", "run_external_provider": False}
 
 
 # --- Defining Test Helpers
@@ -164,16 +172,18 @@ def build_audit_row(client: FakeAuditClient) -> dict[str, Any]:
 
 
 # --- Defining Tests
-def test_smoke_route_allowlist_matches_model_routing_config() -> None:
+def test_smoke_route_allowlist_is_static_and_compatible_with_routing_config() -> None:
     """
-    Ensure Airflow route parameters cannot drift from the routing YAML.
+    Ensure smoke execution cannot expand when routing YAML gains new routes.
 
     Returns:
         None.
     """
     config = load_model_routing_config()
 
-    assert LLM_SMOKE_ROUTE_NAMES == tuple(config.routes)
+    assert SMOKE_ROUTE_NAMES == ("evidence_summary", "cheap_summary")
+    assert set(SMOKE_ROUTE_NAMES).issubset(config.routes)
+    assert MAX_EXTERNAL_SMOKE_MODEL_CALLS == 1
 
 
 def test_heuristic_baseline_writes_sanitized_success_audit() -> None:
@@ -212,14 +222,14 @@ def test_heuristic_baseline_writes_sanitized_success_audit() -> None:
     assert input_json["context_classification"] == "synthetic_non_sensitive"
     assert "api_key" not in serialized.lower()
     assert "system_prompt" not in serialized.lower()
+    assert result.estimated_cost_usd == 0.0
+    assert result.external_provider_smoke is False
 
 
 @pytest.mark.parametrize(
     ("route_name", "provider", "model"),
     [
-        ("cheap_summary", "gemini", "gemini-2.5-flash"),
-        ("openai_summary", "openai", "gpt-4.1-nano"),
-        ("low_confidence_rca", "xai", "grok-4.3"),
+        ("cheap_summary", "gemini", "gemini-3.5-flash-lite"),
     ],
 )
 def test_external_provider_routes_satisfy_strict_smoke_contract(
@@ -228,7 +238,7 @@ def test_external_provider_routes_satisfy_strict_smoke_contract(
     model: str,
 ) -> None:
     """
-    Ensure Gemini, OpenAI, and xAI route outcomes share one strict contract.
+    Ensure the one allowlisted low-risk provider route uses a strict contract.
 
     Args:
         route_name: Route selected by the parameterized case.
@@ -244,6 +254,7 @@ def test_external_provider_routes_satisfy_strict_smoke_contract(
     result = run_provider_smoke(
         route_name=route_name,
         require_provider=True,
+        external_provider_smoke=True,
         client=client,
         llm_runner=build_response_runner(response),
     )
@@ -252,11 +263,46 @@ def test_external_provider_routes_satisfy_strict_smoke_contract(
     assert result.requested_provider == provider
     assert result.executed_provider == provider
     assert build_audit_row(client)["status"] == "success"
+    assert result.projected_tokens <= MAX_EXTERNAL_SMOKE_TOTAL_TOKENS
+    assert result.projected_cost_usd <= MAX_EXTERNAL_SMOKE_ESTIMATED_COST_USD
 
 
-def test_fallback_safe_smoke_records_actual_heuristic_execution() -> None:
+def test_smoke_audit_uses_environment_model_override(monkeypatch) -> None:
     """
-    Ensure provider failure can degrade safely while remaining explicit.
+    Ensure requested-model audit metadata matches the actual environment override.
+
+    Args:
+        monkeypatch: Pytest fixture used to set a synthetic model override.
+
+    Returns:
+        None.
+    """
+    overridden_model = "gemini-test-model-override"
+    client           = FakeAuditClient()
+
+    monkeypatch.setenv("GEMINI_MODEL", overridden_model)
+
+    result = run_provider_smoke(
+        route_name="cheap_summary",
+        require_provider=True,
+        external_provider_smoke=True,
+        client=client,
+        llm_runner=build_response_runner(
+            build_response(
+                provider="gemini",
+                route_name="cheap_summary",
+                model=overridden_model,
+            )
+        ),
+    )
+
+    assert result.requested_model == overridden_model
+    assert result.executed_model == overridden_model
+
+
+def test_default_selected_route_stays_zero_cost_heuristic_execution() -> None:
+    """
+    Ensure the selected route cannot use an external provider without strict opt-in.
 
     Returns:
         None.
@@ -267,27 +313,141 @@ def test_fallback_safe_smoke_records_actual_heuristic_execution() -> None:
         route_name="evidence_summary",
         model="heuristic-v1",
         used_heuristic=True,
-        fallback_reason="provider_failures:gemini,openai;final=heuristic_provider",
-        attempted_routes=["cheap_summary", "openai_summary", "evidence_summary"],
+        fallback_reason="forced_heuristic",
+        attempted_routes=["cheap_summary"],
     )
 
     result = run_provider_smoke(
         route_name="cheap_summary",
-        require_provider=False,
         client=client,
         llm_runner=build_response_runner(response),
     )
     audit_output = json.loads(build_audit_row(client)["output_json"])
 
     assert result.status == "success"
-    assert result.outcome == "fallback"
+    assert result.outcome == "heuristic"
     assert result.requested_provider == "gemini"
     assert result.executed_provider == "heuristic"
-    assert audit_output["attempted_routes"] == [
-        "cheap_summary",
-        "openai_summary",
-        "evidence_summary",
-    ]
+    assert audit_output["attempted_routes"] == ["cheap_summary"]
+    assert audit_output["external_provider_smoke"] is False
+
+
+def test_external_provider_smoke_requires_explicit_strict_opt_in() -> None:
+    """
+    Ensure direct smoke execution remains zero-cost unless strict mode is selected.
+
+    Returns:
+        None.
+    """
+    with pytest.raises(ValueError, match="requires strict provider execution"):
+        run_provider_smoke(
+            route_name="cheap_summary",
+            external_provider_smoke=True,
+            client=FakeAuditClient(),
+            llm_runner=build_response_runner(
+                build_response(provider="gemini", route_name="cheap_summary", model="gemini-3.5-flash-lite")
+            ),
+        )
+
+
+def test_external_provider_smoke_rejects_actual_usage_above_budget() -> None:
+    """
+    Ensure a non-conforming provider response is audited and rejected after execution.
+
+    Returns:
+        None.
+    """
+    client   = FakeAuditClient()
+    response = build_response(provider="gemini", route_name="cheap_summary", model="gemini-3.5-flash-lite")
+    response.input_tokens       = MAX_EXTERNAL_SMOKE_TOTAL_TOKENS
+    response.output_tokens      = 1
+    response.estimated_cost_usd = MAX_EXTERNAL_SMOKE_ESTIMATED_COST_USD + 0.00001
+
+    with pytest.raises(ProviderSmokeBudgetError, match="exceeded its bounded budget"):
+        run_provider_smoke(
+            route_name="cheap_summary",
+            require_provider=True,
+            external_provider_smoke=True,
+            client=client,
+            llm_runner=build_response_runner(response),
+        )
+
+    assert build_audit_row(client)["status"] == "failed"
+
+
+def test_strict_external_smoke_uses_temporary_heuristic_fallback_config() -> None:
+    """
+    Ensure one failed external call cannot cascade to another paid provider route.
+
+    Returns:
+        None.
+    """
+    captured_config_path: Path | None = None
+    client               = FakeAuditClient()
+
+    def capture_runner(**kwargs: Any) -> LlmResponse:
+        """Capture the temporary router config without executing a provider call."""
+        nonlocal captured_config_path
+        captured_config_path = Path(kwargs["config_path"])
+        payload              = json.loads(captured_config_path.read_text(encoding="utf-8"))
+
+        assert payload["routes"]["cheap_summary"]["fallback_route"] == "evidence_summary"
+
+        return build_response(provider="gemini", route_name="cheap_summary", model="gemini-3.5-flash-lite")
+
+    run_provider_smoke(
+        route_name="cheap_summary",
+        require_provider=True,
+        external_provider_smoke=True,
+        client=client,
+        llm_runner=capture_runner,
+    )
+
+    assert captured_config_path is not None
+
+
+def test_strict_external_smoke_installs_one_call_budget_scope() -> None:
+    """
+    Ensure strict smoke execution installs the exact bounded provider ledger.
+
+    Returns:
+        None.
+    """
+    client = FakeAuditClient()
+
+    def inspect_budget_runner(**kwargs: Any) -> LlmResponse:
+        """
+        Inspect the active ledger without making provider network requests.
+
+        Args:
+            kwargs: Routed request arguments supplied by the smoke runner.
+
+        Returns:
+            Synthetic successful Gemini response.
+        """
+        ledger = active_supervisor_llm_budget()
+
+        assert ledger is not None
+        assert ledger.max_model_calls == MAX_EXTERNAL_SMOKE_MODEL_CALLS
+        assert ledger.token_budget == MAX_EXTERNAL_SMOKE_TOTAL_TOKENS
+        assert ledger.estimated_cost_budget_usd == MAX_EXTERNAL_SMOKE_ESTIMATED_COST_USD
+        assert 0 < ledger.remaining_latency_ms() <= MAX_EXTERNAL_SMOKE_LATENCY_MS
+
+        return build_response(
+            provider="gemini",
+            route_name="cheap_summary",
+            model="gemini-3.5-flash-lite",
+        )
+
+    result = run_provider_smoke(
+        route_name="cheap_summary",
+        require_provider=True,
+        external_provider_smoke=True,
+        client=client,
+        llm_runner=inspect_budget_runner,
+    )
+
+    assert result.status == "success"
 
 
 def test_strict_smoke_fails_and_audits_provider_fallback() -> None:
@@ -311,6 +471,7 @@ def test_strict_smoke_fails_and_audits_provider_fallback() -> None:
         run_provider_smoke(
             route_name="cheap_summary",
             require_provider=True,
+            external_provider_smoke=True,
             client=client,
             llm_runner=build_response_runner(response),
         )
@@ -345,6 +506,8 @@ def test_provider_execution_failure_does_not_persist_raw_error_text() -> None:
     with pytest.raises(ProviderSmokeExecutionError) as exc_info:
         run_provider_smoke(
             route_name="cheap_summary",
+            require_provider=True,
+            external_provider_smoke=True,
             client=client,
             llm_runner=fail_provider,
         )
@@ -423,7 +586,7 @@ def test_llm_smoke_summary_uses_airflow3_compatible_context() -> None:
 
     assert summary["result"] == "success"
     assert summary["route_name"] == "cheap_summary"
-    assert summary["require_provider"] is False
+    assert summary["run_external_provider"] is False
     assert summary["task_states"] == {
         "t10_smoke_heuristic_baseline": "success",
         "t20_smoke_selected_route": "success",

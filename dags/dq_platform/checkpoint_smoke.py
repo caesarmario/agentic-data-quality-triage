@@ -23,6 +23,11 @@ CHECKPOINT_SMOKE_TASK_IDS = (
     "t20_resume_checkpoint",
     "t30_resume_completed_checkpoint",
     "t40_verify_checkpoint",
+    "t42_replay_historical_checkpoint",
+    "t43_repeat_historical_checkpoint_replay",
+    "t45_store_report_side_effect",
+    "t46_replay_report_side_effect",
+    "t47_verify_report_side_effect",
 )
 
 

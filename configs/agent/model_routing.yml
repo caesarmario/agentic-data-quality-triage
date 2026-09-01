@@ -20,7 +20,7 @@ providers:
   openai:
     provider_type: openai_compatible
     enabled: true
-    default_model: gpt-4.1-mini
+    default_model: gpt-5.6-luna
     api_key_env: OPENAI_API_KEY
     base_url_env: OPENAI_BASE_URL
     model_env: OPENAI_MODEL
@@ -28,15 +28,23 @@ providers:
   gemini:
     provider_type: openai_compatible
     enabled: true
-    default_model: gemini-2.5-flash
+    default_model: gemini-3.5-flash-lite
     api_key_env: GEMINI_API_KEY
     base_url_env: GEMINI_BASE_URL
     model_env: GEMINI_MODEL
 
+  groq:
+    provider_type: openai_compatible
+    enabled: true
+    default_model: openai/gpt-oss-20b
+    api_key_env: GROQ_API_KEY
+    base_url_env: GROQ_BASE_URL
+    model_env: GROQ_MODEL
+
   xai:
     provider_type: openai_compatible
     enabled: false
-    default_model: grok-4.3
+    default_model: grok-4.6
     api_key_env: XAI_API_KEY
     base_url_env: XAI_BASE_URL
     model_env: XAI_MODEL
@@ -58,7 +66,7 @@ routes:
   cheap_summary:
     description: Low-risk wording and compact summaries for UI or Discord.
     provider: gemini
-    model: gemini-2.5-flash
+    model: gemini-3.5-flash-lite
     reasoning_tier: cheap
     risk_tier: low
     temperature: 0.1
@@ -70,19 +78,32 @@ routes:
   openai_summary:
     description: Secondary low-risk summary route when Gemini is unavailable.
     provider: openai
-    model: gpt-4.1-nano
+    model: gpt-5.6-luna
     reasoning_tier: cheap
     risk_tier: low
     temperature: 0.1
     max_output_tokens: 700
-    input_cost_per_1m_tokens: 0.10
-    output_cost_per_1m_tokens: 0.40
+    input_cost_per_1m_tokens: 0.20
+    output_cost_per_1m_tokens: 1.20
     fallback_route: evidence_summary
+
+  groq_summary:
+    description: Optional low-cost GroqCloud summary route; never selected by default policy.
+    provider: groq
+    model: openai/gpt-oss-20b
+    reasoning_tier: cheap
+    risk_tier: low
+    temperature: 0.1
+    max_output_tokens: 700
+    input_cost_per_1m_tokens: 0.075
+    output_cost_per_1m_tokens: 0.30
+    fallback_route: evidence_summary
+    structured_output_mode: preferred
 
   evidence_planning:
     description: Build a typed evidence-category plan before deterministic tools execute.
     provider: gemini
-    model: gemini-2.5-flash
+    model: gemini-3.5-flash-lite
     reasoning_tier: mid
     risk_tier: medium
     temperature: 0.0
@@ -95,7 +116,7 @@ routes:
   hypothesis_framing:
     description: Frame deterministic root-cause candidates using bounded evidence references.
     provider: gemini
-    model: gemini-2.5-flash
+    model: gemini-3.5-flash-lite
     reasoning_tier: mid
     risk_tier: medium
     temperature: 0.0
@@ -108,33 +129,33 @@ routes:
   triage_reasoning:
     description: Medium-risk root cause explanation after deterministic tools collect evidence.
     provider: openai
-    model: gpt-4.1-mini
+    model: gpt-5.6-luna
     reasoning_tier: mid
     risk_tier: medium
     temperature: 0.1
     max_output_tokens: 1200
-    input_cost_per_1m_tokens: 0.40
-    output_cost_per_1m_tokens: 1.60
+    input_cost_per_1m_tokens: 0.20
+    output_cost_per_1m_tokens: 1.20
     fallback_route: evidence_summary
     structured_output_mode: preferred
 
   low_confidence_rca:
     description: Stronger reasoning route for low-confidence incidents and RCA drafts.
     provider: xai
-    model: grok-4.3
+    model: grok-4.6
     reasoning_tier: strong
     risk_tier: high
     temperature: 0.0
     max_output_tokens: 1800
-    input_cost_per_1m_tokens: 3.00
-    output_cost_per_1m_tokens: 15.00
+    input_cost_per_1m_tokens: 2.00
+    output_cost_per_1m_tokens: 6.00
     fallback_route: triage_reasoning
     structured_output_mode: preferred
 
   catalog_qa:
     description: Cheap metadata/data dictionary Q&A after catalog tools collect structured context.
     provider: gemini
-    model: gemini-2.5-flash
+    model: gemini-3.5-flash-lite
     reasoning_tier: cheap
     risk_tier: low
     temperature: 0.1

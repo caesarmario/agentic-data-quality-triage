@@ -35,11 +35,15 @@ DOC_MD = """
 Manual administrative DAG proving that the optional LangGraph SQLite saver persists
 state across separate Airflow tasks and runner processes.
 
-The flow pauses before a synthetic effect, resumes it once, requests resume again after
-completion, and verifies that both graph state and the external marker remain exactly one.
+The flow first validates checkpoint persistence, branches an exact historical checkpoint
+into a deterministic replay thread, retries that replay from another task process, then
+writes and replays one deterministic synthetic report. The final checks prove immutable
+source history, replay-safe external effects, immutable SeaweedFS artifacts, and one
+deterministic ClickHouse audit completion event.
 
-This DAG does not query production data, mutate ClickHouse, call an LLM, or write S3 artifacts.
-Each run requires a unique path-safe `thread_id`.
+This DAG does not query or mutate production datasets, change alert lifecycle state, call an
+LLM, or execute remediation. It writes only namespaced administrative smoke artifacts and
+audit evidence. Each run requires a unique path-safe `thread_id`.
 
 ```json
 {"thread_id": "checkpoint-smoke-20260716T090000000000"}
@@ -129,6 +133,56 @@ with DAG(
         execution_timeout=timedelta(minutes=3),
     )
 
+    t42_replay_historical_checkpoint = runner_plain_bash_task(
+        task_id="t42_replay_historical_checkpoint",
+        project_command=(
+            "python scripts/smoke_agent_checkpoint.py "
+            "--phase historical-replay "
+            "--thread-id '{{ dag_run.conf.get(\"thread_id\", \"checkpoint-smoke-manual\") }}'"
+        ),
+        execution_timeout=timedelta(minutes=3),
+    )
+
+    t43_repeat_historical_checkpoint_replay = runner_plain_bash_task(
+        task_id="t43_repeat_historical_checkpoint_replay",
+        project_command=(
+            "python scripts/smoke_agent_checkpoint.py "
+            "--phase historical-replay-repeat "
+            "--thread-id '{{ dag_run.conf.get(\"thread_id\", \"checkpoint-smoke-manual\") }}'"
+        ),
+        execution_timeout=timedelta(minutes=3),
+    )
+
+    t45_store_report_side_effect = runner_plain_bash_task(
+        task_id="t45_store_report_side_effect",
+        project_command=(
+            "python scripts/smoke_agent_side_effect_replay.py "
+            "--phase write "
+            "--thread-id '{{ dag_run.conf.get(\"thread_id\", \"checkpoint-smoke-manual\") }}'"
+        ),
+        execution_timeout=timedelta(minutes=3),
+    )
+
+    t46_replay_report_side_effect = runner_plain_bash_task(
+        task_id="t46_replay_report_side_effect",
+        project_command=(
+            "python scripts/smoke_agent_side_effect_replay.py "
+            "--phase replay "
+            "--thread-id '{{ dag_run.conf.get(\"thread_id\", \"checkpoint-smoke-manual\") }}'"
+        ),
+        execution_timeout=timedelta(minutes=3),
+    )
+
+    t47_verify_report_side_effect = runner_plain_bash_task(
+        task_id="t47_verify_report_side_effect",
+        project_command=(
+            "python scripts/smoke_agent_side_effect_replay.py "
+            "--phase verify "
+            "--thread-id '{{ dag_run.conf.get(\"thread_id\", \"checkpoint-smoke-manual\") }}'"
+        ),
+        execution_timeout=timedelta(minutes=3),
+    )
+
     t50_emit_checkpoint_summary = PythonOperator(
         task_id="t50_emit_checkpoint_summary",
         python_callable=emit_checkpoint_smoke_summary,
@@ -143,6 +197,11 @@ with DAG(
         >> t20_resume_checkpoint
         >> t30_resume_completed_checkpoint
         >> t40_verify_checkpoint
+        >> t42_replay_historical_checkpoint
+        >> t43_repeat_historical_checkpoint_replay
+        >> t45_store_report_side_effect
+        >> t46_replay_report_side_effect
+        >> t47_verify_report_side_effect
         >> t50_emit_checkpoint_summary
         >> t90_finish
     )

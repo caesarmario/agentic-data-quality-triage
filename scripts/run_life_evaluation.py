@@ -98,6 +98,7 @@ def run_life_evaluation(
     bucket: str | None = None,
     prefix: str = DEFAULT_LIFE_ARTIFACT_PREFIX,
     endpoint_url: str | None = None,
+    enable_critic: bool = False,
 ) -> LifeEvaluationReport:
     """
     Evaluate and persist one report without changing project policy or source data.
@@ -111,6 +112,7 @@ def run_life_evaluation(
         bucket: Optional target artifacts bucket.
         prefix: Path-safe LIFE artifact prefix.
         endpoint_url: Optional S3-compatible endpoint override.
+        enable_critic: Run the bounded deterministic critic for non-passing evaluations.
 
     Returns:
         Persisted LIFE evaluation report with JSON and Markdown artifact URIs.
@@ -126,6 +128,7 @@ def run_life_evaluation(
         report_s3_uri=report_ref,
         evaluation_run_id=evaluation_run_id,
         minimum_confidence=minimum_confidence,
+        enable_critic=enable_critic,
     )
 
     return persist_life_evaluation(
@@ -165,6 +168,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifact-prefix", default=DEFAULT_LIFE_ARTIFACT_PREFIX)
     parser.add_argument("--endpoint-url", default=None, help="Optional S3 endpoint override.")
     parser.add_argument(
+        "--enable-critic",
+        action="store_true",
+        help="Add a bounded critic review before the human-approved improvement proposal.",
+    )
+    parser.add_argument(
         "--fail-on-eval-failure",
         action="store_true",
         help="Return non-zero after persisting artifacts when evaluation status is fail.",
@@ -193,6 +201,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         bucket=args.bucket,
         prefix=args.artifact_prefix,
         endpoint_url=args.endpoint_url,
+        enable_critic=args.enable_critic,
     )
 
     print(json.dumps(evaluation.model_dump(mode="json"), indent=2, ensure_ascii=True))

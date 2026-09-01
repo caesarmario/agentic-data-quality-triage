@@ -120,6 +120,28 @@ def test_default_readiness_requires_metadata_registry_table() -> None:
     assert "dq.metadata_assets" in DEFAULT_CLICKHOUSE_TABLES
 
 
+def test_default_readiness_requires_schema_drift_evidence_tables() -> None:
+    """
+    Ensure readiness covers persisted schema snapshots and comparison results.
+
+    Returns:
+        None.
+    """
+    assert "dq.schema_snapshots" in DEFAULT_CLICKHOUSE_TABLES
+    assert "dq.schema_drift_results" in DEFAULT_CLICKHOUSE_TABLES
+
+
+def test_default_readiness_requires_agent_context_and_incident_memory_tables() -> None:
+    """
+    Ensure readiness covers temporary supervisor context and durable incident memory.
+
+    Returns:
+        None.
+    """
+    assert "dq.agent_run_context_events" in DEFAULT_CLICKHOUSE_TABLES
+    assert "dq.incident_memory" in DEFAULT_CLICKHOUSE_TABLES
+
+
 def test_build_table_exists_query_quotes_database_and_table() -> None:
     """
     Ensure table existence SQL targets ClickHouse system.tables safely.
@@ -273,6 +295,19 @@ def test_api_readiness_is_explicitly_opt_in() -> None:
     assert parser.parse_args(["--require-api"]).require_api is True
 
 
+def test_streamlit_readiness_is_required_by_default_and_can_be_skipped() -> None:
+    """
+    Ensure the operator UI is covered by default platform acceptance checks.
+
+    Returns:
+        None.
+    """
+    parser = build_parser()
+
+    assert parser.parse_args([]).skip_streamlit is False
+    assert parser.parse_args(["--skip-streamlit"]).skip_streamlit is True
+
+
 def test_control_plane_readiness_checks_health_metadata_and_evidence_routes() -> None:
     """
     Ensure required API readiness covers health and representative read-only data routes.
@@ -314,14 +349,19 @@ def test_control_plane_readiness_checks_health_metadata_and_evidence_routes() ->
 
     assert [check.name for check in checks] == [
         "http_service:control-plane-api",
+        "http_service:control-plane-daily-summary",
         "http_service:control-plane-life-history",
+        "http_service:control-plane-incident-history",
         "http_service:control-plane-metadata-asset",
         "http_service:control-plane-dbt-blast-radius",
     ]
     assert all(check.status == "pass" for check in checks)
     assert requested_urls == [
         "http://api:8000/health",
+        "http://api:8000/api/v1/summaries/daily?dt=2026-06-10",
         "http://api:8000/api/v1/evaluations/life?lookback_days=30&limit=1",
+        "http://api:8000/api/v1/incidents/history?"
+        "alert_reference=DQ-READINESS-000000&lookback_days=30&limit=1",
         "http://api:8000/api/v1/metadata/assets/dq.fct_orders_daily",
         "http://api:8000/api/v1/lineage/dbt/blast-radius?"
         "table_name=dq.raw_orders&"
@@ -344,3 +384,15 @@ def test_compose_uses_valid_pinned_ch_ui_release_and_healthcheck() -> None:
     assert "ghcr.io/caioricciuti/ch-ui:v2.5.1" in example
     assert "ghcr.io/caioricciuti/ch-ui:v1.6.4" not in compose
     assert 'test: ["CMD", "ch-ui", "server", "status"]' in compose
+
+
+def test_compose_probes_streamlit_health_endpoint() -> None:
+    """
+    Ensure Docker and Airflow can distinguish a live Streamlit process from a ready UI.
+
+    Returns:
+        None.
+    """
+    compose = Path("infra/docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "http://localhost:8501/_stcore/health" in compose

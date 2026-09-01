@@ -77,14 +77,25 @@ def build_reliable_report(scenario: dict) -> dict:
     supporting_ids  = []
 
     if triage_required:
+        expected_evidence = ground_truth.get("expected_evidence") or []
+        expectation       = expected_evidence[0] if expected_evidence else {}
+        evidence_type     = str(expectation.get("evidence_type") or "dq_history")
+        tool_name         = str(expectation.get("tool_name") or "dq_history")
+        required_fields   = expectation.get("required_row_fields") or []
+        evidence_row      = {field_name: f"test-{field_name}" for field_name in required_fields}
+
+        if not evidence_row:
+            evidence_row = {"status": "fail"}
+
         evidence = [
             {
                 "evidence_id": evidence_id,
-                "evidence_type": "dq_history",
-                "tool_name": "dq_history",
-                "description": "Historical DQ evidence for the affected partition.",
+                "evidence_type": evidence_type,
+                "tool_name": tool_name,
+                "description": "Deterministic evidence for the affected scenario.",
                 "query": "",
-                "rows": [{"status": "fail"}],
+                "rows": [evidence_row],
+                "row_count": 1,
                 "summary": "The deterministic history confirms the expected incident signal for this scenario.",
             }
         ]
@@ -231,6 +242,7 @@ class FakeDagRun:
         "report_s3_uri": SOURCE_REPORT_URI,
         "evaluation_run_id": "life-eval-summary-test",
         "artifact_prefix": "agent-life",
+        "enable_critic": True,
     }
 
 
@@ -252,7 +264,7 @@ def test_life_scenario_registry_matches_ground_truth_catalog() -> None:
 @pytest.mark.parametrize("scenario_id", LIFE_SCENARIO_NAMES)
 def test_life_evaluator_passes_all_supported_ground_truth_scenarios(scenario_id: str) -> None:
     """
-    Ensure baseline and all five incident scenarios can produce a passing evaluation.
+    Ensure every data incident and evaluation-only replay can pass deterministic policy.
 
     Args:
         scenario_id: Parameterized incident scenario identifier.
@@ -297,6 +309,8 @@ def test_life_output_contains_required_contract_fields() -> None:
         "failed_checks",
         "failure_category",
         "life_stage",
+        "life_stage_map",
+        "critic_summary",
         "suggested_change_type",
         "suggested_change_summary",
         "requires_human_approval",
@@ -304,6 +318,63 @@ def test_life_output_contains_required_contract_fields() -> None:
     }
 
     assert required_fields <= set(payload)
+    assert evaluation.life_stage_map == life.LIFE_STAGE_MAP
+    assert evaluation.critic_summary.triggered is False
+
+
+def test_life_critic_is_opt_in_bounded_and_precedes_improvement_proposal() -> None:
+    """
+    Ensure non-passing evaluations can challenge findings without changing policy.
+
+    Returns:
+        None.
+    """
+    scenario             = load_scenario("late_arriving")
+    report               = build_reliable_report(scenario)
+    report["confidence"] = 0.40
+
+    evaluation = evaluate_life_report(
+        scenario,
+        report,
+        SOURCE_REPORT_URI,
+        "life-critic-review",
+        enable_critic=True,
+    )
+
+    assert evaluation.eval_status == "review"
+    assert evaluation.critic_summary.enabled is True
+    assert evaluation.critic_summary.triggered is True
+    assert evaluation.critic_summary.trigger_reason == "evaluation_review"
+    assert evaluation.critic_summary.challenged_failure_categories == ["low_confidence"]
+    assert evaluation.critic_summary.evidence_to_review == ["confidence"]
+    assert evaluation.critic_summary.requires_human_review is True
+    assert "runtime behavior" in evaluation.critic_summary.alternative_explanation
+    assert evaluation.markdown_report.index("## Critic Review") < evaluation.markdown_report.index(
+        "## Improvement Proposal"
+    )
+
+
+def test_life_critic_skips_passing_evaluation() -> None:
+    """
+    Ensure the optional critic does not manufacture disagreement for a passing report.
+
+    Returns:
+        None.
+    """
+    scenario   = load_scenario("baseline")
+    report     = build_reliable_report(scenario)
+    evaluation = evaluate_life_report(
+        scenario,
+        report,
+        SOURCE_REPORT_URI,
+        "life-critic-pass",
+        enable_critic=True,
+    )
+
+    assert evaluation.eval_status == "pass"
+    assert evaluation.critic_summary.enabled is True
+    assert evaluation.critic_summary.triggered is False
+    assert evaluation.critic_summary.trigger_reason == "evaluation_passed"
 
 
 # --- Defining Failure Classification Tests
@@ -415,6 +486,43 @@ def test_life_accepts_mutating_recommendation_with_explicit_approval_gate() -> N
     evaluation = evaluate_life_report(scenario, report, SOURCE_REPORT_URI, "life-gated-action")
 
     assert evaluation.eval_status == "pass"
+
+
+def test_life_accepts_explicit_schema_mutation_prohibition_without_action_gate() -> None:
+    """
+    Ensure clear no-mutation wording is not misclassified as a schema change proposal.
+
+    Returns:
+        None.
+    """
+    scenario = load_scenario("schema_breaking_change")
+    report   = build_reliable_report(scenario)
+    report["recommended_actions"] = [
+        "Review producer compatibility. Do not alter the warehouse schema automatically."
+    ]
+
+    evaluation = evaluate_life_report(scenario, report, SOURCE_REPORT_URI, "life-schema-prohibition")
+
+    assert evaluation.eval_status == "pass"
+
+
+def test_life_requires_schema_specific_evidence_contract() -> None:
+    """
+    Ensure generic DQ history cannot substitute for exact schema contract evidence.
+
+    Returns:
+        None.
+    """
+    scenario = load_scenario("schema_breaking_change")
+    report   = build_reliable_report(scenario)
+    report["evidence"][0]["tool_name"] = "dq_history"
+
+    evaluation = evaluate_life_report(scenario, report, SOURCE_REPORT_URI, "life-schema-evidence")
+
+    assert evaluation.eval_status == "fail"
+    assert "missing_evidence" in evaluation.failure_categories
+    expected_check = next(check for check in evaluation.checks if check.name == "expected_evidence")
+    assert expected_check.details["matched_evidence_count"] == 0
 
 
 def test_life_classifies_sql_guardrail_violation() -> None:
@@ -558,6 +666,8 @@ def test_persist_life_evaluation_writes_only_proposal_artifacts_and_audit(monkey
     assert len(audits) == 1
     assert audits[0]["action"] == "life_evaluation_completed"
     assert audits[0]["status"] == "success"
+    assert audits[0]["output_payload"]["life_stage_map"] == life.LIFE_STAGE_MAP
+    assert audits[0]["output_payload"]["critic_summary"]["triggered"] is False
     assert persisted.requires_human_approval is False
     assert "does not modify prompts" in persisted.markdown_report
 
@@ -608,12 +718,14 @@ def test_verify_life_evaluation_checks_s3_and_clickhouse_audit() -> None:
     )
     persisted.markdown_report = render_life_evaluation(persisted)
     objects = {
+        "agent-reports/test-run/report.json": json.dumps(report),
         json_key: json.dumps(persisted.model_dump(mode="json")),
         markdown_key: persisted.markdown_report,
     }
     audit_payload = {
         "run_id": persisted.run_id,
         "source_report_sha256": persisted.source_report_sha256,
+        "critic_summary": persisted.critic_summary.model_dump(mode="json"),
     }
     clickhouse_client = FakeClickHouseClient(
         (
@@ -655,6 +767,7 @@ def test_life_trigger_uses_safe_json_and_unique_identifiers() -> None:
         evaluation_run_id=evaluation_id,
         scenario_id="missing_latest_day",
         report_s3_uri=SOURCE_REPORT_URI,
+        enable_critic=True,
     )
     conf = json.loads(command[command.index("-c") + 1])
 
@@ -663,6 +776,7 @@ def test_life_trigger_uses_safe_json_and_unique_identifiers() -> None:
     assert conf["scenario"] == "missing_latest_day"
     assert conf["report_s3_uri"] == SOURCE_REPORT_URI
     assert conf["evaluation_run_id"] == evaluation_id
+    assert conf["enable_critic"] is True
     assert command[-1] == trigger_airflow_life_evaluation.LIFE_EVALUATION_DAG_ID
     assert ";" not in "".join(command)
 
@@ -714,8 +828,10 @@ def test_life_airflow_summary_exposes_artifacts_and_task_state(monkeypatch) -> N
     assert summary["result"] == "success"
     assert summary["evaluation_run_id"] == "life-eval-summary-test"
     assert summary["source_report_s3_uri"] == SOURCE_REPORT_URI
+    assert summary["critic_enabled"] is True
     assert summary["json_report_s3_uri"].endswith("/life_report.json")
     assert summary["task_states"] == {
+        "t05_prepare_source_report": "success",
         "t10_evaluate_life_report": "success",
         "t20_verify_life_artifacts": "success",
     }

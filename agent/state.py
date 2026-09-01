@@ -51,6 +51,21 @@ class Severity(str, Enum):
     INFO     = "info"
 
 
+class IncidentComplexityTier(str, Enum):
+    """
+    Supported deterministic incident-complexity tiers.
+
+    Values:
+        LOW: Narrow investigation with no strong reasoning requirement.
+        MODERATE: Multiple signals exist, but bounded normal reasoning is sufficient.
+        HIGH: Cross-signal investigation that requires a strong reasoning attempt.
+    """
+
+    LOW      = "low"
+    MODERATE = "moderate"
+    HIGH     = "high"
+
+
 class EvidenceType(str, Enum):
     """
     Evidence categories collected during triage.
@@ -58,18 +73,22 @@ class EvidenceType(str, Enum):
     Values:
         SQL_RESULT: Evidence returned from a guarded ClickHouse query.
         DQ_HISTORY: Historical DQ check context.
+        INCIDENT_HISTORY: Prior durable investigation outcomes for comparison.
         LINEAGE: dbt lineage or artifact-derived context.
         PIPELINE_RUN: Pipeline execution status context.
+        SCHEMA_DRIFT: Persisted schema contract comparison evidence.
         ARTIFACT: S3 artifact or report context.
         NOTE: Agent-authored observation that references other evidence.
     """
 
-    SQL_RESULT   = "sql_result"
-    DQ_HISTORY   = "dq_history"
-    LINEAGE      = "lineage"
-    PIPELINE_RUN = "pipeline_run"
-    ARTIFACT     = "artifact"
-    NOTE         = "note"
+    SQL_RESULT      = "sql_result"
+    DQ_HISTORY      = "dq_history"
+    INCIDENT_HISTORY = "incident_history"
+    LINEAGE         = "lineage"
+    PIPELINE_RUN    = "pipeline_run"
+    SCHEMA_DRIFT    = "schema_drift"
+    ARTIFACT        = "artifact"
+    NOTE            = "note"
 
 
 class EvidenceCategory(str, Enum):
@@ -79,15 +98,19 @@ class EvidenceCategory(str, Enum):
     Values:
         CURRENT_PARTITION_ROW_COUNT: Guarded row count for the affected partition.
         DQ_HISTORY: Recent deterministic DQ check history.
+        INCIDENT_HISTORY: Exact-match bounded prior investigation outcomes.
         PIPELINE_RUNS: Recent Airflow/pipeline execution status.
         DBT_LINEAGE: Upstream and downstream dbt lineage context.
+        SCHEMA_DRIFT: Exact persisted schema snapshot and contract findings.
         RECENT_PARTITION_TREND: Guarded recent partition row-count trend.
     """
 
     CURRENT_PARTITION_ROW_COUNT = "current_partition_row_count"
     DQ_HISTORY                 = "dq_history"
+    INCIDENT_HISTORY           = "incident_history"
     PIPELINE_RUNS              = "pipeline_runs"
     DBT_LINEAGE                = "dbt_lineage"
+    SCHEMA_DRIFT               = "schema_drift"
     RECENT_PARTITION_TREND     = "recent_partition_trend"
 
 
@@ -216,6 +239,19 @@ class Alert(BaseModel):
 
         return self
 
+    @property
+    def is_schema_drift(self) -> bool:
+        """
+        Identify alerts produced by deterministic schema contract checks.
+
+        Returns:
+            True when alert type or metric identifies a schema drift incident.
+        """
+        return (
+            self.alert_type.strip().lower() == "schema_drift"
+            or self.metric.strip().lower() == "schema_contract_drift"
+        )
+
 
 class EvidenceRequest(BaseModel):
     """
@@ -255,7 +291,7 @@ class EvidencePlan(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
     investigation_question: str = Field(min_length=8, max_length=320)
-    requests: list[EvidenceRequest] = Field(min_length=1, max_length=5)
+    requests: list[EvidenceRequest] = Field(min_length=1, max_length=6)
     planner_source: Literal[
         "llm",
         "llm_with_policy",
@@ -463,6 +499,99 @@ class ToolAuditEvent(BaseModel):
     created_at: datetime               = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class IncidentComplexityAssessment(BaseModel):
+    """
+    Persist deterministic facts used to classify triage reasoning complexity.
+
+    Attributes:
+        tier: Final low, moderate, or high complexity tier.
+        score: Additive deterministic complexity score.
+        strong_reasoning_required: Whether policy requires a strong model attempt.
+        reason_codes: Stable reasons that contributed to the score.
+        deterministic_evidence_types: Trusted evidence types included in the assessment.
+        hypothesis_count: Number of ranked hypotheses.
+        top_hypothesis_gap: Confidence gap between the two highest hypotheses.
+        contradiction_count: Explicit evidence or hypothesis contradiction references.
+        lineage_asset_count: Unique directly related lineage assets found in evidence.
+        schema_finding_count: Persisted schema findings included in evidence.
+        unresolved_error_count: Non-fatal tool or route errors retained by the graph.
+    """
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    tier: IncidentComplexityTier
+    score: int                              = Field(ge=0, le=100)
+    strong_reasoning_required: bool         = False
+    reason_codes: tuple[str, ...]           = Field(default_factory=tuple, max_length=20)
+    deterministic_evidence_types: tuple[str, ...] = Field(default_factory=tuple, max_length=20)
+    hypothesis_count: int                   = Field(default=0, ge=0, le=100)
+    top_hypothesis_gap: float | None        = Field(default=None, ge=0.0, le=1.0)
+    contradiction_count: int                = Field(default=0, ge=0, le=10_000)
+    lineage_asset_count: int                = Field(default=0, ge=0, le=10_000)
+    schema_finding_count: int               = Field(default=0, ge=0, le=10_000)
+    unresolved_error_count: int             = Field(default=0, ge=0, le=1_000)
+
+    @model_validator(mode="after")
+    def validate_strong_reasoning_tier(self) -> "IncidentComplexityAssessment":
+        """
+        Keep strong-reasoning policy aligned with the high-complexity tier.
+
+        Returns:
+            Current assessment when tier and strong-reasoning flag agree.
+
+        Raises:
+            ValueError: If a non-high tier claims strong reasoning or vice versa.
+        """
+        is_high = self.tier == IncidentComplexityTier.HIGH
+
+        if self.strong_reasoning_required != is_high:
+            raise ValueError(
+                "Strong reasoning is required exactly when incident complexity is high."
+            )
+
+        if len(set(self.reason_codes)) != len(self.reason_codes):
+            raise ValueError("Incident complexity reason codes must remain unique.")
+
+        return self
+
+
+class LlmRuntimeSummary(BaseModel):
+    """
+    Aggregate bounded LLM routing metadata retained by one triage report.
+
+    The summary contains operational metadata only. It deliberately excludes
+    prompts, credentials, hidden reasoning, and raw provider responses so the
+    JSON report remains safe for operator-facing APIs and UI surfaces.
+
+    Attributes:
+        route_event_count: Number of LLM route evidence events in the run.
+        requested_routes: Provider routes requested by deterministic policy.
+        executed_routes: Routes that produced the retained response or fallback.
+        providers: Provider names observed across route events.
+        models: Model names observed across route events.
+        external_model_used: Whether at least one non-heuristic provider returned output.
+        heuristic_fallback_used: Whether any route completed through local heuristics.
+        fallback_reasons: Sanitized reasons retained by fallback decisions.
+        input_tokens: Aggregate provider-reported or estimated input tokens.
+        output_tokens: Aggregate provider-reported or estimated output tokens.
+        estimated_cost_usd: Aggregate estimated provider cost in USD.
+        duration_ms: Aggregate route duration in milliseconds.
+    """
+
+    route_event_count: int              = Field(default=0, ge=0)
+    requested_routes: list[str]         = Field(default_factory=list, max_length=20)
+    executed_routes: list[str]          = Field(default_factory=list, max_length=20)
+    providers: list[str]                = Field(default_factory=list, max_length=20)
+    models: list[str]                   = Field(default_factory=list, max_length=20)
+    external_model_used: bool           = False
+    heuristic_fallback_used: bool       = False
+    fallback_reasons: list[str]         = Field(default_factory=list, max_length=20)
+    input_tokens: int                   = Field(default=0, ge=0)
+    output_tokens: int                  = Field(default=0, ge=0)
+    estimated_cost_usd: float           = Field(default=0.0, ge=0.0)
+    duration_ms: int                    = Field(default=0, ge=0)
+
+
 class TriageReport(BaseModel):
     """
     Final triage report generated for an alert.
@@ -477,6 +606,9 @@ class TriageReport(BaseModel):
         evidence: Evidence items reviewed.
         evidence_plan: Bounded plan that selected deterministic evidence categories.
         hypothesis_framing: Audit metadata for model-assisted hypothesis wording.
+        llm_runtime: Sanitized aggregate model-route usage retained by the report.
+        complexity_assessment: Deterministic reasoning-complexity decision and facts.
+        investigation_errors: Bounded non-fatal evidence or narrative gaps retained by the run.
         confidence: Final confidence score from 0.0 to 1.0.
         recommended_actions: Non-mutating recommended next steps.
         approval_gated_actions: Actions that require user approval.
@@ -497,6 +629,9 @@ class TriageReport(BaseModel):
     evidence: list[EvidenceItem]                   = Field(default_factory=list)
     evidence_plan: EvidencePlan | None             = None
     hypothesis_framing: HypothesisFraming | None   = None
+    llm_runtime: LlmRuntimeSummary                  = Field(default_factory=LlmRuntimeSummary)
+    complexity_assessment: IncidentComplexityAssessment | None = None
+    investigation_errors: list[str]                = Field(default_factory=list, max_length=20)
     confidence: float                              = Field(ge=0.0, le=1.0)
     recommended_actions: list[str]                 = Field(default_factory=list)
     approval_gated_actions: list[ApprovalGatedAction] = Field(default_factory=list)
@@ -524,6 +659,7 @@ class TriageState(BaseModel):
         report: Final triage report.
         audit_events: In-memory tool audit events.
         errors: Non-fatal errors collected during triage.
+        runtime_contract_hash: Stable hash of evidence and side-effect runtime targets.
         confidence_threshold: Minimum confidence required to finalize without extra evidence.
         evidence_iterations: Number of evidence-gathering loops completed.
         max_evidence_iterations: Maximum allowed evidence loops.
@@ -540,6 +676,7 @@ class TriageState(BaseModel):
     report: TriageReport | None                     = None
     audit_events: list[ToolAuditEvent]              = Field(default_factory=list)
     errors: list[str]                               = Field(default_factory=list)
+    runtime_contract_hash: str                      = Field(default="", pattern=r"^(?:[0-9a-f]{64})?$")
     confidence_threshold: float                     = Field(default=0.70, ge=0.0, le=1.0)
     evidence_iterations: int                        = Field(default=0, ge=0)
     max_evidence_iterations: int                    = Field(default=2, ge=0, le=10)

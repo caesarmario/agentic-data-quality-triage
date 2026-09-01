@@ -187,6 +187,9 @@ def humanize_metric(metric: Any) -> str:
     """
     normalized = str(metric or "").lower()
 
+    if "schema" in normalized and "drift" in normalized:
+        return "Schema contract changed"
+
     if "row_count" in normalized:
         return "Missing or unusually low data volume"
 

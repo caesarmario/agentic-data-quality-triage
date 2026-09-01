@@ -110,6 +110,7 @@ def test_load_scenario_catalog_validates_all_incident_configs() -> None:
         "missing_latest_day",
         "missing_segment",
         "null_spike",
+        "schema_breaking_change",
     }
 
     assert all(scenario.enabled for scenario in catalog)
@@ -145,7 +146,7 @@ def test_build_scenario_catalog_summary_is_json_ready() -> None:
     summary = build_scenario_catalog_summary(catalog)
 
     assert summary["status"] == "success"
-    assert summary["scenario_count"] == 6
+    assert summary["scenario_count"] == 7
     assert summary["scenarios"][0]["scenario_id"] == "baseline"
 
 

@@ -42,7 +42,7 @@ def emit_llm_smoke_summary(**context: Any) -> dict[str, Any]:
         context: Airflow task context containing the current DagRun.
 
     Returns:
-        Summary containing route, strictness, and upstream task state evidence.
+        Summary containing route, external execution mode, and upstream task state evidence.
 
     Raises:
         ValueError: If the callable is executed without Airflow DagRun context.
@@ -57,7 +57,7 @@ def emit_llm_smoke_summary(**context: Any) -> dict[str, Any]:
         "dag_id": dag_run.dag_id,
         "run_id": dag_run.run_id,
         "route_name": str(conf.get("route_name", "cheap_summary")),
-        "require_provider": bool(conf.get("require_provider", False)),
+        "run_external_provider": bool(conf.get("run_external_provider", False)),
         "result": "success",
         "state_evidence": "t30 reached after all_success provider smoke dependencies",
         "task_states": {task_id: "success" for task_id in LLM_SMOKE_TASK_IDS},

@@ -8,10 +8,17 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timezone
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
 
+from agent.context.models import IncidentMemoryRecord, build_incident_memory_record
+from agent.specialists.contracts import (
+    AgentApprovalState,
+    AgentTaskStatus,
+    EvidenceReference,
+)
 from apps.api import main as api_main
 from apps.common.llm_observability import enrich_audit_rows
 from agent.tools.approval_queue import ApprovalRequest, normalize_backfill_parameters
@@ -61,6 +68,99 @@ class DummyAlert:
             Alert payload dictionary.
         """
         return self.payload
+
+
+# --- Defining Daily Summary API Tests
+def test_daily_summary_endpoint_is_typed_and_filters_internal_sql(monkeypatch) -> None:
+    """
+    Validate the daily summary route delegates the exact date and strips tool SQL.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_fetch_daily_quality_summary(**kwargs) -> dict[str, Any]:
+        """
+        Return one internally annotated deterministic summary.
+
+        Args:
+            **kwargs: Exact tool arguments supplied by the endpoint.
+
+        Returns:
+            Daily summary payload containing internal SQL for filtering validation.
+        """
+        captured.update(kwargs)
+
+        return {
+            "status": "success",
+            "dt": "2026-06-10",
+            "check_counts": [
+                {"status": "fail", "count": 1},
+                {"status": "pass", "count": 9},
+            ],
+            "alert_counts": [{"severity": "critical", "count": 1}],
+            "total_checks": 10,
+            "total_open_alerts": 1,
+            "duration_ms": 7,
+            "summary": "Daily quality summary for 2026-06-10.",
+            "sql": "SELECT internal_query_metadata",
+        }
+
+    monkeypatch.setattr(
+        api_main,
+        "fetch_daily_quality_summary",
+        fake_fetch_daily_quality_summary,
+    )
+
+    response = client.get(
+        "/api/v1/summaries/daily",
+        params={"dt": "2026-06-10"},
+    )
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert captured == {"dt": "2026-06-10"}
+    assert payload["total_checks"] == 10
+    assert payload["total_open_alerts"] == 1
+    assert "sql" not in payload
+
+
+def test_daily_summary_endpoint_rejects_inconsistent_tool_totals(monkeypatch) -> None:
+    """
+    Ensure inconsistent deterministic aggregates fail the public response contract.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setattr(
+        api_main,
+        "fetch_daily_quality_summary",
+        lambda **kwargs: {
+            "status": "success",
+            "dt": "2026-06-10",
+            "check_counts": [{"status": "pass", "count": 9}],
+            "alert_counts": [],
+            "total_checks": 10,
+            "total_open_alerts": 0,
+            "duration_ms": 1,
+            "summary": "Invalid aggregate.",
+        },
+    )
+
+    response = client.get(
+        "/api/v1/summaries/daily",
+        params={"dt": "2026-06-10"},
+    )
+
+    assert response.status_code == 400
+    assert "total_checks" in response.json()["detail"]
 
 
 class DummyAction:
@@ -142,6 +242,44 @@ def build_api_approval(status: str = "pending") -> ApprovalRequest:
     )
 
 
+def build_api_incident_memory() -> IncidentMemoryRecord:
+    """
+    Build one evidence-backed durable investigation for API serialization tests.
+
+    Returns:
+        Valid IncidentMemoryRecord with bounded decision facts and evidence pointers.
+    """
+    return build_incident_memory_record(
+        parent_run_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        outcome_status=AgentTaskStatus.SUCCESS,
+        specialist_name="incident_triage_agent",
+        task_type="triage_alert",
+        summary="A country and channel segment is missing from the daily orders mart.",
+        alert_key=(
+            "orders|dq_failure|2026-05-13|dq.fct_orders_daily|"
+            "segment_coverage__country_channel|country_channel"
+        ),
+        alert_display_id="DQ-20260513-764959",
+        evidence_references=[
+            EvidenceReference(
+                evidence_type="dq_history",
+                source_tool="dq_history",
+                reference="dq-check:segment_coverage__country_channel",
+                summary="The expected country and channel combination is absent.",
+            )
+        ],
+        decision_facts={
+            "confidence": 0.72,
+            "top_hypothesis_category": "missing_segment",
+            "report_id": "RPT-27BDC120",
+            "requires_human_approval": False,
+        },
+        report_s3_uri="s3://dq-artifacts/agent-reports/report.md",
+        approval_state=AgentApprovalState.NOT_REQUIRED,
+        recorded_at=datetime(2026, 8, 20, 13, 37, tzinfo=timezone.utc),
+    )
+
+
 def build_api_metadata_asset(qualified_name: str = "dq.fct_orders_daily") -> dict:
     """
     Build one valid public metadata asset response.
@@ -218,9 +356,22 @@ def test_alert_list_endpoint_uses_existing_alert_tool(monkeypatch) -> None:
         """
         return {
             "status": "success",
-            "alerts": [{"alert_key": "orders|test", "status": status, "dt": dt}],
+            "alerts": [
+                {
+                    "alert_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "alert_key": "orders|test",
+                    "alert_display_id": "DQ-20260610-ABC123",
+                    "status": status,
+                    "alert_type": "dq_failure",
+                    "severity": "critical",
+                    "table_name": "dq.raw_orders",
+                    "metric": "row_count_positive",
+                    "dt": dt,
+                    "details_json": '{"internal": "serialized"}',
+                }
+            ],
             "row_count": 1,
-            "limit": limit,
+            "sql": "SELECT * FROM dq.alerts",
         }
 
     monkeypatch.setattr(api_main, "list_alerts", fake_list_alerts)
@@ -230,6 +381,9 @@ def test_alert_list_endpoint_uses_existing_alert_tool(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["row_count"] == 1
     assert response.json()["alerts"][0]["alert_key"] == "orders|test"
+    assert response.json()["limit"] == 5
+    assert "sql" not in response.json()
+    assert "details_json" not in response.json()["alerts"][0]
 
 
 def test_alert_detail_endpoint_returns_serialized_alert(monkeypatch) -> None:
@@ -253,7 +407,21 @@ def test_alert_detail_endpoint_returns_serialized_alert(monkeypatch) -> None:
         Returns:
             DummyAlert object.
         """
-        return DummyAlert({"alert_id": alert_id, "alert_key": alert_key, "severity": "critical"})
+        return DummyAlert(
+            {
+                "alert_id": alert_id,
+                "alert_key": alert_key,
+                "alert_display_id": "DQ-20260610-ABC123",
+                "status": "open",
+                "alert_type": "dq_failure",
+                "severity": "critical",
+                "table_name": "dq.raw_orders",
+                "metric": "row_count_positive",
+                "dt": "2026-06-10",
+                "details": {"source": "deterministic_check"},
+                "internal_field": "must-not-leak",
+            }
+        )
 
     monkeypatch.setattr(api_main, "load_alert", fake_load_alert)
 
@@ -262,6 +430,205 @@ def test_alert_detail_endpoint_returns_serialized_alert(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["alert_key"] == "orders|test"
     assert response.json()["severity"] == "critical"
+    assert response.json()["details"] == {"source": "deterministic_check"}
+    assert "internal_field" not in response.json()
+
+
+def test_audit_endpoint_filters_raw_payloads_and_internal_sql(monkeypatch) -> None:
+    """
+    Validate audit responses expose operational facts without raw prompts or SQL.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    def fake_fetch_audit_log_rows(alert_key: str, limit: int) -> dict:
+        """
+        Return one audit row containing fields the public schema must remove.
+
+        Args:
+            alert_key: Exact alert identity supplied by the route.
+            limit: Maximum audit rows requested.
+
+        Returns:
+            Internal audit payload with one public event.
+        """
+        return {
+            "status": "success",
+            "alert_key": alert_key,
+            "rows": [
+                {
+                    "audit_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "ts": "2026-06-10T08:15:00Z",
+                    "agent_run_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                    "actor": "agent",
+                    "action": "collect_dq_history",
+                    "tool_name": "dq_history",
+                    "status": "success",
+                    "duration_ms": 25,
+                    "row_count": 1,
+                    "input_json": '{"question": "private"}',
+                    "output_json": '{"raw": "private"}',
+                }
+            ],
+            "row_count": 1,
+            "llm_routes": [],
+            "latest_llm_route": None,
+            "duration_ms": 8,
+            "sql": "SELECT * FROM dq.agent_audit_log",
+            "requested_limit": limit,
+        }
+
+    monkeypatch.setattr(api_main, "fetch_audit_log_rows", fake_fetch_audit_log_rows)
+
+    response = client.get(
+        "/api/v1/audit/logs",
+        params={"alert_key": "orders|test", "limit": 10},
+    )
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["alert_key"] == "orders|test"
+    assert payload["limit"] == 10
+    assert payload["row_count"] == 1
+    assert "sql" not in payload
+    assert "input_json" not in payload["rows"][0]
+    assert "output_json" not in payload["rows"][0]
+
+
+def test_dq_history_endpoint_parses_details_and_filters_sql(monkeypatch) -> None:
+    """
+    Validate DQ evidence returns typed metadata rather than serialized internals.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    def fake_fetch_dq_history(**kwargs) -> dict:
+        """
+        Return one deterministic DQ result for API normalization.
+
+        Args:
+            kwargs: Evidence lookup arguments supplied by the endpoint.
+
+        Returns:
+            DQ history tool payload containing internal SQL and JSON text.
+        """
+        return {
+            "status": "success",
+            "table_name": kwargs["table_name"],
+            "dt": kwargs["dt"].isoformat(),
+            "check_name": kwargs["check_name"],
+            "lookback_days": kwargs["lookback_days"],
+            "rows": [
+                {
+                    "check_run_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "run_at": "2026-06-10T08:10:00Z",
+                    "dt": "2026-06-10",
+                    "table_name": kwargs["table_name"],
+                    "check_name": "row_count_positive",
+                    "check_type": "volume",
+                    "status": "failed",
+                    "severity": "critical",
+                    "observed_value": 0,
+                    "expected_value": 1,
+                    "threshold_value": 1,
+                    "details_json": '{"partition": "2026-06-10"}',
+                    "evidence_s3_uri": "s3://dq-dqfailures/orders/evidence.json",
+                }
+            ],
+            "row_count": 1,
+            "status_counts": {"failed": 1},
+            "sql": "SELECT * FROM dq.dq_check_results",
+        }
+
+    monkeypatch.setattr(api_main, "fetch_dq_history", fake_fetch_dq_history)
+
+    response = client.get(
+        "/api/v1/evidence/dq-history",
+        params={
+            "table_name": "dq.raw_orders",
+            "dt": "2026-06-10",
+            "lookback_days": 14,
+            "limit": 20,
+        },
+    )
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["limit"] == 20
+    assert payload["rows"][0]["details"] == {"partition": "2026-06-10"}
+    assert "details_json" not in payload["rows"][0]
+    assert "sql" not in payload
+
+
+def test_pipeline_run_endpoint_parses_metadata_and_filters_sql(monkeypatch) -> None:
+    """
+    Validate pipeline evidence exposes parsed metadata through a bounded contract.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    def fake_fetch_pipeline_runs(**kwargs) -> dict:
+        """
+        Return one deterministic pipeline run for API normalization.
+
+        Args:
+            kwargs: Pipeline evidence lookup arguments supplied by the endpoint.
+
+        Returns:
+            Pipeline tool payload containing internal SQL and JSON text.
+        """
+        return {
+            "status": "success",
+            "dt": kwargs["dt"].isoformat(),
+            "lookback_days": kwargs["lookback_days"],
+            "job_name": kwargs["job_name"],
+            "rows": [
+                {
+                    "run_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                    "job_name": "seed_orders",
+                    "dag_id": "00_01_dag_dq_orders_seed_to_s3",
+                    "task_id": "t10_generate_and_upload_orders",
+                    "logical_date": "2026-06-10",
+                    "partition_dt": "2026-06-10",
+                    "status": "success",
+                    "started_at": "2026-06-10T00:05:00Z",
+                    "ended_at": "2026-06-10T00:05:05Z",
+                    "duration_ms": 5000,
+                    "rows_read": 0,
+                    "rows_written": 1200,
+                    "source_uri": "",
+                    "target_table": "dq.raw_orders",
+                    "error_message": "",
+                    "metadata_json": '{"run_mode": "daily"}',
+                }
+            ],
+            "row_count": 1,
+            "status_counts": {"success": 1},
+            "sql": "SELECT * FROM dq.pipeline_runs",
+        }
+
+    monkeypatch.setattr(api_main, "fetch_pipeline_runs", fake_fetch_pipeline_runs)
+
+    response = client.get(
+        "/api/v1/evidence/pipeline-runs",
+        params={"dt": "2026-06-10", "lookback_days": 7, "limit": 20},
+    )
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["limit"] == 20
+    assert payload["rows"][0]["metadata"] == {"run_mode": "daily"}
+    assert "metadata_json" not in payload["rows"][0]
+    assert "sql" not in payload
 
 
 def test_metadata_asset_search_endpoint_is_typed_and_filters_internal_fields(monkeypatch) -> None:
@@ -483,7 +850,17 @@ def test_report_read_endpoint_uses_bounded_reader(monkeypatch) -> None:
         Returns:
             Report read payload.
         """
-        return {"status": "success", "s3_uri": s3_uri, "max_bytes": max_bytes, "text": "# Report"}
+        return {
+            "status": "success",
+            "s3_uri": s3_uri,
+            "bucket": "dq-artifacts",
+            "key": "agent-reports/report.md",
+            "bytes_read": 8,
+            "returned_bytes": 8,
+            "truncated": False,
+            "text": "# Report",
+            "sql": "must-not-leak",
+        }
 
     monkeypatch.setattr(api_main, "read_report_artifact", fake_read_report_artifact)
 
@@ -492,6 +869,8 @@ def test_report_read_endpoint_uses_bounded_reader(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["text"] == "# Report"
     assert response.json()["max_bytes"] == 50
+    assert response.json()["media_type"] == "text/markdown"
+    assert "sql" not in response.json()
 
 
 def test_triage_run_endpoint_returns_report_uris(monkeypatch) -> None:
@@ -764,6 +1143,11 @@ def test_copilot_answer_endpoint_uses_shared_context_and_audit(monkeypatch) -> N
             "row_count": 1,
         },
     )
+    monkeypatch.setattr(
+        api_main,
+        "fetch_incident_memory",
+        lambda **kwargs: [build_api_incident_memory()],
+    )
 
     def fake_build_operator_answer(**kwargs) -> str:
         """
@@ -807,9 +1191,57 @@ def test_copilot_answer_endpoint_uses_shared_context_and_audit(monkeypatch) -> N
     assert response.json()["answer"] == "The selected partition is missing."
     assert response.json()["context_source"] == "alert_audit"
     assert response.json()["audit_count"] == 1
+    assert response.json()["incident_history_count"] == 1
     assert captured["copilot"]["alert"] is alert
+    assert captured["copilot"]["incident_history_rows"] == [
+        {
+            "recorded_at": "2026-08-20T13:37:00+00:00",
+            "outcome_status": "success",
+            "summary": "A country and channel segment is missing from the daily orders mart.",
+            "confidence": 0.72,
+            "top_hypothesis_category": "missing_segment",
+            "report_id": "RPT-27BDC120",
+            "requires_human_approval": False,
+            "evidence_reference_count": 1,
+            "approval_state": "not_required",
+        }
+    ]
     assert str(captured["copilot"]["agent_run_id"]) == response.json()["agent_run_id"]
     assert captured["audit"]["response"].agent_run_id == response.json()["agent_run_id"]
+
+
+def test_copilot_incident_history_context_excludes_current_and_private_fields() -> None:
+    """
+    Ensure the Copilot sees prior summaries but not durable-memory internals.
+
+    Returns:
+        None.
+    """
+    memory = build_api_incident_memory()
+
+    assert api_main.copilot_incident_history_context(
+        records=[memory],
+        current_report_id="RPT-27BDC120",
+    ) == []
+
+    rows = api_main.copilot_incident_history_context(records=[memory])
+
+    assert len(rows) == 1
+    assert set(rows[0]) == {
+        "recorded_at",
+        "outcome_status",
+        "summary",
+        "confidence",
+        "top_hypothesis_category",
+        "report_id",
+        "requires_human_approval",
+        "evidence_reference_count",
+        "approval_state",
+    }
+    assert "memory_id" not in rows[0]
+    assert "parent_run_id" not in rows[0]
+    assert "alert_key" not in rows[0]
+    assert "decision_facts" not in rows[0]
 
 
 def test_copilot_answer_endpoint_rejects_mismatched_report(monkeypatch) -> None:
@@ -1012,3 +1444,215 @@ def test_life_evaluation_history_endpoint_returns_sanitized_contract(monkeypatch
     assert captured["scenario_id"] == "missing_latest_day"
     assert captured["lookback_days"] == 30
     assert captured["limit"] == 10
+
+
+def test_incident_history_endpoint_returns_sanitized_contract(monkeypatch) -> None:
+    """
+    Validate durable incident history exposes bounded facts and evidence pointers only.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    captured: dict[str, object] = {}
+    memory                       = build_api_incident_memory()
+
+    def fake_fetch_incident_memory(**kwargs) -> list[IncidentMemoryRecord]:
+        """
+        Capture bounded lookup parameters and return one durable investigation.
+
+        Args:
+            **kwargs: Incident-memory store arguments.
+
+        Returns:
+            One validated durable incident-memory record.
+        """
+        captured.update(kwargs)
+
+        return [memory]
+
+    monkeypatch.setattr(api_main, "build_clickhouse_client", lambda: object())
+    monkeypatch.setattr(api_main, "fetch_incident_memory", fake_fetch_incident_memory)
+
+    response = client.get(
+        "/api/v1/incidents/history",
+        params={
+            "alert_reference": " DQ-20260513-764959 ",
+            "lookback_days": 30,
+            "limit": 5,
+        },
+    )
+    payload  = response.json()
+    row      = payload["rows"][0]
+
+    assert response.status_code == 200
+    assert payload["alert_reference"] == "DQ-20260513-764959"
+    assert payload["lookback_days"] == 30
+    assert payload["limit"] == 5
+    assert payload["row_count"] == 1
+    assert row["alert_display_id"] == "DQ-20260513-764959"
+    assert row["confidence"] == 0.72
+    assert row["top_hypothesis_category"] == "missing_segment"
+    assert row["report_id"] == "RPT-27BDC120"
+    assert row["evidence_reference_count"] == 1
+    assert row["evidence_references"][0]["source_tool"] == "dq_history"
+    assert "decision_facts" not in row
+    assert "content_sha256" not in row
+    assert "memory_key" not in row
+    assert captured["alert_reference"] == "DQ-20260513-764959"
+    assert captured["lookback_days"] == 30
+    assert captured["limit"] == 5
+
+
+def test_incident_history_endpoint_enforces_query_bounds() -> None:
+    """
+    Ensure FastAPI rejects unbounded incident-history requests before storage access.
+
+    Returns:
+        None.
+    """
+    response = client.get(
+        "/api/v1/incidents/history",
+        params={
+            "alert_reference": "DQ-20260513-764959",
+            "lookback_days": 366,
+            "limit": 51,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+# --- Defining Checkpoint Operator API Tests
+def test_checkpoint_history_endpoint_exposes_sanitized_read_only_metadata(monkeypatch) -> None:
+    """
+    Ensure the API exposes checkpoint metadata without persisted graph values.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    captured: dict[str, object] = {}
+
+    def fake_inspection(**kwargs) -> dict[str, object]:
+        """Capture inspection input and return sanitized deterministic history."""
+        captured.update(kwargs)
+
+        return {
+            "status": "success",
+            "checkpoint_namespace": kwargs["checkpoint_namespace"],
+            "thread_id": "manual__triage_source:abcdef0123456789",
+            "history_count": 2,
+            "matching_checkpoint_count": 1,
+            "selected_checkpoint": {
+                "checkpoint_id": "checkpoint-001",
+                "created_at": "2026-08-28T04:23:30Z",
+                "step": 8,
+                "source": "loop",
+                "next_nodes": ["store_report"],
+                "is_complete": False,
+            },
+            "history": [
+                {
+                    "checkpoint_id": "checkpoint-complete",
+                    "created_at": "2026-08-28T04:23:32Z",
+                    "step": 9,
+                    "source": "loop",
+                    "next_nodes": [],
+                    "is_complete": True,
+                },
+                {
+                    "checkpoint_id": "checkpoint-001",
+                    "created_at": "2026-08-28T04:23:30Z",
+                    "step": 8,
+                    "source": "loop",
+                    "next_nodes": ["store_report"],
+                    "is_complete": False,
+                },
+            ],
+            "raw_state_exposed": False,
+            "read_only": True,
+        }
+
+    monkeypatch.setattr(api_main, "inspect_checkpoint_history", fake_inspection)
+
+    response = client.get(
+        "/api/v1/checkpoints/history",
+        params={
+            "checkpoint_namespace": "manual__triage_source",
+            "alert_key": "orders|dq_failure|2026-08-28|dq.raw_orders|row_count_positive|table",
+            "history_limit": 10,
+            "history_next_node": "store_report",
+        },
+    )
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["history_count"] == 2
+    assert payload["selected_checkpoint"]["checkpoint_id"] == "checkpoint-001"
+    assert payload["raw_state_exposed"] is False
+    assert payload["read_only"] is True
+    assert "values" not in json.dumps(payload)
+    assert captured["checkpoint_mode"] == "sqlite"
+
+
+def test_checkpoint_replay_preview_endpoint_is_airflow_only_and_stale_safe(monkeypatch) -> None:
+    """
+    Ensure replay preview is non-executing and rejects a stale checkpoint selection.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setattr(
+        api_main,
+        "inspect_checkpoint_history",
+        lambda **kwargs: {
+            "status": "success",
+            "checkpoint_namespace": kwargs["checkpoint_namespace"],
+            "thread_id": "manual__triage_source:abcdef0123456789",
+            "history_count": 1,
+            "matching_checkpoint_count": 1,
+            "selected_checkpoint": {
+                "checkpoint_id": "checkpoint-001",
+                "created_at": "2026-08-28T04:23:30Z",
+                "step": 8,
+                "source": "loop",
+                "next_nodes": ["store_report"],
+                "is_complete": False,
+            },
+            "history": [],
+            "raw_state_exposed": False,
+            "read_only": True,
+        },
+    )
+    request = {
+        "alert_key": "orders|dq_failure|2026-08-28|dq.raw_orders|row_count_positive|table",
+        "checkpoint_namespace": "manual__triage_source",
+        "checkpoint_id": "checkpoint-001",
+        "history_next_node": "store_report",
+    }
+    response = client.post("/api/v1/checkpoints/replay-preview", json=request)
+    payload  = response.json()
+
+    assert response.status_code == 200
+    assert payload["dag_id"] == "40_dag_dq_orders_triage_agent"
+    assert payload["execution_boundary"] == "airflow_dag_40"
+    assert payload["operator_confirmation_required"] is True
+    assert payload["airflow_triggered"] is False
+    assert payload["side_effects_executed"] is False
+    assert payload["dag_run_conf"]["checkpoint_replay_id"] == "checkpoint-001"
+
+    stale_response = client.post(
+        "/api/v1/checkpoints/replay-preview",
+        json={**request, "checkpoint_id": "checkpoint-stale"},
+    )
+
+    assert stale_response.status_code == 400
+    assert "stale" in stale_response.json()["detail"]

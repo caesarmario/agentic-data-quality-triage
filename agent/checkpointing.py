@@ -36,6 +36,8 @@ SUPPORTED_CHECKPOINT_MODES = (
 )
 
 SAFE_THREAD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
+SAFE_NODE_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,79}$")
+SAFE_CHECKPOINT_NAMESPACE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
 
 # Checkpoint deserialization is fail-closed. Only project state models required by
 # TriageState may be reconstructed in addition to LangGraph's built-in safe types.
@@ -106,6 +108,28 @@ class CheckpointSnapshotSummary:
     source: str
     next_nodes: tuple[str, ...]
     is_complete: bool
+
+
+@dataclass(frozen=True)
+class HistoricalCheckpointReplay:
+    """
+    Sanitized execution metadata for one branched historical replay.
+
+    Attributes:
+        source_thread_id: Original checkpoint thread retained without modification.
+        source_checkpoint_id: Exact historical checkpoint selected by the operator.
+        replay_thread_id: Deterministic child thread used for replay execution.
+        source_writer_node: Node that produced the selected historical checkpoint.
+        source_next_nodes: Nodes pending at the selected historical checkpoint.
+        executed_pending_nodes: Whether this invocation executed pending replay nodes.
+    """
+
+    source_thread_id: str
+    source_checkpoint_id: str
+    replay_thread_id: str
+    source_writer_node: str
+    source_next_nodes: tuple[str, ...]
+    executed_pending_nodes: bool
 
 
 # --- Defining Configuration Helpers
@@ -249,6 +273,7 @@ def build_checkpoint_thread_id(namespace: str, correlation_value: str) -> str:
 def build_checkpoint_config(
     thread_id: str,
     checkpoint_id: str | None = None,
+    checkpoint_namespace: str | None = None,
 ) -> dict[str, dict[str, str]]:
     """
     Build the LangGraph configurable payload for checkpoint access.
@@ -256,6 +281,7 @@ def build_checkpoint_config(
     Args:
         thread_id: Validated checkpoint thread identifier.
         checkpoint_id: Optional historical checkpoint identifier for read-only inspection.
+        checkpoint_namespace: Optional supervisor or child-subgraph namespace.
 
     Returns:
         Runnable config dictionary accepted by LangGraph.
@@ -273,7 +299,104 @@ def build_checkpoint_config(
 
         configurable["checkpoint_id"] = normalized_checkpoint_id
 
+    if checkpoint_namespace:
+        normalized_namespace = checkpoint_namespace.strip()
+
+        if not SAFE_CHECKPOINT_NAMESPACE.fullmatch(normalized_namespace):
+            raise ValueError("Checkpoint namespace contains unsupported characters.")
+
+        configurable["checkpoint_ns"] = normalized_namespace
+
     return {"configurable": configurable}
+
+
+def build_supervisor_checkpoint_namespace(parent_run_id: str) -> str:
+    """
+    Build one stable checkpoint namespace for the parent supervisor graph.
+
+    Args:
+        parent_run_id: Stable parent supervisor UUID or correlation identifier.
+
+    Returns:
+        Validated namespace isolated from child specialist checkpoints.
+    """
+    normalized = parent_run_id.strip()
+
+    if not normalized:
+        raise ValueError("Supervisor checkpoint parent run id must not be blank.")
+
+    digest    = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
+    namespace = f"supervisor:{digest}"
+
+    if not SAFE_CHECKPOINT_NAMESPACE.fullmatch(namespace):
+        raise ValueError("Generated supervisor checkpoint namespace is unsafe.")
+
+    return namespace
+
+
+def build_specialist_checkpoint_namespace(
+    parent_run_id: str,
+    task_id: str,
+    specialist_name: str,
+) -> str:
+    """
+    Build one immutable per-invocation namespace for a specialist worker.
+
+    Args:
+        parent_run_id: Stable parent supervisor correlation identifier.
+        task_id: Immutable worker task identifier.
+        specialist_name: Registry specialist name used for operator diagnostics.
+
+    Returns:
+        Validated child namespace unique to the parent, task, and specialist.
+    """
+    parent     = parent_run_id.strip()
+    task       = task_id.strip()
+    specialist = specialist_name.strip().lower()
+
+    if not parent or not task or not specialist:
+        raise ValueError("Specialist checkpoint namespace requires parent, task, and specialist identifiers.")
+
+    safe_specialist = re.sub(r"[^a-z0-9_]+", "_", specialist).strip("_")[:48]
+    digest          = hashlib.sha256(
+        f"{parent}|{task}|{specialist}".encode("utf-8")
+    ).hexdigest()[:20]
+    namespace       = f"child:{safe_specialist}:{digest}"
+
+    if not SAFE_CHECKPOINT_NAMESPACE.fullmatch(namespace):
+        raise ValueError("Generated specialist checkpoint namespace is unsafe.")
+
+    return namespace
+
+
+def build_checkpoint_replay_thread_id(
+    source_thread_id: str,
+    source_checkpoint_id: str,
+    replay_request_id: str,
+) -> str:
+    """
+    Build a deterministic child thread for one historical replay request.
+
+    Args:
+        source_thread_id: Existing checkpoint thread selected for replay.
+        source_checkpoint_id: Exact historical checkpoint identifier.
+        replay_request_id: Stable operator or Airflow replay request identifier.
+
+    Returns:
+        Path-safe replay thread id derived from all source identifiers.
+
+    Raises:
+        ValueError: If any replay identifier is blank or unsafe.
+    """
+    validated_source  = validate_checkpoint_thread_id(source_thread_id)
+    validated_config  = build_checkpoint_config(validated_source, source_checkpoint_id)
+    validated_checkpoint = validated_config["configurable"]["checkpoint_id"]
+    validated_request = validate_checkpoint_thread_id(replay_request_id)
+
+    return build_checkpoint_thread_id(
+        namespace=f"{validated_source}:historical-replay",
+        correlation_value=f"{validated_checkpoint}|{validated_request}",
+    )
 
 
 # --- Defining Saver Lifecycle
@@ -393,6 +516,173 @@ def resume_checkpointed_graph(
     return dict(result), True
 
 
+def resolve_checkpoint_writer_node(graph: Any, snapshot: Any) -> str:
+    """
+    Resolve the single graph node that produced a historical checkpoint.
+
+    Args:
+        graph: Compiled LangGraph application containing static topology metadata.
+        snapshot: LangGraph StateSnapshot selected from checkpoint history.
+
+    Returns:
+        Graph node name safe to pass to update_state as `as_node`.
+
+    Raises:
+        ValueError: If metadata and graph topology cannot identify one writer node.
+    """
+    metadata = snapshot.metadata or {}
+    writes   = metadata.get("writes")
+
+    if isinstance(writes, dict):
+        writer_nodes = [
+            str(node_name)
+            for node_name in writes
+            if str(node_name) not in {"", "__start__"}
+        ]
+
+        if len(writer_nodes) == 1:
+            return writer_nodes[0]
+
+        if writer_nodes:
+            raise ValueError("Historical replay metadata identifies multiple writer nodes.")
+
+    pending_nodes = {str(node_name) for node_name in snapshot.next if str(node_name)}
+
+    if not pending_nodes:
+        raise ValueError("Historical replay cannot resolve a writer for a complete checkpoint.")
+
+    graph_view = graph.get_graph()
+    outgoing_targets: dict[str, set[str]] = {}
+
+    for edge in graph_view.edges:
+        source = str(edge.source)
+        target = str(edge.target)
+
+        if source in {"", "__start__", "__end__"}:
+            continue
+
+        outgoing_targets.setdefault(source, set()).add(target)
+
+    topology_candidates = [
+        source
+        for source, targets in outgoing_targets.items()
+        if pending_nodes.issubset(targets)
+    ]
+
+    if len(topology_candidates) != 1:
+        raise ValueError(
+            "Historical replay requires one unambiguous writer from checkpoint metadata or graph topology."
+        )
+
+    resolved_writer = topology_candidates[0]
+
+    logger.info(
+        "Resolved historical checkpoint writer from graph topology | writer_node=%s pending_nodes=%s",
+        resolved_writer,
+        tuple(sorted(pending_nodes)),
+    )
+
+    return resolved_writer
+
+
+def replay_historical_checkpoint_branch(
+    graph: Any,
+    checkpointer: Any,
+    source_thread_id: str,
+    source_checkpoint_id: str,
+    replay_request_id: str,
+) -> tuple[dict[str, Any], HistoricalCheckpointReplay]:
+    """
+    Replay pending nodes from an exact checkpoint inside a deterministic child thread.
+
+    The source thread is read-only. A repeated call with the same request resumes or
+    reuses the child thread, allowing Airflow retries without mutating the original
+    investigation history.
+
+    Args:
+        graph: Compiled LangGraph application using the supplied checkpointer.
+        checkpointer: Saver containing both source and replay threads.
+        source_thread_id: Existing source checkpoint thread.
+        source_checkpoint_id: Exact historical checkpoint selected for replay.
+        replay_request_id: Stable replay request used to derive the child thread.
+
+    Returns:
+        Tuple containing replay graph values and sanitized replay metadata.
+
+    Raises:
+        ValueError: If the source checkpoint is missing, complete, ambiguous, or invalid.
+    """
+    validated_source = validate_checkpoint_thread_id(source_thread_id)
+    source_config     = build_checkpoint_config(
+        thread_id=validated_source,
+        checkpoint_id=source_checkpoint_id,
+    )
+
+    if not checkpoint_exists(checkpointer=checkpointer, config=source_config):
+        raise ValueError("Historical checkpoint does not exist in the selected source thread.")
+
+    source_snapshot = graph.get_state(source_config)
+
+    if not source_snapshot.values:
+        raise ValueError("Historical checkpoint contains no graph state values.")
+
+    if not source_snapshot.next:
+        raise ValueError("Historical checkpoint is already complete and has no pending nodes to replay.")
+
+    source_writer_node = resolve_checkpoint_writer_node(graph=graph, snapshot=source_snapshot)
+    replay_thread_id   = build_checkpoint_replay_thread_id(
+        source_thread_id=validated_source,
+        source_checkpoint_id=source_checkpoint_id,
+        replay_request_id=replay_request_id,
+    )
+    replay_config = build_checkpoint_config(replay_thread_id)
+
+    if checkpoint_exists(checkpointer=checkpointer, config=replay_config):
+        replay_values, executed_pending_nodes = resume_checkpointed_graph(
+            graph=graph,
+            checkpointer=checkpointer,
+            config=replay_config,
+        )
+
+    else:
+        # Copy state into a separate thread as if the original writer node produced it.
+        # This preserves source history while allowing LangGraph to schedule the same next nodes.
+        graph.update_state(
+            replay_config,
+            dict(source_snapshot.values),
+            as_node=source_writer_node,
+        )
+        replay_snapshot = graph.get_state(replay_config)
+
+        if tuple(replay_snapshot.next) != tuple(source_snapshot.next):
+            raise ValueError("Historical replay branch does not preserve the selected pending-node contract.")
+
+        replay_values         = dict(graph.invoke(None, config=replay_config))
+        executed_pending_nodes = True
+
+    replay = HistoricalCheckpointReplay(
+        source_thread_id=validated_source,
+        source_checkpoint_id=source_config["configurable"]["checkpoint_id"],
+        replay_thread_id=replay_thread_id,
+        source_writer_node=source_writer_node,
+        source_next_nodes=tuple(source_snapshot.next),
+        executed_pending_nodes=executed_pending_nodes,
+    )
+
+    logger.info(
+        "Historical checkpoint branch resolved | source_thread_id=%s source_checkpoint_id=%s "
+        "replay_thread_id=%s source_writer_node=%s next_nodes=%s executed=%s",
+        replay.source_thread_id,
+        replay.source_checkpoint_id,
+        replay.replay_thread_id,
+        replay.source_writer_node,
+        replay.source_next_nodes,
+        replay.executed_pending_nodes,
+    )
+
+    return replay_values, replay
+
+
 def summarize_checkpoint_history(
     graph: Any,
     config: dict[str, Any],
@@ -438,3 +728,48 @@ def summarize_checkpoint_history(
     )
 
     return summaries
+
+
+def select_checkpoint_for_replay(
+    history: list[CheckpointSnapshotSummary],
+    next_node: str,
+) -> tuple[CheckpointSnapshotSummary, int]:
+    """
+    Select the newest checkpoint waiting for one exact graph node.
+
+    Args:
+        history: Newest-first sanitized checkpoint summaries.
+        next_node: Exact pending node requested by the operator.
+
+    Returns:
+        Tuple containing the newest matching checkpoint and total match count.
+
+    Raises:
+        ValueError: If the node name is unsafe or no checkpoint waits for that node.
+    """
+    normalized_node = next_node.strip()
+
+    if not SAFE_NODE_NAME.fullmatch(normalized_node):
+        raise ValueError(
+            "Checkpoint next node must start with a letter and contain only letters, numbers, or underscore."
+        )
+
+    matches = [
+        summary
+        for summary in history
+        if normalized_node in summary.next_nodes
+    ]
+
+    if not matches:
+        raise ValueError(f"No checkpoint waits for the requested next node: {normalized_node}.")
+
+    selected = matches[0]
+
+    logger.info(
+        "Selected checkpoint for replay | checkpoint_id=%s next_node=%s matching_checkpoints=%d",
+        selected.checkpoint_id,
+        normalized_node,
+        len(matches),
+    )
+
+    return selected, len(matches)

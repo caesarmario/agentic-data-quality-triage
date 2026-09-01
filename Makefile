@@ -1,4 +1,4 @@
-﻿####
+####
 ## Makefile for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
@@ -46,6 +46,13 @@ END ?= $(DT)
 INCIDENT_SCENARIO ?= baseline
 ALERT_ID ?=
 ALERT_KEY ?= orders|dq_failure|2026-05-04|dq.raw_orders|row_count_positive|table
+AIRFLOW_TRIAGE_ACTION ?= triage
+AIRFLOW_TRIAGE_RUN_ID ?=
+AIRFLOW_TRIAGE_NAMESPACE ?=
+AIRFLOW_TRIAGE_CHECKPOINT_ID ?=
+AIRFLOW_TRIAGE_REPLAY_REQUEST_ID ?=
+AIRFLOW_TRIAGE_HISTORY_LIMIT ?= 50
+AIRFLOW_TRIAGE_HISTORY_NEXT_NODE ?= store_report
 TABLE ?= dq.stg_orders
 SQL ?= SELECT alert_key, severity FROM dq.alerts WHERE dt = toDate('2026-05-04') LIMIT 5
 TRIAGE_LIMIT ?= 5
@@ -59,22 +66,76 @@ LLM_SMOKE_RUN_ID ?=
 CHECKPOINT_SMOKE_RUN_ID ?=
 CHECKPOINT_SMOKE_THREAD_ID ?=
 LIFE_SCENARIO ?= missing_latest_day
+LIFE_SOURCE_MODE ?= stored_report
 LIFE_REPORT_S3_URI ?=
 LIFE_MIN_CONFIDENCE ?= 0.70
 LIFE_ARTIFACT_PREFIX ?= agent-life
 LIFE_FAIL_ON_EVAL_FAILURE ?= false
+LIFE_ENABLE_CRITIC ?= false
 LIFE_AIRFLOW_RUN_ID ?=
 LIFE_EVALUATION_RUN_ID ?=
 METADATA_REGISTRY ?= orders
 METADATA_SYNC_RUN_ID ?=
+SCHEMA_CONTRACT ?= orders
+SCHEMA_DRIFT_RUN_ID ?=
+METADATA_LINEAGE_TASK ?= asset_context
+METADATA_LINEAGE_ASSET ?= dq.raw_orders
+METADATA_LINEAGE_QUERY ?= orders
+METADATA_LINEAGE_MAX_DEPTH ?= 5
+METADATA_LINEAGE_MAX_NODES ?= 100
+METADATA_LINEAGE_RUN_ID ?=
+CONTROL_PLANE_INTENT ?= asset_context
+CONTROL_PLANE_QUESTION ?=
+CONTROL_PLANE_ALERT_KEY ?=
+CONTROL_PLANE_ASSET ?=
+CONTROL_PLANE_QUERY ?=
+CONTROL_PLANE_DOMAIN ?=
+CONTROL_PLANE_DATA_LAYER ?=
+CONTROL_PLANE_CERTIFICATION_STATUS ?=
+CONTROL_PLANE_LIFECYCLE_STATUS ?=
+CONTROL_PLANE_SQL_FILE ?=
+CONTROL_PLANE_SQL_PURPOSE ?= Airflow SQL safety review smoke test
+CONTROL_PLANE_SQL_HARD_LIMIT ?= 100
+CONTROL_PLANE_SQL_REQUIRE_DATE_FILTER ?= true
+CONTROL_PLANE_SQL_MAX_SCAN_BYTES ?= 1073741824
+CONTROL_PLANE_EXPECTED_SQL_DECISION ?=
+CONTROL_PLANE_SCHEMA_RUN_ID ?=
+CONTROL_PLANE_SCHEMA_FINDING_LIMIT ?= 50
+CONTROL_PLANE_EXPECTED_SCHEMA_ASSESSMENT ?=
+CONTROL_PLANE_RESULT_LIMIT ?= 10
+CONTROL_PLANE_MAX_DEPTH ?= 5
+CONTROL_PLANE_MAX_NODES ?= 100
+CONTROL_PLANE_CONFIDENCE_THRESHOLD ?= 0.70
+CONTROL_PLANE_MAX_EVIDENCE_ITERATIONS ?= 2
+CONTROL_PLANE_MANIFEST_S3_URI ?=
+CONTROL_PLANE_ARTIFACTS_BUCKET ?=
+CONTROL_PLANE_ARTIFACTS_PREFIX ?= agent-reports
+CONTROL_PLANE_EXECUTION_MODE ?= single
+CONTROL_PLANE_MAX_WORKERS ?= 1
+CONTROL_PLANE_MAX_CONCURRENCY ?= 1
+CONTROL_PLANE_ALLOW_EXTERNAL_LLM ?= false
+CONTROL_PLANE_MAX_HANDOFFS ?= 1
+CONTROL_PLANE_MAX_RETRIES ?= 0
+CONTROL_PLANE_MAX_MODEL_CALLS ?= 3
+CONTROL_PLANE_TOKEN_BUDGET ?= 16384
+CONTROL_PLANE_ESTIMATED_COST_BUDGET_USD ?= 0.05
+CONTROL_PLANE_LATENCY_BUDGET_MS ?= 300000
+CONTROL_PLANE_RUN_ID ?=
+CONTROL_PLANE_RESILIENCE_SCENARIO ?= transient_once
+CONTROL_PLANE_RESILIENCE_RUN_ID ?=
 VALIDATION_SUITE ?= all
 VALIDATION_RUN_ID ?=
 REQUIRE_API ?= false
+TRIAGE_DAG_ID := 40_dag_dq_orders_triage_agent
 VALIDATION_DAG_ID := 91_dag_dq_platform_validation
 LLM_SMOKE_DAG_ID := 92_dag_dq_llm_provider_smoke
 CHECKPOINT_SMOKE_DAG_ID := 93_dag_dq_agent_checkpoint_smoke
 LIFE_EVALUATION_DAG_ID := 94_dag_dq_agent_life_evaluation
 METADATA_SYNC_DAG_ID := 95_dag_dq_metadata_registry_sync
+SCHEMA_DRIFT_DAG_ID := 96_dag_dq_schema_drift_detection
+METADATA_LINEAGE_DAG_ID := 97_dag_dq_metadata_lineage_agent_smoke
+CONTROL_PLANE_SUPERVISOR_DAG_ID := 98_dag_dq_control_plane_supervisor_smoke
+CONTROL_PLANE_RESILIENCE_DAG_ID := 99_dag_dq_control_plane_resilience_smoke
 TRIAGE_ALERT_ARG := $(if $(strip $(ALERT_ID)),--alert-id "$(ALERT_ID)",--alert-key "$(ALERT_KEY)")
 TRIAGE_ALERT_LOG := $(if $(strip $(ALERT_ID)),alert_id=$(ALERT_ID),alert_key=$(ALERT_KEY))
 
@@ -107,6 +168,10 @@ help:
 	echo "  make run-s3-init             Run s3-init once (create buckets)"
 	echo "  make airflow-dags            List parsed Airflow DAGs"
 	echo "  make airflow-import-errors   List Airflow DAG import errors"
+	echo "  make airflow-triage AIRFLOW_TRIAGE_ACTION=triage Trigger checkpoint-aware triage"
+	echo "  make airflow-triage AIRFLOW_TRIAGE_ACTION=inspect AIRFLOW_TRIAGE_NAMESPACE=... Inspect checkpoint history"
+	echo "  make airflow-triage AIRFLOW_TRIAGE_ACTION=replay AIRFLOW_TRIAGE_NAMESPACE=... AIRFLOW_TRIAGE_CHECKPOINT_ID=... Replay checkpoint"
+	echo "  make airflow-triage-logs AIRFLOW_TRIAGE_RUN_ID=... Show retained triage task logs"
 	echo "  make airflow-validate VALIDATION_SUITE=all Trigger manual Airflow validation"
 	echo "  make airflow-validation-runs List validation DagRuns"
 	echo "  make airflow-validation-tasks VALIDATION_RUN_ID=... Show task states"
@@ -123,6 +188,18 @@ help:
 	echo "  make airflow-metadata-runs List metadata sync DagRuns"
 	echo "  make airflow-metadata-tasks METADATA_SYNC_RUN_ID=... Show metadata task states"
 	echo "  make airflow-metadata-logs METADATA_SYNC_RUN_ID=... Show retained metadata logs"
+	echo "  make airflow-schema-drift SCHEMA_CONTRACT=orders Detect and persist schema drift"
+	echo "  make airflow-schema-drift-runs List schema drift DagRuns"
+	echo "  make airflow-schema-drift-tasks SCHEMA_DRIFT_RUN_ID=... Show schema drift task states"
+	echo "  make airflow-schema-drift-logs SCHEMA_DRIFT_RUN_ID=... Show retained schema drift logs"
+	echo "  make airflow-metadata-lineage-agent Run bounded Metadata and Lineage Agent smoke"
+	echo "  make airflow-metadata-lineage-runs List Metadata and Lineage Agent DagRuns"
+	echo "  make airflow-metadata-lineage-tasks METADATA_LINEAGE_RUN_ID=... Show specialist task states"
+	echo "  make airflow-metadata-lineage-logs METADATA_LINEAGE_RUN_ID=... Show retained specialist logs"
+	echo "  make airflow-control-plane-supervisor Run one deterministic supervisor route, including schema assessment"
+	echo "  make airflow-control-plane-runs List Control Plane Supervisor DagRuns"
+	echo "  make airflow-control-plane-tasks CONTROL_PLANE_RUN_ID=... Show supervisor task states"
+	echo "  make airflow-control-plane-logs CONTROL_PLANE_RUN_ID=... Show retained supervisor logs"
 	echo ""
 	echo "Force recreate (per service/group):"
 	echo "  make fr-all                 Force recreate all long-running services"
@@ -173,7 +250,8 @@ help:
 	echo "  make triage-alerts DT=YYYY-MM-DD Run agent triage for open alerts on a date"
 	echo "  make triage-eval EVAL_SCENARIO=... REPORT_JSON_S3_URI=s3://... Evaluate report vs ground truth"
 	echo "  make triage-eval-scenarios List incident configs available for triage eval"
-	echo "  make life-eval LIFE_REPORT_S3_URI=s3://... Trigger LIFE evaluation through Airflow"
+	echo "  make life-eval LIFE_REPORT_S3_URI=s3://... Trigger stored-report LIFE evaluation through Airflow"
+	echo "  make life-eval LIFE_SOURCE_MODE=scenario_replay LIFE_SCENARIO=schema_breaking_change Trigger safe replay"
 	echo "  make life-eval-scenarios   List incident ground-truth scenarios"
 	echo "  make api-smoke              Inspect FastAPI app routes"
 	echo "  make api-up                 Start optional FastAPI profile service"
@@ -270,6 +348,37 @@ airflow-dags:
 airflow-import-errors:
 	$(DC) exec -T $(AIRFLOW_WEB) airflow dags list-import-errors
 
+# --- Agent Triage And Checkpoint Operations
+.PHONY: airflow-triage
+airflow-triage:
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/trigger_airflow_triage.py \
+		--action "$(AIRFLOW_TRIAGE_ACTION)" \
+		$(TRIAGE_ALERT_ARG) \
+		--checkpoint-namespace "$(AIRFLOW_TRIAGE_NAMESPACE)" \
+		--checkpoint-id "$(AIRFLOW_TRIAGE_CHECKPOINT_ID)" \
+		--replay-request-id "$(AIRFLOW_TRIAGE_REPLAY_REQUEST_ID)" \
+		--history-limit "$(AIRFLOW_TRIAGE_HISTORY_LIMIT)" \
+		--history-next-node "$(AIRFLOW_TRIAGE_HISTORY_NEXT_NODE)" \
+		$(if $(strip $(AIRFLOW_TRIAGE_RUN_ID)),--run-id "$(AIRFLOW_TRIAGE_RUN_ID)",)
+
+.PHONY: airflow-triage-runs
+airflow-triage-runs:
+	$(DC) exec -T $(AIRFLOW_WEB) airflow dags list-runs -o table $(TRIAGE_DAG_ID)
+
+.PHONY: airflow-triage-tasks
+airflow-triage-tasks:
+	$(if $(strip $(AIRFLOW_TRIAGE_RUN_ID)),,$(error AIRFLOW_TRIAGE_RUN_ID is required))
+	$(DC) exec -T $(AIRFLOW_WEB) airflow tasks states-for-dag-run \
+		-o table $(TRIAGE_DAG_ID) "$(AIRFLOW_TRIAGE_RUN_ID)"
+
+.PHONY: airflow-triage-logs
+airflow-triage-logs:
+	$(if $(strip $(AIRFLOW_TRIAGE_RUN_ID)),,$(error AIRFLOW_TRIAGE_RUN_ID is required))
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
+		--dag-id $(TRIAGE_DAG_ID) \
+		--run-id "$(AIRFLOW_TRIAGE_RUN_ID)"
+
+# --- Code And Platform Validation
 .PHONY: airflow-validate
 airflow-validate:
 	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/trigger_airflow_validation.py \
@@ -290,7 +399,7 @@ airflow-validation-tasks:
 .PHONY: airflow-validation-logs
 airflow-validation-logs:
 	$(if $(strip $(VALIDATION_RUN_ID)),,$(error VALIDATION_RUN_ID is required))
-	$(DC) exec -T $(AIRFLOW_WORKER) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
 		--run-id "$(VALIDATION_RUN_ID)"
 
 .PHONY: airflow-llm-smoke
@@ -313,7 +422,7 @@ airflow-llm-tasks:
 .PHONY: airflow-llm-logs
 airflow-llm-logs:
 	$(if $(strip $(LLM_SMOKE_RUN_ID)),,$(error LLM_SMOKE_RUN_ID is required))
-	$(DC) exec -T $(AIRFLOW_WORKER) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
 		--dag-id $(LLM_SMOKE_DAG_ID) \
 		--run-id "$(LLM_SMOKE_RUN_ID)"
 
@@ -336,20 +445,22 @@ airflow-checkpoint-tasks:
 .PHONY: airflow-checkpoint-logs
 airflow-checkpoint-logs:
 	$(if $(strip $(CHECKPOINT_SMOKE_RUN_ID)),,$(error CHECKPOINT_SMOKE_RUN_ID is required))
-	$(DC) exec -T $(AIRFLOW_WORKER) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
 		--dag-id $(CHECKPOINT_SMOKE_DAG_ID) \
 		--run-id "$(CHECKPOINT_SMOKE_RUN_ID)"
 
 # --- LIFE Agent Reliability Evaluation
 .PHONY: airflow-life-eval
 airflow-life-eval:
-	$(if $(strip $(LIFE_REPORT_S3_URI)),,$(error LIFE_REPORT_S3_URI is required))
+	$(if $(filter stored_report,$(LIFE_SOURCE_MODE)),$(if $(strip $(LIFE_REPORT_S3_URI)),,$(error LIFE_REPORT_S3_URI is required for stored_report mode)),)
 	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/trigger_airflow_life_evaluation.py \
 		--scenario "$(LIFE_SCENARIO)" \
+		--source-mode "$(LIFE_SOURCE_MODE)" \
 		--report-s3-uri "$(LIFE_REPORT_S3_URI)" \
 		--minimum-confidence "$(LIFE_MIN_CONFIDENCE)" \
 		--artifact-prefix "$(LIFE_ARTIFACT_PREFIX)" \
 		$(if $(filter true 1 yes,$(LIFE_FAIL_ON_EVAL_FAILURE)),--fail-on-eval-failure,) \
+		$(if $(filter true 1 yes,$(LIFE_ENABLE_CRITIC)),--enable-critic,) \
 		$(if $(strip $(LIFE_AIRFLOW_RUN_ID)),--run-id "$(LIFE_AIRFLOW_RUN_ID)",) \
 		$(if $(strip $(LIFE_EVALUATION_RUN_ID)),--evaluation-run-id "$(LIFE_EVALUATION_RUN_ID)",)
 
@@ -366,7 +477,7 @@ airflow-life-tasks:
 .PHONY: airflow-life-logs
 airflow-life-logs:
 	$(if $(strip $(LIFE_AIRFLOW_RUN_ID)),,$(error LIFE_AIRFLOW_RUN_ID is required))
-	$(DC) exec -T $(AIRFLOW_WORKER) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
 		--dag-id $(LIFE_EVALUATION_DAG_ID) \
 		--run-id "$(LIFE_AIRFLOW_RUN_ID)"
 
@@ -396,9 +507,144 @@ airflow-metadata-tasks:
 .PHONY: airflow-metadata-logs
 airflow-metadata-logs:
 	$(if $(strip $(METADATA_SYNC_RUN_ID)),,$(error METADATA_SYNC_RUN_ID is required))
-	$(DC) exec -T $(AIRFLOW_WORKER) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
 		--dag-id $(METADATA_SYNC_DAG_ID) \
 		--run-id "$(METADATA_SYNC_RUN_ID)"
+
+# --- Schema Drift Detection
+.PHONY: airflow-schema-drift
+airflow-schema-drift:
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/trigger_airflow_schema_drift.py \
+		--contract "$(SCHEMA_CONTRACT)" \
+		$(if $(strip $(SCHEMA_DRIFT_RUN_ID)),--run-id "$(SCHEMA_DRIFT_RUN_ID)",)
+
+.PHONY: airflow-schema-drift-runs
+airflow-schema-drift-runs:
+	$(DC) exec -T $(AIRFLOW_WEB) airflow dags list-runs -o table $(SCHEMA_DRIFT_DAG_ID)
+
+.PHONY: airflow-schema-drift-tasks
+airflow-schema-drift-tasks:
+	$(if $(strip $(SCHEMA_DRIFT_RUN_ID)),,$(error SCHEMA_DRIFT_RUN_ID is required))
+	$(DC) exec -T $(AIRFLOW_WEB) airflow tasks states-for-dag-run \
+		-o table $(SCHEMA_DRIFT_DAG_ID) "$(SCHEMA_DRIFT_RUN_ID)"
+
+.PHONY: airflow-schema-drift-logs
+airflow-schema-drift-logs:
+	$(if $(strip $(SCHEMA_DRIFT_RUN_ID)),,$(error SCHEMA_DRIFT_RUN_ID is required))
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
+		--dag-id $(SCHEMA_DRIFT_DAG_ID) \
+		--run-id "$(SCHEMA_DRIFT_RUN_ID)"
+
+# --- Metadata And Lineage Agent Smoke
+.PHONY: airflow-metadata-lineage-agent
+airflow-metadata-lineage-agent:
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/trigger_airflow_metadata_lineage_agent.py \
+		--task-type "$(METADATA_LINEAGE_TASK)" \
+		--qualified-name "$(METADATA_LINEAGE_ASSET)" \
+		--query "$(METADATA_LINEAGE_QUERY)" \
+		--max-depth "$(METADATA_LINEAGE_MAX_DEPTH)" \
+		--max-nodes "$(METADATA_LINEAGE_MAX_NODES)" \
+		$(if $(strip $(METADATA_LINEAGE_RUN_ID)),--run-id "$(METADATA_LINEAGE_RUN_ID)",)
+
+.PHONY: airflow-metadata-lineage-runs
+airflow-metadata-lineage-runs:
+	$(DC) exec -T $(AIRFLOW_WEB) airflow dags list-runs -o table $(METADATA_LINEAGE_DAG_ID)
+
+.PHONY: airflow-metadata-lineage-tasks
+airflow-metadata-lineage-tasks:
+	$(if $(strip $(METADATA_LINEAGE_RUN_ID)),,$(error METADATA_LINEAGE_RUN_ID is required))
+	$(DC) exec -T $(AIRFLOW_WEB) airflow tasks states-for-dag-run \
+		-o table $(METADATA_LINEAGE_DAG_ID) "$(METADATA_LINEAGE_RUN_ID)"
+
+.PHONY: airflow-metadata-lineage-logs
+airflow-metadata-lineage-logs:
+	$(if $(strip $(METADATA_LINEAGE_RUN_ID)),,$(error METADATA_LINEAGE_RUN_ID is required))
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
+		--dag-id $(METADATA_LINEAGE_DAG_ID) \
+		--run-id "$(METADATA_LINEAGE_RUN_ID)"
+
+# --- Control Plane Supervisor Smoke
+.PHONY: airflow-control-plane-supervisor
+airflow-control-plane-supervisor:
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/trigger_airflow_control_plane_supervisor.py \
+		--intent "$(CONTROL_PLANE_INTENT)" \
+		--question "$(CONTROL_PLANE_QUESTION)" \
+		--alert-key "$(CONTROL_PLANE_ALERT_KEY)" \
+		$(if $(strip $(CONTROL_PLANE_ASSET)),--qualified-name "$(CONTROL_PLANE_ASSET)",) \
+		$(if $(strip $(CONTROL_PLANE_QUERY)),--query "$(CONTROL_PLANE_QUERY)",) \
+		$(if $(strip $(CONTROL_PLANE_DOMAIN)),--domain "$(CONTROL_PLANE_DOMAIN)",) \
+		$(if $(strip $(CONTROL_PLANE_DATA_LAYER)),--data-layer "$(CONTROL_PLANE_DATA_LAYER)",) \
+		$(if $(strip $(CONTROL_PLANE_CERTIFICATION_STATUS)),--certification-status "$(CONTROL_PLANE_CERTIFICATION_STATUS)",) \
+		$(if $(strip $(CONTROL_PLANE_LIFECYCLE_STATUS)),--lifecycle-status "$(CONTROL_PLANE_LIFECYCLE_STATUS)",) \
+		$(if $(strip $(CONTROL_PLANE_SQL_FILE)),--sql-file "$(CONTROL_PLANE_SQL_FILE)",) \
+		--sql-purpose "$(CONTROL_PLANE_SQL_PURPOSE)" \
+		--sql-hard-limit "$(CONTROL_PLANE_SQL_HARD_LIMIT)" \
+		$(if $(filter false 0 no,$(CONTROL_PLANE_SQL_REQUIRE_DATE_FILTER)),--no-sql-require-date-filter,--sql-require-date-filter) \
+		--sql-max-scan-bytes "$(CONTROL_PLANE_SQL_MAX_SCAN_BYTES)" \
+		$(if $(strip $(CONTROL_PLANE_EXPECTED_SQL_DECISION)),--expected-sql-decision "$(CONTROL_PLANE_EXPECTED_SQL_DECISION)",) \
+		$(if $(strip $(CONTROL_PLANE_SCHEMA_RUN_ID)),--schema-run-id "$(CONTROL_PLANE_SCHEMA_RUN_ID)",) \
+		--schema-finding-limit "$(CONTROL_PLANE_SCHEMA_FINDING_LIMIT)" \
+		$(if $(strip $(CONTROL_PLANE_EXPECTED_SCHEMA_ASSESSMENT)),--expected-schema-assessment "$(CONTROL_PLANE_EXPECTED_SCHEMA_ASSESSMENT)",) \
+		--result-limit "$(CONTROL_PLANE_RESULT_LIMIT)" \
+		--max-depth "$(CONTROL_PLANE_MAX_DEPTH)" \
+		--max-nodes "$(CONTROL_PLANE_MAX_NODES)" \
+		--confidence-threshold "$(CONTROL_PLANE_CONFIDENCE_THRESHOLD)" \
+		--max-evidence-iterations "$(CONTROL_PLANE_MAX_EVIDENCE_ITERATIONS)" \
+		$(if $(strip $(CONTROL_PLANE_MANIFEST_S3_URI)),--manifest-s3-uri "$(CONTROL_PLANE_MANIFEST_S3_URI)",) \
+		$(if $(strip $(CONTROL_PLANE_ARTIFACTS_BUCKET)),--artifacts-bucket "$(CONTROL_PLANE_ARTIFACTS_BUCKET)",) \
+		--artifacts-prefix "$(CONTROL_PLANE_ARTIFACTS_PREFIX)" \
+		--execution-mode "$(CONTROL_PLANE_EXECUTION_MODE)" \
+		--max-workers "$(CONTROL_PLANE_MAX_WORKERS)" \
+		--max-concurrency "$(CONTROL_PLANE_MAX_CONCURRENCY)" \
+		$(if $(filter true 1 yes,$(CONTROL_PLANE_ALLOW_EXTERNAL_LLM)),--allow-external-llm,--no-allow-external-llm) \
+		--max-handoffs "$(CONTROL_PLANE_MAX_HANDOFFS)" \
+		--max-retries "$(CONTROL_PLANE_MAX_RETRIES)" \
+		--max-model-calls "$(CONTROL_PLANE_MAX_MODEL_CALLS)" \
+		--token-budget "$(CONTROL_PLANE_TOKEN_BUDGET)" \
+		--estimated-cost-budget-usd "$(CONTROL_PLANE_ESTIMATED_COST_BUDGET_USD)" \
+		--latency-budget-ms "$(CONTROL_PLANE_LATENCY_BUDGET_MS)" \
+		$(if $(strip $(CONTROL_PLANE_RUN_ID)),--run-id "$(CONTROL_PLANE_RUN_ID)",)
+
+.PHONY: airflow-control-plane-runs
+airflow-control-plane-runs:
+	$(DC) exec -T $(AIRFLOW_WEB) airflow dags list-runs -o table $(CONTROL_PLANE_SUPERVISOR_DAG_ID)
+
+.PHONY: airflow-control-plane-tasks
+airflow-control-plane-tasks:
+	$(if $(strip $(CONTROL_PLANE_RUN_ID)),,$(error CONTROL_PLANE_RUN_ID is required))
+	$(DC) exec -T $(AIRFLOW_WEB) airflow tasks states-for-dag-run \
+		-o table $(CONTROL_PLANE_SUPERVISOR_DAG_ID) "$(CONTROL_PLANE_RUN_ID)"
+
+.PHONY: airflow-control-plane-logs
+airflow-control-plane-logs:
+	$(if $(strip $(CONTROL_PLANE_RUN_ID)),,$(error CONTROL_PLANE_RUN_ID is required))
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
+		--dag-id $(CONTROL_PLANE_SUPERVISOR_DAG_ID) \
+		--run-id "$(CONTROL_PLANE_RUN_ID)"
+
+# --- Control Plane Resilience Smoke
+.PHONY: airflow-control-plane-resilience
+airflow-control-plane-resilience:
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/trigger_airflow_control_plane_resilience.py \
+		--scenario "$(CONTROL_PLANE_RESILIENCE_SCENARIO)" \
+		$(if $(strip $(CONTROL_PLANE_RESILIENCE_RUN_ID)),--run-id "$(CONTROL_PLANE_RESILIENCE_RUN_ID)",)
+
+.PHONY: airflow-control-plane-resilience-runs
+airflow-control-plane-resilience-runs:
+	$(DC) exec -T $(AIRFLOW_WEB) airflow dags list-runs -o table $(CONTROL_PLANE_RESILIENCE_DAG_ID)
+
+.PHONY: airflow-control-plane-resilience-tasks
+airflow-control-plane-resilience-tasks:
+	$(if $(strip $(CONTROL_PLANE_RESILIENCE_RUN_ID)),,$(error CONTROL_PLANE_RESILIENCE_RUN_ID is required))
+	$(DC) exec -T $(AIRFLOW_WEB) airflow tasks states-for-dag-run \
+		-o table $(CONTROL_PLANE_RESILIENCE_DAG_ID) "$(CONTROL_PLANE_RESILIENCE_RUN_ID)"
+
+.PHONY: airflow-control-plane-resilience-logs
+airflow-control-plane-resilience-logs:
+	$(if $(strip $(CONTROL_PLANE_RESILIENCE_RUN_ID)),,$(error CONTROL_PLANE_RESILIENCE_RUN_ID is required))
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
+		--dag-id $(CONTROL_PLANE_RESILIENCE_DAG_ID) \
+		--run-id "$(CONTROL_PLANE_RESILIENCE_RUN_ID)"
 
 # --- Force recreate helpers
 .PHONY: fr-all

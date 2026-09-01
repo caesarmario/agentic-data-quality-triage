@@ -1,0 +1,54 @@
+####
+## Breaking Schema Change Evaluation Scenario for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+# --- Defining Scenario Metadata
+scenario_id: schema_breaking_change
+dataset: orders
+enabled: true
+incident_scenario: schema_breaking_change
+scenario_mode: evaluation_replay
+description: Replay a breaking orders schema contract change without mutating the physical ClickHouse schema.
+
+# --- Defining Ground Truth Labels
+ground_truth:
+  root_cause_category: breaking_schema_change
+  expected_alert: true
+  expected_dq_signals:
+    - table_name: dq.raw_orders
+      check_name: schema_contract_drift
+      severity: critical
+  expected_evidence:
+    - evidence_type: schema_drift
+      tool_name: schema_drift
+      minimum_rows: 1
+      required_row_fields:
+        - contract_name
+        - contract_version
+        - contract_sha256
+        - schema_sha256
+        - qualified_name
+        - column_name
+        - check_type
+        - status
+        - severity
+        - expected_value
+        - actual_value
+  expected_agent_summary: A breaking schema contract change was detected and requires producer and consumer review before any migration.
+
+# --- Defining Expected Pipeline Behavior
+expected_pipeline_behavior:
+  source_generation: not_applicable
+  warehouse_schema_mutation: prohibited
+  schema_detection: critical_failure_expected
+  alert_generation: one_grouped_schema_alert_expected
+  triage_required: true
+  remediation: human_approval_required
+
+# --- Defining Evaluation Replay Policy
+evaluation:
+  replay_only: true
+  source_mode: scenario_replay
+  deterministic_fixture: true
+  purpose: Exercise schema evidence, root-cause, and action-safety checks without changing system.columns.

@@ -27,9 +27,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.graph import TriageRuntimeConfig, run_triage
+from agent.checkpoint_inspection import inspect_checkpoint_history
+from agent.checkpoint_operations import build_checkpoint_replay_preview
+from agent.checkpointing import CHECKPOINT_MODE_SQLITE
+from agent.context.models import IncidentMemoryRecord
+from agent.context.store import fetch_incident_memory
 from agent.llm.copilot import (
     MAX_CONTEXT_AUDIT,
     MAX_CONTEXT_EVIDENCE,
+    MAX_CONTEXT_INCIDENT_HISTORY,
     build_operator_answer,
 )
 from agent.mcp.server import bounded_text, ensure_report_s3_uri_allowed
@@ -44,22 +50,35 @@ from agent.tools.approval_queue import (
 )
 from agent.tools.audit_log import write_agent_audit_event
 from agent.tools.dbt_lineage import fetch_dbt_blast_radius, fetch_dbt_lineage
+from agent.tools.daily_summary import fetch_daily_quality_summary
 from agent.tools.dq_history import fetch_dq_history
 from agent.tools.life_history import LifeEvaluationHistoryResult, list_life_evaluation_history
 from agent.tools.metadata_catalog import get_metadata_asset, search_metadata_assets
 from agent.tools.pipeline_runs import fetch_pipeline_runs
 from apps.api.schemas import (
+    AlertListResponse,
+    AlertResponse,
     ApprovalDecisionBody,
     ApprovalRequestCreateBody,
     ApprovalRequestListResponse,
     ApprovalRequestResponse,
+    AuditLogResponse,
+    CheckpointHistoryResponse,
+    CheckpointReplayPreviewRequest,
+    CheckpointReplayPreviewResponse,
     CopilotAnswerRequest,
     CopilotAnswerResponse,
+    DailySummaryResponse,
     DbtBlastRadiusResponse,
+    DqHistoryResponse,
     HealthResponse,
+    IncidentHistoryItemResponse,
+    IncidentHistoryResponse,
     MessageResponse,
     MetadataAssetListResponse,
     MetadataAssetResponse,
+    PipelineRunEvidenceResponse,
+    ReportArtifactResponse,
     TriageRunRequest,
     TriageRunResponse,
 )
@@ -72,11 +91,12 @@ from pipelines.seeding.upload_to_s3 import build_s3_client
 
 
 # --- Defining Constants
-API_TITLE                   = "Agentic Data Quality Triage API"
-API_VERSION                 = "0.7.0"
-AUDIT_LOG_TABLE             = "dq.agent_audit_log"
-COPILOT_REPORT_MAX_BYTES    = 200_000
-APPROVAL_TOKEN_ENV_NAME     = "CONTROL_PLANE_APPROVAL_TOKEN"
+API_TITLE                     = "Agentic Data Quality Triage API"
+API_VERSION                   = "0.10.0"
+AUDIT_LOG_TABLE               = "dq.agent_audit_log"
+COPILOT_REPORT_MAX_BYTES      = 200_000
+COPILOT_HISTORY_LOOKBACK_DAYS = 90
+APPROVAL_TOKEN_ENV_NAME       = "CONTROL_PLANE_APPROVAL_TOKEN"
 
 
 # --- Creating FastAPI App
@@ -112,6 +132,143 @@ def approval_response(
     payload["state_changed"] = state_changed
 
     return ApprovalRequestResponse.model_validate(payload)
+
+
+# --- Defining Incident History Response Helpers
+def incident_history_item_response(
+    record: IncidentMemoryRecord,
+) -> IncidentHistoryItemResponse:
+    """
+    Convert durable internal memory into a bounded public operator contract.
+
+    Args:
+        record: Validated durable incident-memory record from ClickHouse.
+
+    Returns:
+        Sanitized incident-history item without hashes or raw decision payloads.
+    """
+    decision_facts = record.decision_facts
+    confidence_raw = decision_facts.get("confidence")
+    confidence     = (
+        float(confidence_raw)
+        if isinstance(confidence_raw, (int, float)) and not isinstance(confidence_raw, bool)
+        else None
+    )
+
+    return IncidentHistoryItemResponse(
+        memory_id=str(record.memory_id),
+        parent_run_id=str(record.parent_run_id),
+        recorded_at=record.recorded_at,
+        memory_type=record.memory_type.value,
+        alert_id=str(record.alert_id) if record.alert_id else None,
+        alert_key=record.alert_key,
+        alert_display_id=record.alert_display_id,
+        outcome_status=record.outcome_status.value,
+        specialist_name=record.specialist_name,
+        task_type=record.task_type,
+        summary=record.summary,
+        confidence=confidence,
+        top_hypothesis_category=str(
+            decision_facts.get("top_hypothesis_category") or ""
+        )[:80],
+        report_id=str(decision_facts.get("report_id") or "")[:40],
+        requires_human_approval=(
+            decision_facts.get("requires_human_approval") is True
+        ),
+        evidence_reference_count=len(record.evidence_references),
+        evidence_references=[
+            reference.model_dump(mode="json")
+            for reference in record.evidence_references
+        ],
+        report_s3_uri=record.report_s3_uri,
+        approval_state=record.approval_state.value,
+        resolution_reference=record.resolution_reference,
+    )
+
+
+def incident_history_response(
+    records: list[IncidentMemoryRecord],
+    alert_reference: str,
+    lookback_days: int,
+    limit: int,
+) -> IncidentHistoryResponse:
+    """
+    Build one deterministic public incident-history response.
+
+    Args:
+        records: Typed memory records ordered newest first.
+        alert_reference: Exact identity used for the lookup.
+        lookback_days: Applied mandatory recent window.
+        limit: Applied hard row limit.
+
+    Returns:
+        Bounded history response suitable for UI and external clients.
+    """
+    rows    = [incident_history_item_response(record) for record in records]
+    summary = (
+        f"Found {len(rows)} previous investigation(s) for {alert_reference}."
+        if rows
+        else f"No previous investigation was found for {alert_reference} in the selected window."
+    )
+
+    return IncidentHistoryResponse(
+        alert_reference=alert_reference,
+        lookback_days=lookback_days,
+        limit=limit,
+        row_count=len(rows),
+        rows=rows,
+        summary=summary,
+    )
+
+
+def copilot_incident_history_context(
+    records: list[IncidentMemoryRecord],
+    current_report_id: str = "",
+) -> list[dict[str, Any]]:
+    """
+    Build a minimized prior-investigation context for the shared Copilot.
+
+    Args:
+        records: Exact-match incident-memory records ordered newest first.
+        current_report_id: Optional current report excluded from prior context.
+
+    Returns:
+        Bounded allowlisted rows without memory ids, run ids, alert keys,
+        evidence payloads, or hidden decision facts.
+    """
+    rows: list[dict[str, Any]] = []
+
+    for record in records:
+        item = incident_history_item_response(record)
+
+        # The active report is current evidence, not an earlier investigation.
+        if current_report_id and item.report_id == current_report_id:
+            continue
+
+        rows.append(
+            {
+                "recorded_at": item.recorded_at.isoformat(),
+                "outcome_status": item.outcome_status,
+                "summary": item.summary,
+                "confidence": item.confidence,
+                "top_hypothesis_category": item.top_hypothesis_category,
+                "report_id": item.report_id,
+                "requires_human_approval": item.requires_human_approval,
+                "evidence_reference_count": item.evidence_reference_count,
+                "approval_state": item.approval_state,
+            }
+        )
+
+    bounded_rows = rows[:MAX_CONTEXT_INCIDENT_HISTORY]
+
+    logger.info(
+        "Built Copilot incident history context | input_records=%d returned_rows=%d current_report_excluded=%s",
+        len(records),
+        len(bounded_rows),
+        bool(current_report_id),
+    )
+
+    return bounded_rows
 
 
 def require_approval_authorization(
@@ -211,6 +368,75 @@ def fetch_audit_log_rows(alert_key: str, limit: int = 50) -> dict[str, Any]:
         "duration_ms": duration_ms,
         "sql": sql,
     }
+
+
+def parse_public_json_object(value: Any) -> dict[str, Any]:
+    """
+    Parse one internal JSON object without exposing malformed raw text.
+
+    Args:
+        value: Dictionary, JSON string, empty value, or unsupported object.
+
+    Returns:
+        Parsed dictionary, otherwise an empty dictionary.
+    """
+    if isinstance(value, dict):
+        return value
+
+    if not isinstance(value, str) or not value.strip():
+        return {}
+
+    try:
+        payload = json.loads(value)
+
+    except (TypeError, ValueError):
+        logger.warning("Ignoring malformed public API JSON metadata")
+        return {}
+
+    return payload if isinstance(payload, dict) else {}
+
+
+def normalize_evidence_rows(
+    rows: list[dict[str, Any]],
+    source_json_field: str,
+    public_field: str,
+) -> list[dict[str, Any]]:
+    """
+    Replace one internal serialized JSON field with a public object field.
+
+    Args:
+        rows: DQ history or pipeline-run dictionaries from ClickHouse.
+        source_json_field: Internal serialized field such as details_json.
+        public_field: Public object field such as details or metadata.
+
+    Returns:
+        Copied rows with parsed metadata and without the internal JSON field.
+    """
+    normalized_rows = []
+
+    for row in rows:
+        normalized = dict(row)
+        raw_value  = normalized.pop(source_json_field, None)
+        normalized[public_field] = parse_public_json_object(raw_value)
+        normalized_rows.append(normalized)
+
+    return normalized_rows
+
+
+def report_media_type(object_key: str) -> str:
+    """
+    Resolve a safe report content type from an approved artifact key.
+
+    Args:
+        object_key: Approved report object key from SeaweedFS S3.
+
+    Returns:
+        JSON content type for .json artifacts, otherwise Markdown text.
+    """
+    if object_key.strip().lower().endswith(".json"):
+        return "application/json"
+
+    return "text/markdown"
 
 
 def read_report_artifact(s3_uri: str, max_bytes: int) -> dict[str, Any]:
@@ -429,6 +655,8 @@ def write_copilot_api_audit_event(
             "question_length": len(request.question),
             "report_json_s3_uri": report_json_s3_uri or "",
             "audit_limit": request.audit_limit,
+            "incident_history_lookback_days": COPILOT_HISTORY_LOOKBACK_DAYS,
+            "incident_history_limit": MAX_CONTEXT_INCIDENT_HISTORY,
         },
         output_payload={
             "answer_length": len(response.answer),
@@ -436,6 +664,7 @@ def write_copilot_api_audit_event(
             "report_id": response.report_id,
             "evidence_count": response.evidence_count,
             "audit_count": response.audit_count,
+            "incident_history_count": response.incident_history_count,
             "approval_required": response.approval_required,
         },
         row_count=1,
@@ -502,12 +731,12 @@ def health() -> HealthResponse:
     return HealthResponse(version=API_VERSION)
 
 
-@app.get("/api/v1/alerts")
+@app.get("/api/v1/alerts", response_model=AlertListResponse)
 def api_list_alerts(
     status: str = Query(default="open", description="Alert lifecycle status."),
     dt: str | None = Query(default=None, description="Optional business date in YYYY-MM-DD format."),
     limit: int = Query(default=50, ge=1, le=100, description="Maximum alerts to return."),
-) -> dict[str, Any]:
+) -> AlertListResponse:
     """
     List DQ alerts for UI clients.
 
@@ -517,20 +746,52 @@ def api_list_alerts(
         limit: Maximum alerts to return.
 
     Returns:
-        Alert lookup payload from the existing alert tool.
+        Typed and bounded alert list without internal SQL metadata.
     """
     try:
-        return list_alerts(status=status, dt=dt, limit=limit)
+        payload = list_alerts(status=status, dt=dt, limit=limit)
+        payload.update(
+            {
+                "alert_status": status,
+                "dt": dt,
+                "limit": limit,
+                "summary": f"Found {payload['row_count']} {status} alert(s).",
+            }
+        )
+
+        return AlertListResponse.model_validate(payload)
 
     except Exception as exc:
         raise_api_error(exc)
 
 
-@app.get("/api/v1/alerts/detail")
+@app.get("/api/v1/summaries/daily", response_model=DailySummaryResponse)
+def api_get_daily_summary(
+    dt: str = Query(description="Business date in YYYY-MM-DD format."),
+) -> DailySummaryResponse:
+    """
+    Return deterministic DQ check and open-alert counts for one business date.
+
+    Args:
+        dt: Exact business date to summarize.
+
+    Returns:
+        Typed daily summary without internal SQL metadata.
+    """
+    try:
+        payload = fetch_daily_quality_summary(dt=dt)
+
+        return DailySummaryResponse.model_validate(payload)
+
+    except Exception as exc:
+        raise_api_error(exc)
+
+
+@app.get("/api/v1/alerts/detail", response_model=AlertResponse)
 def api_get_alert(
     alert_id: str | None = Query(default=None, description="Optional alert UUID."),
     alert_key: str | None = Query(default=None, description="Optional stable alert key."),
-) -> dict[str, Any]:
+) -> AlertResponse:
     """
     Load one alert by id or key.
 
@@ -539,22 +800,22 @@ def api_get_alert(
         alert_key: Optional stable alert key.
 
     Returns:
-        Alert model serialized as JSON.
+        Typed public alert detail.
     """
     try:
         alert = load_alert(alert_id=alert_id, alert_key=alert_key)
 
-        return alert.model_dump(mode="json")
+        return AlertResponse.model_validate(alert.model_dump(mode="json"))
 
     except Exception as exc:
         raise_api_error(exc)
 
 
-@app.get("/api/v1/audit/logs")
+@app.get("/api/v1/audit/logs", response_model=AuditLogResponse)
 def api_get_audit_logs(
     alert_key: str = Query(description="Stable alert key."),
     limit: int = Query(default=50, ge=1, le=100, description="Maximum audit rows to return."),
-) -> dict[str, Any]:
+) -> AuditLogResponse:
     """
     Return recent agent audit events for one alert.
 
@@ -563,10 +824,178 @@ def api_get_audit_logs(
         limit: Maximum rows to return.
 
     Returns:
-        Audit log result payload.
+        Typed audit history without raw prompt payloads or SQL text.
     """
     try:
-        return fetch_audit_log_rows(alert_key=alert_key, limit=limit)
+        payload = fetch_audit_log_rows(alert_key=alert_key, limit=limit)
+        payload.update(
+            {
+                "limit": limit,
+                "summary": f"Found {payload['row_count']} audit event(s) for this alert.",
+            }
+        )
+
+        return AuditLogResponse.model_validate(payload)
+
+    except Exception as exc:
+        raise_api_error(exc)
+
+
+@app.get(
+    "/api/v1/checkpoints/history",
+    response_model=CheckpointHistoryResponse,
+)
+def api_get_checkpoint_history(
+    checkpoint_namespace: str = Query(
+        min_length=1,
+        max_length=160,
+        description="Existing source triage checkpoint namespace.",
+    ),
+    alert_id: str | None = Query(default=None, description="Optional source alert UUID."),
+    alert_key: str | None = Query(default=None, description="Optional stable source alert key."),
+    history_limit: int = Query(
+        default=50,
+        ge=1,
+        le=100,
+        description="Maximum sanitized checkpoints to return.",
+    ),
+    history_next_node: str = Query(
+        default="store_report",
+        min_length=1,
+        max_length=80,
+        description="Exact pending node used to select a replay candidate.",
+    ),
+) -> CheckpointHistoryResponse:
+    """
+    Return sanitized checkpoint metadata without exposing persisted graph state.
+
+    Args:
+        checkpoint_namespace: Namespace used by the source Airflow triage run.
+        alert_id: Optional source alert UUID.
+        alert_key: Optional stable source alert key.
+        history_limit: Maximum newest-first checkpoints returned.
+        history_next_node: Exact pending node used for replay selection.
+
+    Returns:
+        Typed read-only checkpoint history and newest matching replay candidate.
+    """
+    try:
+        result = inspect_checkpoint_history(
+            enabled=True,
+            alert_id=alert_id,
+            alert_key=alert_key,
+            checkpoint_mode=CHECKPOINT_MODE_SQLITE,
+            checkpoint_namespace=checkpoint_namespace,
+            history_limit=history_limit,
+            select_next_node=history_next_node,
+        )
+        selected = result["selected_checkpoint"]
+        result["summary"] = (
+            f"Found {result['history_count']} sanitized checkpoint(s). "
+            f"The newest checkpoint waiting for {history_next_node} is "
+            f"{selected['checkpoint_id']}."
+        )
+
+        return CheckpointHistoryResponse.model_validate(result)
+
+    except Exception as exc:
+        raise_api_error(exc)
+
+
+@app.post(
+    "/api/v1/checkpoints/replay-preview",
+    response_model=CheckpointReplayPreviewResponse,
+)
+def api_preview_checkpoint_replay(
+    request: CheckpointReplayPreviewRequest,
+) -> CheckpointReplayPreviewResponse:
+    """
+    Validate one replay request against current history without triggering Airflow.
+
+    Args:
+        request: Exact source identity, namespace, checkpoint, and optional replay key.
+
+    Returns:
+        Airflow DAG 40 configuration preview bound to the current replay candidate.
+    """
+    try:
+        inspection = inspect_checkpoint_history(
+            enabled=True,
+            alert_id=request.alert_id,
+            alert_key=request.alert_key,
+            checkpoint_mode=CHECKPOINT_MODE_SQLITE,
+            checkpoint_namespace=request.checkpoint_namespace,
+            history_limit=request.history_limit,
+            select_next_node=request.history_next_node,
+        )
+        selected = inspection["selected_checkpoint"]
+        preview  = build_checkpoint_replay_preview(
+            alert_id=request.alert_id or "",
+            alert_key=request.alert_key or "",
+            checkpoint_namespace=request.checkpoint_namespace,
+            checkpoint_id=request.checkpoint_id,
+            replay_request_id=request.replay_request_id,
+            selected_checkpoint_id=str(selected["checkpoint_id"]),
+            selected_next_nodes=selected["next_nodes"],
+            history_limit=request.history_limit,
+            history_next_node=request.history_next_node,
+        )
+
+        return CheckpointReplayPreviewResponse.model_validate(preview)
+
+    except Exception as exc:
+        raise_api_error(exc)
+
+
+@app.get(
+    "/api/v1/incidents/history",
+    response_model=IncidentHistoryResponse,
+)
+def api_list_incident_history(
+    alert_reference: str = Query(
+        min_length=1,
+        max_length=500,
+        description="Exact human Alert Ref, system alert key, or alert UUID.",
+    ),
+    lookback_days: int = Query(
+        default=90,
+        ge=1,
+        le=365,
+        description="Mandatory recent incident-memory window in days.",
+    ),
+    limit: int = Query(
+        default=20,
+        ge=1,
+        le=50,
+        description="Maximum previous investigations to return.",
+    ),
+) -> IncidentHistoryResponse:
+    """
+    Return sanitized durable investigation history for one exact alert identity.
+
+    Args:
+        alert_reference: Human Alert Ref, canonical system key, or alert UUID.
+        lookback_days: Mandatory recent timestamp window.
+        limit: Hard maximum number of outcomes returned.
+
+    Returns:
+        Bounded incident history without raw decisions, SQL, hashes, or hidden context.
+    """
+    try:
+        normalized_reference = alert_reference.strip()
+        records = fetch_incident_memory(
+            client=build_clickhouse_client(),
+            alert_reference=normalized_reference,
+            lookback_days=lookback_days,
+            limit=limit,
+        )
+
+        return incident_history_response(
+            records=records,
+            alert_reference=normalized_reference,
+            lookback_days=lookback_days,
+            limit=limit,
+        )
 
     except Exception as exc:
         raise_api_error(exc)
@@ -758,14 +1187,14 @@ def api_get_dbt_blast_radius(
         raise_api_error(exc)
 
 
-@app.get("/api/v1/evidence/dq-history")
+@app.get("/api/v1/evidence/dq-history", response_model=DqHistoryResponse)
 def api_get_dq_history(
     table_name: str = Query(description="Fully qualified table name."),
     dt: str = Query(description="Business date in YYYY-MM-DD format."),
     check_name: str | None = Query(default=None, description="Optional DQ check name."),
     lookback_days: int = Query(default=14, ge=0, le=90, description="Lookback window in days."),
     limit: int = Query(default=100, ge=1, le=500, description="Maximum rows to return."),
-) -> dict[str, Any]:
+) -> DqHistoryResponse:
     """
     Return DQ history evidence for one table/check/date window.
 
@@ -777,28 +1206,47 @@ def api_get_dq_history(
         limit: Maximum rows to return.
 
     Returns:
-        DQ history payload from the existing evidence tool.
+        Typed DQ history without internal SQL or serialized metadata fields.
     """
     try:
-        return fetch_dq_history(
+        payload = fetch_dq_history(
             table_name=table_name,
             dt=parse_date(dt),
             check_name=check_name,
             lookback_days=lookback_days,
             limit=limit,
         )
+        payload.update(
+            {
+                "limit": limit,
+                "rows": normalize_evidence_rows(
+                    rows=list(payload.get("rows") or []),
+                    source_json_field="details_json",
+                    public_field="details",
+                ),
+                "summary": (
+                    f"Found {payload['row_count']} DQ result(s) for {table_name} "
+                    f"through {dt}."
+                ),
+            }
+        )
+
+        return DqHistoryResponse.model_validate(payload)
 
     except Exception as exc:
         raise_api_error(exc)
 
 
-@app.get("/api/v1/evidence/pipeline-runs")
+@app.get(
+    "/api/v1/evidence/pipeline-runs",
+    response_model=PipelineRunEvidenceResponse,
+)
 def api_get_pipeline_runs(
     dt: str = Query(description="Business date in YYYY-MM-DD format."),
     lookback_days: int = Query(default=7, ge=0, le=90, description="Lookback window in days."),
     job_name: str | None = Query(default=None, description="Optional job name filter."),
     limit: int = Query(default=100, ge=1, le=500, description="Maximum rows to return."),
-) -> dict[str, Any]:
+) -> PipelineRunEvidenceResponse:
     """
     Return pipeline run evidence around one business date.
 
@@ -809,25 +1257,38 @@ def api_get_pipeline_runs(
         limit: Maximum rows to return.
 
     Returns:
-        Pipeline run evidence payload.
+        Typed pipeline evidence without internal SQL or serialized metadata fields.
     """
     try:
-        return fetch_pipeline_runs(
+        payload = fetch_pipeline_runs(
             dt=parse_date(dt),
             lookback_days=lookback_days,
             job_name=job_name,
             limit=limit,
         )
+        payload.update(
+            {
+                "limit": limit,
+                "rows": normalize_evidence_rows(
+                    rows=list(payload.get("rows") or []),
+                    source_json_field="metadata_json",
+                    public_field="metadata",
+                ),
+                "summary": f"Found {payload['row_count']} pipeline run(s) through {dt}.",
+            }
+        )
+
+        return PipelineRunEvidenceResponse.model_validate(payload)
 
     except Exception as exc:
         raise_api_error(exc)
 
 
-@app.get("/api/v1/reports/read")
+@app.get("/api/v1/reports/read", response_model=ReportArtifactResponse)
 def api_read_report(
     s3_uri: str = Query(description="Report artifact S3 URI."),
     max_bytes: int = Query(default=100_000, ge=1, le=200_000, description="Maximum bytes to return."),
-) -> dict[str, Any]:
+) -> ReportArtifactResponse:
     """
     Return a bounded Markdown/JSON triage report artifact.
 
@@ -836,10 +1297,18 @@ def api_read_report(
         max_bytes: Maximum bytes to return.
 
     Returns:
-        Bounded report artifact payload.
+        Typed and bounded report artifact payload.
     """
     try:
-        return read_report_artifact(s3_uri=s3_uri, max_bytes=max_bytes)
+        payload = read_report_artifact(s3_uri=s3_uri, max_bytes=max_bytes)
+        payload.update(
+            {
+                "media_type": report_media_type(str(payload.get("key") or "")),
+                "max_bytes": max_bytes,
+            }
+        )
+
+        return ReportArtifactResponse.model_validate(payload)
 
     except Exception as exc:
         raise_api_error(exc)
@@ -883,12 +1352,24 @@ def api_answer_copilot(request: CopilotAnswerRequest) -> CopilotAnswerResponse:
                 expected_alert_key=alert.alert_key,
             )
 
+        history_records = fetch_incident_memory(
+            client=build_clickhouse_client(),
+            alert_reference=alert.alert_key,
+            lookback_days=COPILOT_HISTORY_LOOKBACK_DAYS,
+            limit=MAX_CONTEXT_INCIDENT_HISTORY,
+        )
+        history_rows = copilot_incident_history_context(
+            records=history_records,
+            current_report_id=report_data["report_id"],
+        )
+
         answer = build_operator_answer(
             question=request.question,
             alert=alert,
             report_context=report_data["report_context"],
             evidence_rows=report_data["evidence_rows"],
             audit_rows=audit_rows,
+            incident_history_rows=history_rows,
             agent_run_id=agent_run_id,
         )
         context_source = "alert_report_audit" if report_uri else "alert_audit"
@@ -901,6 +1382,7 @@ def api_answer_copilot(request: CopilotAnswerRequest) -> CopilotAnswerResponse:
             report_id=report_data["report_id"],
             evidence_count=min(len(report_data["evidence_rows"]), MAX_CONTEXT_EVIDENCE),
             audit_count=min(len(audit_rows), MAX_CONTEXT_AUDIT),
+            incident_history_count=len(history_rows),
             approval_required=report_data["approval_required"],
         )
 
@@ -913,12 +1395,13 @@ def api_answer_copilot(request: CopilotAnswerRequest) -> CopilotAnswerResponse:
         )
 
         logger.info(
-            "API Copilot answer completed | agent_run_id=%s alert_ref=%s source=%s evidence=%d audit=%d",
+            "API Copilot answer completed | agent_run_id=%s alert_ref=%s source=%s evidence=%d audit=%d history=%d",
             agent_run_id,
             alert.alert_display_id,
             context_source,
             response.evidence_count,
             response.audit_count,
+            response.incident_history_count,
         )
 
         return response

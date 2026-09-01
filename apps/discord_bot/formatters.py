@@ -347,8 +347,8 @@ def format_alert_summary(alert: dict[str, Any]) -> str:
         f"Run triage for `{alert_ref}` to collect ClickHouse, DQ history, pipeline run, and lineage evidence.",
         "",
         "### Commands",
-        f"/triage alert_key:{alert_ref}",
-        f"/daily_summary dt:{affected_date}",
+        f"/dq triage alert_key:{alert_ref}",
+        f"/dq daily_summary dt:{affected_date}",
     ]
 
     if evidence_uri:
@@ -420,7 +420,7 @@ def format_alert_list(
                 "No alerts matched the selected filter.",
                 "",
                 "### Start Here",
-                f"Run /daily_summary dt:{compact_value(dt, '<YYYY-MM-DD>')} to review the broader daily status.",
+                f"Run /dq daily_summary dt:{compact_value(dt, '<YYYY-MM-DD>')} to review the broader daily status.",
             ]
         )
 
@@ -464,7 +464,7 @@ def format_alert_list(
     lines.extend(
         [
             "### Start Here",
-            f"Triage the highest-priority alert first: /triage alert_key:{first_alert_ref}",
+            f"Triage the highest-priority alert first: /dq triage alert_key:{first_alert_ref}",
         ]
     )
 
@@ -649,6 +649,7 @@ def format_daily_summary(
     check_rows: list[dict[str, Any]],
     alert_rows: list[dict[str, Any]],
     assistant_note: str = "",
+    data_transport: str = "",
 ) -> str:
     """
     Format a daily DQ summary message.
@@ -658,6 +659,7 @@ def format_daily_summary(
         check_rows: DQ check status count rows.
         alert_rows: Alert severity count rows.
         assistant_note: Optional LLM-assisted natural language readout.
+        data_transport: Data source boundary used, such as api or local.
 
     Returns:
         Discord Markdown daily summary.
@@ -700,10 +702,19 @@ def format_daily_summary(
             f"\u26A0\uFE0F Open Warning `{alert_counts.get('warning', 0)}`",
             "",
             "### Next Commands",
-            f"/alerts dt:{dt} status:open limit:10",
-            "/triage alert_key:<Alert Ref>",
+            f"/dq alerts dt:{dt} status:open limit:10",
+            "/dq triage alert_key:<Alert Ref>",
         ]
     )
+
+    if data_transport:
+        lines.extend(
+            [
+                "",
+                "### Technical Reference",
+                f"Data Transport `{compact_value(data_transport)}`",
+            ]
+        )
 
     return join_lines(lines)
 
@@ -714,6 +725,7 @@ def format_operator_answer(
     alert_key: str = "",
     transport: str = "",
     agent_run_id: str = "",
+    incident_history_count: int = 0,
 ) -> str:
     """
     Format a free-form copilot answer for Discord.
@@ -724,6 +736,8 @@ def format_operator_answer(
         alert_key: Optional alert key used as context.
         transport: Copilot transport such as api or local.
         agent_run_id: Optional API and audit correlation id.
+        incident_history_count: Earlier exact-match investigations supplied as
+            comparison context.
 
     Returns:
         Discord Markdown message with a natural language answer.
@@ -745,7 +759,15 @@ def format_operator_answer(
     ]
 
     if alert_ref:
-        lines.extend(["### Alert Context", f"Alert Ref `{alert_ref}`", ""])
+        lines.extend(
+            [
+                "### Alert Context",
+                f"Alert Ref `{alert_ref}`",
+                f"Previous Investigation Records `{incident_history_count}`",
+                "Prior records are comparison context only, not proof of the current root cause.",
+                "",
+            ]
+        )
 
     lines.extend(
         [
@@ -756,7 +778,9 @@ def format_operator_answer(
         "I can explain, summarize, and recommend next steps, but I will not execute remediation without approval.",
         "",
         "### Suggested Next Command",
-        f"/triage alert_key:{alert_ref}" if alert_ref else "Use /alerts to select an Alert Ref, then run /triage.",
+        f"/dq triage alert_key:{alert_ref}"
+        if alert_ref
+        else "Use /dq alerts to select an Alert Ref, then run /dq triage.",
         ]
     )
 
@@ -832,8 +856,8 @@ def format_backfill_preview(
         "No Airflow DAG was triggered. Creating this request only writes approval and audit state.",
         "",
         "### Decision Commands",
-        f"/approve request_id:{request_id} comment:<review note>",
-        f"/reject request_id:{request_id} comment:<review note>",
+        f"/dq approve request_id:{request_id} comment:<review note>",
+        f"/dq reject request_id:{request_id} comment:<review note>",
     ]
 
     return join_lines(lines)
@@ -902,11 +926,11 @@ def format_bot_online() -> str:
         "Commands are ready for alert lookup, triage, daily summary, and approval previews.",
         "",
         "### Useful Commands",
-        "/alerts dt:<YYYY-MM-DD> status:open limit:10",
-        "/triage alert_key:<Alert Ref>",
-        "/daily_summary dt:<YYYY-MM-DD>",
-        "/ask question:<question> alert_key:<Alert Ref>",
-        "`/backfill_preview start_date:<YYYY-MM-DD> end_date:<YYYY-MM-DD>`",
+        "/dq alerts dt:<YYYY-MM-DD> status:open limit:10",
+        "/dq triage alert_key:<Alert Ref>",
+        "/dq daily_summary dt:<YYYY-MM-DD>",
+        "/dq ask question:<question> alert_key:<Alert Ref>",
+        "`/dq backfill_preview start_date:<YYYY-MM-DD> end_date:<YYYY-MM-DD>`",
     ]
 
     return join_lines(lines)

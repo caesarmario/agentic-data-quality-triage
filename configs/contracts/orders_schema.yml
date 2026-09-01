@@ -1,0 +1,100 @@
+####
+## Orders Schema Contract for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+# --- Defining Contract Identity
+contract_version: 1
+contract_name: orders_warehouse_schema
+dataset: orders
+description: Expected ClickHouse schemas for the orders raw, staging, and mart assets.
+
+# --- Defining Drift Policy
+policy:
+  missing_table: critical
+  missing_column: critical
+  type_mismatch: critical
+  unexpected_columns: warning
+  position_mismatch: warning
+  default_mismatch: warning
+  fail_on_severity: critical
+
+# --- Defining Expected Schemas
+tables:
+  - qualified_name: dq.raw_orders
+    check_column_order: true
+    check_defaults: true
+    columns:
+      - {name: dt, data_type: Date}
+      - {name: order_id, data_type: String}
+      - {name: order_date, data_type: Date}
+      - {name: order_ts, data_type: "DateTime64(3, 'UTC')"}
+      - {name: ingestion_ts, data_type: "DateTime64(3, 'UTC')"}
+      - {name: customer_id, data_type: String}
+      - {name: country, data_type: LowCardinality(String)}
+      - {name: channel, data_type: LowCardinality(String)}
+      - {name: status, data_type: LowCardinality(String)}
+      - {name: currency, data_type: LowCardinality(String)}
+      - {name: gross_amount_local, data_type: "Decimal(18, 2)"}
+      - {name: fx_rate_to_usd, data_type: "Decimal(18, 6)"}
+      - {name: gross_amount_usd, data_type: "Decimal(18, 2)"}
+      - {name: discount_usd, data_type: "Decimal(18, 2)"}
+      - {name: refund_amount_usd, data_type: "Decimal(18, 2)"}
+      - {name: recognized_revenue_usd, data_type: "Decimal(18, 2)"}
+      - {name: source_system, data_type: LowCardinality(String)}
+      - {name: is_test, data_type: UInt8, default_kind: DEFAULT, default_expression: "0"}
+      - {name: business_date_version, data_type: UInt32, default_kind: DEFAULT, default_expression: "1"}
+      - {name: incident_scenario, data_type: String, default_kind: DEFAULT, default_expression: "''"}
+      - {name: generated_at, data_type: "DateTime64(3, 'UTC')", default_kind: DEFAULT, default_expression: now64(3)}
+      - {name: loaded_at, data_type: "DateTime64(3, 'UTC')", default_kind: DEFAULT, default_expression: now64(3)}
+      - {name: load_id, data_type: UUID, default_kind: DEFAULT, default_expression: generateUUIDv4()}
+
+  - qualified_name: dq.stg_orders
+    check_column_order: true
+    check_defaults: true
+    columns:
+      - {name: dt, data_type: Date}
+      - {name: order_id, data_type: String}
+      - {name: order_date, data_type: Date}
+      - {name: order_ts, data_type: "DateTime64(3, 'UTC')"}
+      - {name: ingestion_ts, data_type: "DateTime64(3, 'UTC')"}
+      - {name: customer_id, data_type: String}
+      - {name: country, data_type: LowCardinality(String)}
+      - {name: channel, data_type: LowCardinality(String)}
+      - {name: status, data_type: LowCardinality(String)}
+      - {name: currency, data_type: LowCardinality(String)}
+      - {name: gross_amount_local, data_type: "Decimal(18, 2)"}
+      - {name: fx_rate_to_usd, data_type: "Decimal(18, 6)"}
+      - {name: gross_amount_usd, data_type: "Decimal(18, 2)"}
+      - {name: discount_usd, data_type: "Decimal(18, 2)"}
+      - {name: refund_amount_usd, data_type: "Decimal(18, 2)"}
+      - {name: recognized_revenue_usd, data_type: "Decimal(18, 2)"}
+      - {name: net_amount_usd, data_type: "Decimal(18, 2)"}
+      - {name: source_system, data_type: LowCardinality(String)}
+      - {name: is_test, data_type: UInt8}
+      - {name: business_date_version, data_type: UInt32}
+      - {name: incident_scenario, data_type: String}
+      - {name: transformed_at, data_type: "DateTime64(3)"}
+
+  - qualified_name: dq.fct_orders_daily
+    check_column_order: true
+    check_defaults: true
+    columns:
+      - {name: dt, data_type: Date}
+      - {name: country, data_type: LowCardinality(String)}
+      - {name: channel, data_type: LowCardinality(String)}
+      - {name: row_count, data_type: UInt64}
+      - {name: order_count, data_type: UInt64}
+      - {name: distinct_order_count, data_type: UInt64}
+      - {name: paid_order_count, data_type: UInt64}
+      - {name: cancelled_order_count, data_type: UInt64}
+      - {name: refunded_order_count, data_type: UInt64}
+      - {name: pending_order_count, data_type: UInt64}
+      - {name: gross_amount_usd, data_type: "Decimal(18, 2)"}
+      - {name: discount_usd, data_type: "Decimal(18, 2)"}
+      - {name: refund_amount_usd, data_type: "Decimal(18, 2)"}
+      - {name: recognized_revenue_usd, data_type: "Decimal(18, 2)"}
+      - {name: aov_usd, data_type: "Decimal(18, 2)"}
+      - {name: duplicate_order_count, data_type: UInt64}
+      - {name: late_arriving_count, data_type: UInt64}
+      - {name: updated_at, data_type: "DateTime64(3)"}

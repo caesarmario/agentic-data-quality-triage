@@ -10,7 +10,6 @@ import argparse
 import json
 import sys
 import time
-from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -26,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from pipelines.common.clickhouse import build_clickhouse_client, format_date_literal, quote_sql_literal, scalar
 from pipelines.common.alert_identity import build_alert_ref
+from pipelines.common.alerts import ALERTS_TABLE, AlertCandidate, insert_alert_rows
 from pipelines.common.logging import logger
 from pipelines.dq.config import OrdersDqContract, load_orders_dq_contract
 from pipelines.seeding.helpers import iter_dates, parse_date
@@ -33,87 +33,6 @@ from pipelines.seeding.helpers import iter_dates, parse_date
 
 # --- Defining Constants
 DQ_RESULTS_TABLE = "dq.dq_check_results"
-ALERTS_TABLE     = "dq.alerts"
-
-ALERT_COLUMNS = [
-    "alert_key",
-    "alert_display_id",
-    "status",
-    "alert_type",
-    "severity",
-    "table_name",
-    "metric",
-    "dt",
-    "dimension",
-    "observed_value",
-    "expected_value",
-    "threshold_value",
-    "source_check_run_id",
-    "details_json",
-]
-
-
-# --- Defining Classes
-@dataclass(frozen=True)
-class AlertCandidate:
-    """
-    One alert candidate derived from the latest failing or warning DQ result.
-
-    Attributes:
-        alert_key: Stable idempotency key for the alert.
-        alert_display_id: Short human-facing reference for operators and Discord/UI users.
-        status: Alert lifecycle status, usually open.
-        alert_type: Alert type such as dq_failure.
-        severity: Business severity copied from the DQ check.
-        table_name: Fully qualified affected ClickHouse table.
-        metric: Check name or metric that triggered the alert.
-        dt: Business date associated with the alert.
-        dimension: Optional dimension label, commonly a checked column name.
-        observed_value: Numeric observed value from the DQ result.
-        expected_value: Numeric expected value from the DQ result.
-        threshold_value: Numeric threshold from the DQ result.
-        source_check_run_id: Source DQ check result UUID.
-        details: Structured alert context stored as JSON.
-    """
-
-    alert_key: str
-    alert_display_id: str
-    status: str
-    alert_type: str
-    severity: str
-    table_name: str
-    metric: str
-    dt: date
-    dimension: str
-    observed_value: float | None
-    expected_value: float | None
-    threshold_value: float | None
-    source_check_run_id: UUID
-    details: dict[str, Any]
-
-    def as_insert_row(self) -> list[Any]:
-        """
-        Convert the alert candidate into a ClickHouse insert row.
-
-        Returns:
-            Ordered row matching ALERT_COLUMNS.
-        """
-        return [
-            self.alert_key,
-            self.alert_display_id,
-            self.status,
-            self.alert_type,
-            self.severity,
-            self.table_name,
-            self.metric,
-            self.dt,
-            self.dimension,
-            self.observed_value,
-            self.expected_value,
-            self.threshold_value,
-            self.source_check_run_id,
-            json.dumps(self.details, default=str),
-        ]
 
 
 # --- Defining Functions
@@ -360,24 +279,12 @@ def insert_new_alerts(client: Any, candidates: list[AlertCandidate], open_status
 
             continue
 
-        rows_to_insert.append(candidate.as_insert_row())
+        rows_to_insert.append(candidate)
 
-    if rows_to_insert:
-        logger.info("Inserting alerts | table=%s rows=%d", ALERTS_TABLE, len(rows_to_insert))
-
-        client.insert(
-            table=ALERTS_TABLE,
-            data=rows_to_insert,
-            column_names=ALERT_COLUMNS,
-        )
-
-        logger.info("Alerts inserted | table=%s rows=%d", ALERTS_TABLE, len(rows_to_insert))
-
-    else:
-        logger.info("No new alerts to insert")
+    inserted = insert_alert_rows(client=client, candidates=rows_to_insert)
 
     return {
-        "inserted": len(rows_to_insert),
+        "inserted": inserted,
         "skipped_existing": len(skipped_keys),
         "skipped_alert_keys": skipped_keys,
     }

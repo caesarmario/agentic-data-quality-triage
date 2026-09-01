@@ -45,7 +45,7 @@ from apps.discord_bot.service import (
     build_discord_triage_note,
     create_discord_backfill_approval_request,
     decide_discord_approval_request,
-    fetch_daily_summary_rows,
+    fetch_discord_daily_summary,
     fetch_discord_alerts,
     probe_control_plane_health,
     run_discord_triage,
@@ -71,9 +71,11 @@ REQUIRED_DISCORD_SETTINGS = (
 
 
 # --- Creating Discord Client
-intents = discord.Intents.default()
-client  = discord.Client(intents=intents)
-tree    = app_commands.CommandTree(client)
+intents        = discord.Intents.none()
+intents.guilds = True
+
+client = discord.Client(intents=intents)
+tree   = app_commands.CommandTree(client)
 
 
 # --- Defining Configuration Helpers
@@ -90,6 +92,49 @@ def guild_object(guild_id: int | None = None) -> discord.Object | None:
     resolved_id = GUILD_ID if guild_id is None else int(guild_id)
 
     return discord.Object(id=resolved_id) if resolved_id else None
+
+
+def register_dq_command_group() -> app_commands.Group:
+    """
+    Register the canonical grouped command namespace for local Discord use.
+
+    Returns:
+        Mutable command group registered to the configured guild or globally.
+    """
+    group = app_commands.Group(
+        name="dq",
+        description="Data reliability alerts, triage, and approval-gated operations",
+    )
+    scope = guild_object()
+
+    if scope:
+        tree.add_command(group, guild=scope)
+    else:
+        tree.add_command(group)
+
+    return group
+
+
+# Register the group before child decorators are evaluated below.
+dq_group = register_dq_command_group()
+
+
+def registered_command_names() -> list[str]:
+    """
+    List every invokable command path, including grouped and legacy aliases.
+
+    Returns:
+        Sorted slash-command paths without exposing configuration values.
+    """
+    names = []
+
+    for command in tree.get_commands(guild=guild_object()):
+        if isinstance(command, app_commands.Group):
+            names.extend(f"{command.name} {child.name}" for child in command.commands)
+        else:
+            names.append(command.name)
+
+    return sorted(names)
 
 
 def required_env(
@@ -136,7 +181,7 @@ def build_startup_diagnostics(
         for name in REQUIRED_DISCORD_SETTINGS
         if not str(values.get(name, "")).strip()
     ]
-    command_names = sorted(command.name for command in tree.get_commands(guild=guild_object()))
+    command_names = registered_command_names()
 
     return {
         "status": "ready" if not missing else "configuration_required",
@@ -394,11 +439,13 @@ async def daily_summary(interaction: discord.Interaction, dt: str) -> None:
     await interaction.response.defer(thinking=True, ephemeral=True)
 
     try:
-        normalized_dt          = parse_date(dt.strip()).isoformat()
-        check_rows, alert_rows = await asyncio.to_thread(
-            fetch_daily_summary_rows,
+        normalized_dt                   = parse_date(dt.strip()).isoformat()
+        summary_payload, data_transport = await asyncio.to_thread(
+            fetch_discord_daily_summary,
             normalized_dt,
         )
+        check_rows = list(summary_payload.get("check_counts") or [])
+        alert_rows = list(summary_payload.get("alert_counts") or [])
         note = await asyncio.to_thread(
             build_daily_summary_copilot_note,
             normalized_dt,
@@ -410,6 +457,7 @@ async def daily_summary(interaction: discord.Interaction, dt: str) -> None:
             check_rows=check_rows,
             alert_rows=alert_rows,
             assistant_note=note,
+            data_transport=data_transport,
         )
         await publish_result(
             interaction=interaction,
@@ -506,6 +554,9 @@ async def ask(
             alert_key=result["alert_key"],
             transport=result["transport"],
             agent_run_id=result["agent_run_id"],
+            incident_history_count=int(
+                result.get("incident_history_count") or 0
+            ),
         )
         await publish_result(
             interaction=interaction,
@@ -679,6 +730,103 @@ async def reject(
         decision="reject",
         comment=comment,
     )
+
+
+# --- Defining Canonical Grouped Command Aliases
+@dq_group.command(name="alerts", description="List data quality alerts")
+@app_commands.describe(
+    dt="Optional business date in YYYY-MM-DD format",
+    status="Alert lifecycle status",
+    limit="Maximum alerts to show",
+)
+async def dq_alerts(
+    interaction: discord.Interaction,
+    dt: str = "",
+    status: str = DEFAULT_ALERT_STATUS,
+    limit: int = DEFAULT_ALERT_LIMIT,
+) -> None:
+    """Route the canonical grouped alert command to the existing handler."""
+    await alerts.callback(interaction, dt, status, limit)
+
+
+@dq_group.command(name="daily_summary", description="Show the DQ summary for one business date")
+@app_commands.describe(dt="Business date in YYYY-MM-DD format")
+async def dq_daily_summary(interaction: discord.Interaction, dt: str) -> None:
+    """Route the canonical grouped daily summary to the existing handler."""
+    await daily_summary.callback(interaction, dt)
+
+
+@dq_group.command(name="triage", description="Investigate one Alert Ref or system alert key")
+@app_commands.describe(alert_key="Alert Ref such as DQ-20260610-A1B2C3")
+async def dq_triage(interaction: discord.Interaction, alert_key: str) -> None:
+    """Route the canonical grouped triage command to the existing handler."""
+    await triage.callback(interaction, alert_key)
+
+
+@dq_group.command(name="ask", description="Ask the evidence-aware Data Reliability Copilot")
+@app_commands.describe(
+    question="Natural-language data reliability question",
+    alert_key="Optional Alert Ref or system alert key for grounding",
+)
+async def dq_ask(
+    interaction: discord.Interaction,
+    question: str,
+    alert_key: str = "",
+) -> None:
+    """Route the canonical grouped Copilot question to the existing handler."""
+    await ask.callback(interaction, question, alert_key)
+
+
+@dq_group.command(name="backfill_preview", description="Create an approval-gated backfill request")
+@app_commands.describe(
+    start_date="Inclusive start date in YYYY-MM-DD format",
+    end_date="Inclusive end date in YYYY-MM-DD format",
+    target_dag_id="Allowlisted operational DAG",
+    reason="Reason for the requested backfill",
+)
+async def dq_backfill_preview(
+    interaction: discord.Interaction,
+    start_date: str,
+    end_date: str,
+    target_dag_id: str = DEFAULT_TARGET_DAG_ID,
+    reason: str = "Manual Discord backfill preview",
+) -> None:
+    """Route the grouped preview command without bypassing approval controls."""
+    await backfill_preview.callback(
+        interaction,
+        start_date,
+        end_date,
+        target_dag_id,
+        reason,
+    )
+
+
+@dq_group.command(name="approve", description="Approve a pending request without executing it")
+@app_commands.describe(
+    request_id="APR identifier from a backfill preview",
+    comment="Review rationale stored in the audit trail",
+)
+async def dq_approve(
+    interaction: discord.Interaction,
+    request_id: str,
+    comment: str = "Reviewed evidence and exact action scope.",
+) -> None:
+    """Record grouped approval through the same durable control-plane boundary."""
+    await decide_approval(interaction, request_id, "approve", comment)
+
+
+@dq_group.command(name="reject", description="Reject a pending approval request")
+@app_commands.describe(
+    request_id="APR identifier from a backfill preview",
+    comment="Rejection rationale stored in the audit trail",
+)
+async def dq_reject(
+    interaction: discord.Interaction,
+    request_id: str,
+    comment: str = "Rejected after reviewing evidence and action scope.",
+) -> None:
+    """Record grouped rejection through the same durable control-plane boundary."""
+    await decide_approval(interaction, request_id, "reject", comment)
 
 
 # --- Defining CLI Helpers

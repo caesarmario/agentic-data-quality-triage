@@ -17,6 +17,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 GRAPH_PATH   = PROJECT_ROOT / "agent" / "graph.py"
 DOC_PATH     = PROJECT_ROOT / "docs" / "agent_supervisor_lite_architecture.md"
 NODES_PATH   = PROJECT_ROOT / "agent" / "nodes" / "triage_nodes.py"
+ALERT_CONTEXT_PATH          = PROJECT_ROOT / "agent" / "nodes" / "alert_context.py"
+EVIDENCE_ORCHESTRATION_PATH = PROJECT_ROOT / "agent" / "nodes" / "evidence_orchestration.py"
+REPORTING_PATH              = PROJECT_ROOT / "agent" / "nodes" / "reporting.py"
 
 
 # --- Defining Tests
@@ -33,6 +36,18 @@ def test_specialist_registry_has_expected_supervisor_lite_shape() -> None:
     assert summary["shared_state_model"] == "TriageState"
     assert summary["handoff_style"] == "state_based_explicit_handoff"
     assert summary["node_count"] == 9
+    assert summary["bounded_specialist_pilots"] == [
+        "incident_triage_agent",
+        "metadata_lineage_agent",
+    ]
+    assert summary["cross_agent_contracts"] == [
+        "AgentTaskEnvelope",
+        "AgentResultEnvelope",
+        "SupervisorState",
+    ]
+    assert summary["default_runtime"] == "supervisor_lite"
+    assert summary["control_plane_supervisor_status"] == "manual_airflow_pilot"
+    assert summary["control_plane_routing"] == "deterministic_single_handoff"
 
 
 def test_specialist_registry_entries_are_complete() -> None:
@@ -78,12 +93,18 @@ def test_graph_uses_node_factory_instead_of_nested_node_definitions() -> None:
     """
     graph_content = GRAPH_PATH.read_text(encoding="utf-8")
     nodes_content = NODES_PATH.read_text(encoding="utf-8")
+    alert_content    = ALERT_CONTEXT_PATH.read_text(encoding="utf-8")
+    evidence_content = EVIDENCE_ORCHESTRATION_PATH.read_text(encoding="utf-8")
 
     assert "TriageNodeFactory(" in graph_content
     assert "def load_alert_node" not in graph_content
     assert "def gather_context_node" not in graph_content
-    assert "def load_alert_node" in nodes_content
-    assert "def gather_context_node" in nodes_content
+    assert "def load_alert_node" not in nodes_content
+    assert "def gather_context_node" not in nodes_content
+    assert "from agent.nodes.alert_context import AlertContextNodes" in nodes_content
+    assert "from agent.nodes.evidence_orchestration import EvidenceOrchestrationNodes" in nodes_content
+    assert "def load_alert_node" in alert_content
+    assert "def gather_context_node" in evidence_content
 
 
 def test_specialist_node_factory_exposes_registered_node_methods() -> None:
@@ -107,7 +128,7 @@ def test_report_node_persists_successful_and_failed_llm_route_audits() -> None:
     Returns:
         None.
     """
-    nodes_content = NODES_PATH.read_text(encoding="utf-8")
+    nodes_content = REPORTING_PATH.read_text(encoding="utf-8")
 
     assert "write_llm_route_audit_event(" in nodes_content
     assert 'action="llm_route_failed"' in nodes_content
@@ -134,6 +155,27 @@ def test_supervisor_lite_doc_mentions_core_boundaries() -> None:
     assert "approval-gated" in doc_content
     assert "heuristic fallback" in doc_content
     assert "MCP" in doc_content
+    assert "metadata_lineage_agent" in doc_content
+    assert "AgentTaskEnvelope" in doc_content
+    assert "AgentResultEnvelope" in doc_content
+
+
+def test_evidence_specialist_registry_includes_durable_context_tools() -> None:
+    """
+    Ensure schema and prior-incident evidence are declared in the node registry.
+
+    Returns:
+        None.
+    """
+    gather_context = next(
+        spec
+        for spec in list_specialist_node_specs()
+        if spec.node_name == "gather_context"
+    )
+
+    assert "schema_drift" in gather_context.tools
+    assert "incident_history" in gather_context.tools
+
 
 def test_evidence_planning_node_precedes_tool_collection() -> None:
     """
@@ -143,7 +185,7 @@ def test_evidence_planning_node_precedes_tool_collection() -> None:
         None.
     """
     graph_content = GRAPH_PATH.read_text(encoding="utf-8")
-    nodes_content = NODES_PATH.read_text(encoding="utf-8")
+    nodes_content = EVIDENCE_ORCHESTRATION_PATH.read_text(encoding="utf-8")
 
     assert 'workflow.add_edge("load_alert", "plan_evidence")' in graph_content
     assert 'workflow.add_edge("plan_evidence", "gather_context")' in graph_content

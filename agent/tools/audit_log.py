@@ -9,12 +9,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 
 # --- Configuring Project Path
@@ -30,8 +31,10 @@ from pipelines.common.logging import logger
 
 # --- Defining Constants
 AGENT_AUDIT_LOG_TABLE = "dq.agent_audit_log"
+AUDIT_IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 AGENT_AUDIT_LOG_COLUMNS = [
+    "audit_id",
     "alert_id",
     "alert_key",
     "agent_run_id",
@@ -63,6 +66,103 @@ def hash_sql(sql: str) -> str:
     normalized = " ".join(sql.strip().split())
 
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def build_audit_idempotency_key(scope: str, *values: Any) -> str:
+    """
+    Build a stable SHA-256 key for one explicitly replay-safe audit event.
+
+    Args:
+        scope: Bounded event scope such as store_triage_report.
+        values: Stable correlation values that define the logical event.
+
+    Returns:
+        Lowercase SHA-256 idempotency key.
+
+    Raises:
+        ValueError: If scope is blank or a correlation value is None.
+    """
+    normalized_scope = scope.strip()
+
+    if not normalized_scope:
+        raise ValueError("Audit idempotency scope must not be blank.")
+
+    if any(value is None for value in values):
+        raise ValueError("Audit idempotency values must not contain None.")
+
+    canonical_payload = json.dumps(
+        {
+            "scope": normalized_scope,
+            "values": [str(value) for value in values],
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+
+
+def validate_audit_idempotency_key(value: str) -> str:
+    """
+    Validate one caller-supplied audit idempotency key.
+
+    Args:
+        value: Candidate lowercase SHA-256 key.
+
+    Returns:
+        Validated key.
+
+    Raises:
+        ValueError: If the key is not a lowercase SHA-256 digest.
+    """
+    normalized = value.strip()
+
+    if not AUDIT_IDEMPOTENCY_KEY_PATTERN.fullmatch(normalized):
+        raise ValueError("Audit idempotency key must be a lowercase SHA-256 digest.")
+
+    return normalized
+
+
+def build_audit_event_id(idempotency_key: str = "") -> UUID:
+    """
+    Build a deterministic event UUID for replay-safe events or a random UUID otherwise.
+
+    Args:
+        idempotency_key: Optional validated SHA-256 event key.
+
+    Returns:
+        Deterministic UUID5 when a key is supplied, otherwise UUID4.
+    """
+    if not idempotency_key:
+        return uuid4()
+
+    validated_key = validate_audit_idempotency_key(idempotency_key)
+
+    return uuid5(NAMESPACE_URL, f"agent-audit:{validated_key}")
+
+
+def audit_event_exists(client: Any, audit_id: UUID) -> bool:
+    """
+    Check whether a deterministic audit event has already been persisted.
+
+    Args:
+        client: clickhouse-connect client instance.
+        audit_id: Deterministic audit event UUID.
+
+    Returns:
+        True when an event with the same UUID already exists.
+    """
+    result = client.query(
+        f"""
+            SELECT count()
+            FROM {AGENT_AUDIT_LOG_TABLE}
+            WHERE audit_id = {{audit_id:UUID}}
+        """,
+        parameters={"audit_id": str(audit_id)},
+    )
+
+    return bool(result.result_rows and int(result.result_rows[0][0]) > 0)
 
 
 def json_dumps_safe(payload: dict[str, Any] | list[Any] | str | None) -> str:
@@ -141,6 +241,7 @@ def write_agent_audit_event(
     sql: str = "",
     row_count: int | None = None,
     report_s3_uri: str = "",
+    idempotency_key: str = "",
 ) -> UUID:
     """
     Write one agent tool/action audit event to ClickHouse.
@@ -161,15 +262,38 @@ def write_agent_audit_event(
         sql: Optional SQL statement. Only a hash is persisted.
         row_count: Optional row count produced by the tool.
         report_s3_uri: Optional report artifact URI.
+        idempotency_key: Optional SHA-256 key for an explicitly replay-safe event.
+            The pre-insert check protects sequential replay, not concurrent distributed writes.
 
     Returns:
         Agent run UUID associated with the event.
     """
     resolved_agent_run_id = normalize_uuid(agent_run_id) or uuid4()
     resolved_alert_id     = normalize_uuid(alert_id)
+    resolved_event_key    = validate_audit_idempotency_key(idempotency_key) if idempotency_key else ""
+    audit_id              = build_audit_event_id(resolved_event_key)
     sql_hash              = hash_sql(sql) if sql else ""
+    resolved_input        = input_payload
+
+    if resolved_event_key:
+        if resolved_input is not None and not isinstance(resolved_input, dict):
+            raise ValueError("Replay-safe audit events require a dictionary input payload.")
+
+        resolved_input = dict(resolved_input or {})
+        resolved_input["_audit_idempotency_key"] = resolved_event_key
+
+        if audit_event_exists(client=client, audit_id=audit_id):
+            logger.info(
+                "Reusing replay-safe audit event | audit_id=%s agent_run_id=%s action=%s",
+                audit_id,
+                resolved_agent_run_id,
+                action,
+            )
+
+            return resolved_agent_run_id
 
     row = [
+        audit_id,
         resolved_alert_id,
         alert_key,
         resolved_agent_run_id,
@@ -178,7 +302,7 @@ def write_agent_audit_event(
         tool_name,
         status,
         duration_ms,
-        json_dumps_safe(input_payload),
+        json_dumps_safe(resolved_input),
         json_dumps_safe(output_payload),
         error_message[:2000],
         sql_hash,
@@ -187,7 +311,8 @@ def write_agent_audit_event(
     ]
 
     logger.info(
-        "Writing agent audit event | agent_run_id=%s alert_key=%s tool=%s action=%s status=%s row_count=%s",
+        "Writing agent audit event | audit_id=%s agent_run_id=%s alert_key=%s tool=%s action=%s status=%s row_count=%s",
+        audit_id,
         resolved_agent_run_id,
         alert_key,
         tool_name,

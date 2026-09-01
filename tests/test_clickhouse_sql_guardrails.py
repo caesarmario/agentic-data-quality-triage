@@ -95,3 +95,31 @@ def test_guard_sql_rejects_multiple_statements() -> None:
             "SELECT alert_key FROM dq.alerts WHERE dt = toDate('2026-05-04'); SELECT 1",
             SqlGuardrailConfig(hard_limit=100),
         )
+
+
+def test_guard_sql_rejects_external_table_functions() -> None:
+    """
+    Validate that read-looking SQL cannot access an external S3 endpoint.
+
+    Returns:
+        None.
+    """
+    with pytest.raises(GuardrailViolation, match="external_table_function"):
+        guard_sql(
+            "SELECT * FROM s3('https://example.invalid/data.csv') LIMIT 5",
+            SqlGuardrailConfig(hard_limit=100),
+        )
+
+
+def test_guard_sql_rejects_outfile_clause() -> None:
+    """
+    Validate that a SELECT statement cannot write an output file.
+
+    Returns:
+        None.
+    """
+    with pytest.raises(GuardrailViolation, match="outfile_clause"):
+        guard_sql(
+            "SELECT 1 INTO OUTFILE '/tmp/result.csv'",
+            SqlGuardrailConfig(hard_limit=100),
+        )

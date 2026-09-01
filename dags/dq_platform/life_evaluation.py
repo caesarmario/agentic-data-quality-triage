@@ -21,7 +21,13 @@ logger = logging.getLogger(__name__)
 
 # --- Defining Constants
 DEFAULT_LIFE_ARTIFACT_PREFIX = "agent-life"
+DEFAULT_LIFE_REPLAY_PREFIX   = "agent-replays"
 DEFAULT_MIN_CONFIDENCE       = 0.70
+
+LIFE_SOURCE_MODES = (
+    "stored_report",
+    "scenario_replay",
+)
 
 LIFE_SCENARIO_NAMES = (
     "baseline",
@@ -30,7 +36,10 @@ LIFE_SCENARIO_NAMES = (
     "missing_latest_day",
     "missing_segment",
     "null_spike",
+    "schema_breaking_change",
 )
+
+LIFE_REPLAY_SCENARIO_NAMES = ("schema_breaking_change",)
 
 SAFE_EVALUATION_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
 SAFE_ARTIFACT_PREFIX   = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./=-]{0,199}$")
@@ -39,6 +48,7 @@ SAFE_REPORT_S3_URI     = re.compile(
 )
 
 LIFE_EVALUATION_TASK_IDS = (
+    "t05_prepare_source_report",
     "t10_evaluate_life_report",
     "t20_verify_life_artifacts",
 )
@@ -130,7 +140,9 @@ def emit_life_evaluation_summary(**context: Any) -> dict[str, Any]:
         "run_id": dag_run.run_id,
         "evaluation_run_id": evaluation_run_id,
         "scenario_id": str(conf.get("scenario", "")),
+        "source_mode": str(conf.get("source_mode", "stored_report")),
         "source_report_s3_uri": str(conf.get("report_s3_uri", "")),
+        "critic_enabled": bool(conf.get("enable_critic", False)),
         "json_report_s3_uri": f"s3://{bucket}/{json_key}",
         "markdown_report_s3_uri": f"s3://{bucket}/{markdown_key}",
         "result": "success",

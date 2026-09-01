@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +31,7 @@ from agent.state import (
     EvidenceItem,
     EvidenceType,
     Hypothesis,
+    LlmRuntimeSummary,
     TriageReport,
     TriageState,
 )
@@ -38,6 +41,7 @@ from agent.checkpointing import (
     checkpoint_exists,
     load_checkpoint_settings,
     open_checkpoint_saver,
+    replay_historical_checkpoint_branch,
     resume_checkpointed_graph,
 )
 from agent.display import build_alert_one_liner, build_alert_ref, build_alert_title, build_report_id
@@ -45,8 +49,21 @@ from agent.llm.client import LlmResponse, run_llm_task
 from agent.nodes import TriageNodeFactory
 from agent.planning.evidence import EVIDENCE_PLANNING_ROUTE, build_evidence_plan_for_state
 from agent.reasoning.hypotheses import HYPOTHESIS_FRAMING_ROUTE, frame_hypotheses_for_state
-from pipelines.common.clickhouse import format_date_literal, validate_qualified_table_name
+from agent.supervisor.policy import (
+    assess_incident_complexity,
+    resolve_report_reasoning_policy,
+)
+from agent.tools.audit_log import build_audit_idempotency_key, write_agent_audit_event
+from agent.tools.s3 import resolve_artifacts_bucket
+from pipelines.common.clickhouse import (
+    DEFAULT_CLICKHOUSE_HOST,
+    DEFAULT_CLICKHOUSE_PORT,
+    build_clickhouse_client,
+    format_date_literal,
+    validate_qualified_table_name,
+)
 from pipelines.common.logging import logger
+from pipelines.seeding.upload_to_s3 import resolve_s3_endpoint
 
 
 # --- Defining Constants
@@ -55,6 +72,8 @@ DEFAULT_CONFIDENCE_TARGET = 0.70
 DEFAULT_MAX_EVIDENCE_LOOP = 2
 DEFAULT_REPORT_PREFIX     = "agent-reports"
 REPORT_NARRATIVE_ROUTE    = "triage_reasoning"
+MAX_INVESTIGATION_ERRORS  = 10
+MAX_INVESTIGATION_ERROR_LENGTH = 1_000
 
 
 # --- Defining Classes
@@ -107,6 +126,96 @@ def get_state(graph_state: GraphState) -> TriageState:
     return graph_state["state"]
 
 
+def build_runtime_contract_payload(config: TriageRuntimeConfig) -> dict[str, Any]:
+    """
+    Build a non-secret runtime contract for checkpoint replay validation.
+
+    Args:
+        config: Triage runtime configuration selected for the graph.
+
+    Returns:
+        Canonically serializable evidence and side-effect target values.
+    """
+    clickhouse_host = config.clickhouse_host or os.getenv(
+        "CLICKHOUSE_HOST",
+        DEFAULT_CLICKHOUSE_HOST,
+    )
+    clickhouse_port = int(
+        config.clickhouse_port
+        or os.getenv("CLICKHOUSE_HTTP_PORT", str(DEFAULT_CLICKHOUSE_PORT))
+    )
+
+    return {
+        "manifest_path": str(config.manifest_path or ""),
+        "manifest_s3_uri": str(config.manifest_s3_uri or ""),
+        "s3_endpoint_url": resolve_s3_endpoint(config.s3_endpoint_url),
+        "artifacts_bucket": resolve_artifacts_bucket(config.artifacts_bucket),
+        "artifacts_prefix": config.artifacts_prefix.strip("/"),
+        "clickhouse_host": str(clickhouse_host),
+        "clickhouse_port": clickhouse_port,
+        "clickhouse_database": os.getenv("CLICKHOUSE_DB", "dq"),
+        "clickhouse_user": os.getenv("CLICKHOUSE_USER", "default"),
+    }
+
+
+def build_runtime_contract_hash(config: TriageRuntimeConfig) -> str:
+    """
+    Hash the effective runtime contract used by checkpointed triage.
+
+    Args:
+        config: Triage runtime configuration selected for the graph.
+
+    Returns:
+        Lowercase SHA-256 digest over canonical non-secret runtime values.
+    """
+    payload = build_runtime_contract_payload(config)
+    canonical_payload = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+
+
+def validate_historical_replay_state(
+    state: TriageState,
+    requested_alert_id: str | UUID | None,
+    requested_alert_key: str | None,
+    runtime_contract_hash: str,
+) -> None:
+    """
+    Validate checkpoint identity and runtime targets before historical replay.
+
+    Args:
+        state: Triage state loaded from the selected source checkpoint.
+        requested_alert_id: Optional operator-requested alert UUID.
+        requested_alert_key: Optional operator-requested stable alert key.
+        runtime_contract_hash: Hash for the current runtime configuration.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If alert identity or runtime configuration does not match.
+    """
+    persisted_alert_id = state.alert.alert_id if state.alert else state.alert_id
+    persisted_alert_key = state.alert.alert_key if state.alert else state.alert_key
+
+    if requested_alert_id and str(persisted_alert_id or "") != str(requested_alert_id):
+        raise ValueError("Historical checkpoint alert_id does not match the replay request.")
+
+    if requested_alert_key and persisted_alert_key != requested_alert_key.strip():
+        raise ValueError("Historical checkpoint alert_key does not match the replay request.")
+
+    if not state.runtime_contract_hash:
+        raise ValueError("Historical checkpoint predates the runtime contract and cannot be replayed safely.")
+
+    if state.runtime_contract_hash != runtime_contract_hash:
+        raise ValueError("Historical checkpoint runtime contract does not match the current configuration.")
+
+
 def append_error(state: TriageState, message: str) -> None:
     """
     Add a non-fatal workflow error to the triage state.
@@ -120,6 +229,30 @@ def append_error(state: TriageState, message: str) -> None:
     """
     logger.warning("Recording non-fatal triage error | agent_run_id=%s error=%s", state.agent_run_id, message)
     state.errors.append(message)
+
+
+def normalize_investigation_errors(errors: list[str]) -> list[str]:
+    """
+    Normalize non-fatal investigation errors for reports and handoff contracts.
+
+    Args:
+        errors: Raw graph errors collected from optional tools or narrative routes.
+
+    Returns:
+        Unique, single-line, bounded errors safe for persisted operator artifacts.
+    """
+    normalized_errors: list[str] = []
+
+    for raw_error in errors:
+        normalized = " ".join(str(raw_error or "").split())[:MAX_INVESTIGATION_ERROR_LENGTH]
+
+        if normalized and normalized not in normalized_errors:
+            normalized_errors.append(normalized)
+
+        if len(normalized_errors) >= MAX_INVESTIGATION_ERRORS:
+            break
+
+    return normalized_errors
 
 
 def current_partition_sql(alert: Alert) -> str:
@@ -372,6 +505,102 @@ def build_segment_hypothesis(state: TriageState) -> Hypothesis:
     )
 
 
+def schema_drift_rows(state: TriageState) -> list[dict[str, Any]]:
+    """
+    Return bounded schema finding rows already collected by the guarded tool.
+
+    Args:
+        state: Current triage state.
+
+    Returns:
+        Combined schema drift finding rows from state evidence.
+    """
+    return [
+        row
+        for evidence in state.evidence
+        if evidence.tool_name == "schema_drift"
+        for row in evidence.rows
+    ]
+
+
+def build_schema_drift_hypotheses(state: TriageState) -> list[Hypothesis]:
+    """
+    Build policy-owned hypotheses from exact persisted schema evidence.
+
+    Args:
+        state: Current triage state containing a schema drift alert.
+
+    Returns:
+        Ranked schema-change hypotheses with deterministic confidence.
+    """
+    rows = schema_drift_rows(state)
+
+    if not rows:
+        return [
+            Hypothesis(
+                title="Schema change evidence is unavailable",
+                description=(
+                    "The alert identifies a schema contract change, but the exact persisted detector evidence "
+                    "could not be loaded for this investigation."
+                ),
+                likelihood=0.45,
+                confidence=0.45,
+                root_cause_category="schema_evidence_unavailable",
+                supporting_evidence_ids=evidence_ids(state, {"pipeline_runs", "dbt_lineage"}),
+                recommended_action=(
+                    "Review the schema-drift tool audit, then rerun deterministic schema detection before "
+                    "approving any contract or warehouse change."
+                ),
+            )
+        ]
+
+    finding_types   = sorted({str(row.get("check_type") or "unknown") for row in rows})
+    changed_columns = sorted({str(row.get("column_name") or "<table>") for row in rows})
+    is_breaking     = any(
+        str(row.get("status") or "").lower() == "fail"
+        or str(row.get("severity") or "").lower() == "critical"
+        for row in rows
+    )
+    primary_title    = (
+        "Breaking schema contract change detected"
+        if is_breaking
+        else "Additive schema contract change needs review"
+    )
+    primary_category = "breaking_schema_change" if is_breaking else "additive_schema_change"
+
+    return [
+        Hypothesis(
+            title=primary_title,
+            description=(
+                f"Persisted schema evidence confirms {len(rows)} visible contract finding(s). "
+                f"Finding types: {finding_types}. Affected columns: {changed_columns}."
+            ),
+            likelihood=0.94,
+            confidence=0.94,
+            root_cause_category=primary_category,
+            supporting_evidence_ids=evidence_ids(state, {"schema_drift", "dbt_lineage"}),
+            recommended_action=(
+                "Review the producer schema change and lineage impact, then use a human-approved compatibility "
+                "or contract migration plan. Do not alter the warehouse schema automatically."
+            ),
+        ),
+        Hypothesis(
+            title="Schema contract may be behind an intentional producer change",
+            description=(
+                "The physical schema may have changed intentionally, but the current contract and downstream "
+                "consumer expectations have not yet been reviewed together."
+            ),
+            likelihood=0.35,
+            confidence=0.35,
+            root_cause_category="schema_contract_review",
+            supporting_evidence_ids=evidence_ids(state, {"schema_drift"}),
+            recommended_action=(
+                "Confirm producer intent and consumer compatibility before proposing a versioned contract update."
+            ),
+        ),
+    ]
+
+
 def build_generic_hypotheses(state: TriageState) -> list[Hypothesis]:
     """
     Build fallback hypotheses when the alert metric is not yet classified.
@@ -419,7 +648,10 @@ def build_hypotheses_for_state(state: TriageState) -> list[Hypothesis]:
 
     metric = state.alert.metric.lower()
 
-    if "row_count" in metric:
+    if state.alert.is_schema_drift:
+        hypotheses = build_schema_drift_hypotheses(state)
+
+    elif "row_count" in metric:
         hypotheses = [
             build_missing_partition_hypothesis(state),
             Hypothesis(
@@ -494,9 +726,10 @@ def build_report_narrative_context(state: TriageState) -> dict[str, Any]:
     Returns:
         Dictionary with alert, top hypothesis, compact evidence summaries, and errors.
     """
-    alert           = state.alert
-    top_hypothesis  = state.top_hypothesis
-    evidence_rows   = [
+    alert                  = state.alert
+    top_hypothesis         = state.top_hypothesis
+    complexity_assessment = assess_incident_complexity(state)
+    evidence_rows          = [
         {
             "tool_name": item.tool_name,
             "summary": item.summary,
@@ -510,6 +743,7 @@ def build_report_narrative_context(state: TriageState) -> dict[str, Any]:
         "top_hypothesis": top_hypothesis.model_dump(mode="json") if top_hypothesis else {},
         "evidence": evidence_rows,
         "confidence": top_hypothesis.confidence if top_hypothesis else 0.0,
+        "complexity_assessment": complexity_assessment.model_dump(mode="json"),
         "errors": state.errors,
     }
 
@@ -524,8 +758,9 @@ def build_report_narrative_prompt(state: TriageState) -> str:
     Returns:
         Prompt text for the routed LLM client.
     """
-    alert = state.alert
-    top   = state.top_hypothesis
+    alert      = state.alert
+    top        = state.top_hypothesis
+    complexity = assess_incident_complexity(state)
 
     return (
         "Write a concise senior data engineering triage narrative for this DQ alert. "
@@ -534,7 +769,9 @@ def build_report_narrative_prompt(state: TriageState) -> str:
         f"Alert table={alert.table_name if alert else 'unknown'}, "
         f"metric={alert.metric if alert else 'unknown'}, "
         f"dt={alert.dt if alert else 'unknown'}, "
-        f"top_hypothesis={top.title if top else 'unknown'}."
+        f"top_hypothesis={top.title if top else 'unknown'}, "
+        f"complexity_tier={complexity.tier}, "
+        f"complexity_reasons={list(complexity.reason_codes)}."
     )
 
 
@@ -548,10 +785,25 @@ def build_llm_report_narrative(state: TriageState) -> LlmResponse:
     Returns:
         LlmResponse with content, model, token, fallback, and cost metadata.
     """
-    logger.info("Building optional LLM report narrative | agent_run_id=%s", state.agent_run_id)
+    top_confidence         = state.top_hypothesis.confidence if state.top_hypothesis else 0.0
+    complexity_assessment = assess_incident_complexity(state)
+    route_policy           = resolve_report_reasoning_policy(
+        confidence=top_confidence,
+        confidence_threshold=state.confidence_threshold,
+        complexity_assessment=complexity_assessment,
+    )
+
+    logger.info(
+        "Building optional LLM report narrative | agent_run_id=%s route=%s reason=%s complexity=%s score=%d",
+        state.agent_run_id,
+        route_policy.provider_route,
+        route_policy.reason_code.value,
+        complexity_assessment.tier,
+        complexity_assessment.score,
+    )
 
     return run_llm_task(
-        route_name=REPORT_NARRATIVE_ROUTE,
+        route_name=route_policy.provider_route,
         prompt=build_report_narrative_prompt(state=state),
         system_prompt=(
             "You are a data reliability copilot. Keep the answer evidence-driven, concise, "
@@ -648,8 +900,48 @@ def render_markdown_report(report: TriageReport) -> str:
         "## Impact",
         report.impact,
         "",
-        "## Evidence Plan",
+        "## Reasoning Complexity",
     ]
+
+    if report.complexity_assessment:
+        lines.extend(
+            [
+                f"- Tier: `{report.complexity_assessment.tier}`",
+                f"- Score: `{report.complexity_assessment.score}`",
+                (
+                    "- Strong Reasoning Required: "
+                    f"`{report.complexity_assessment.strong_reasoning_required}`"
+                ),
+                f"- Reasons: `{list(report.complexity_assessment.reason_codes)}`",
+                (
+                    "- Deterministic Evidence Types: "
+                    f"`{list(report.complexity_assessment.deterministic_evidence_types)}`"
+                ),
+            ]
+        )
+
+    else:
+        lines.append("- Complexity assessment was not available for this report.")
+
+    lines.extend(
+        [
+            "",
+            "## LLM Runtime",
+            f"- Route Events: `{report.llm_runtime.route_event_count}`",
+            f"- Requested Routes: `{report.llm_runtime.requested_routes}`",
+            f"- Executed Routes: `{report.llm_runtime.executed_routes}`",
+            f"- Providers: `{report.llm_runtime.providers}`",
+            f"- Models: `{report.llm_runtime.models}`",
+            f"- External Model Used: `{report.llm_runtime.external_model_used}`",
+            f"- Heuristic Fallback Used: `{report.llm_runtime.heuristic_fallback_used}`",
+            f"- Input / Output Tokens: `{report.llm_runtime.input_tokens}` / `{report.llm_runtime.output_tokens}`",
+            f"- Estimated Cost (USD): `{report.llm_runtime.estimated_cost_usd:.8f}`",
+            f"- Duration (ms): `{report.llm_runtime.duration_ms}`",
+            f"- Fallback Reasons: `{report.llm_runtime.fallback_reasons}`",
+            "",
+            "## Evidence Plan",
+        ]
+    )
 
     if report.evidence_plan:
         lines.extend(
@@ -679,6 +971,15 @@ def render_markdown_report(report: TriageReport) -> str:
                 f"   - Rows: `{evidence.row_count}`",
             ]
         )
+
+    lines.extend(["", "## Investigation Gaps"])
+
+    if report.investigation_errors:
+        for error in report.investigation_errors:
+            lines.append(f"- {error}")
+
+    else:
+        lines.append("- No non-fatal evidence collection gaps were retained.")
 
     lines.extend(["", "## Hypothesis Framing"])
 
@@ -762,6 +1063,88 @@ def render_markdown_report(report: TriageReport) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def append_unique_runtime_value(values: list[str], raw_value: Any) -> None:
+    """
+    Append one bounded non-empty runtime value while preserving event order.
+
+    Args:
+        values: Mutable output collection.
+        raw_value: Provider, model, route, or fallback value from evidence.
+
+    Returns:
+        None.
+    """
+    normalized = " ".join(str(raw_value or "").split())[:500]
+
+    if normalized and normalized not in values and len(values) < 20:
+        values.append(normalized)
+
+
+def build_llm_runtime_summary(evidence_items: list[EvidenceItem]) -> LlmRuntimeSummary:
+    """
+    Aggregate sanitized LLM route evidence for report and audit observability.
+
+    Args:
+        evidence_items: Evidence retained by the current triage state.
+
+    Returns:
+        LlmRuntimeSummary with bounded route, provider, token, cost, and fallback facts.
+    """
+    requested_routes: list[str] = []
+    executed_routes: list[str]  = []
+    providers: list[str]        = []
+    models: list[str]           = []
+    fallback_reasons: list[str] = []
+
+    route_event_count       = 0
+    input_tokens            = 0
+    output_tokens           = 0
+    estimated_cost_usd      = 0.0
+    duration_ms             = 0
+    external_model_used     = False
+    heuristic_fallback_used = False
+
+    for evidence in evidence_items:
+        if evidence.tool_name != "llm_router":
+            continue
+
+        for row in evidence.rows:
+            if not isinstance(row, dict):
+                continue
+
+            route_event_count += 1
+
+            append_unique_runtime_value(requested_routes, row.get("requested_route"))
+            append_unique_runtime_value(executed_routes, row.get("executed_route"))
+            append_unique_runtime_value(providers, row.get("provider"))
+            append_unique_runtime_value(models, row.get("model"))
+            append_unique_runtime_value(fallback_reasons, row.get("fallback_reason"))
+
+            provider = str(row.get("provider", "") or "").strip().lower()
+
+            external_model_used     = external_model_used or provider not in {"", "heuristic"}
+            heuristic_fallback_used = heuristic_fallback_used or bool(row.get("used_heuristic"))
+            input_tokens           += max(0, int(row.get("input_tokens", 0) or 0))
+            output_tokens          += max(0, int(row.get("output_tokens", 0) or 0))
+            estimated_cost_usd     += max(0.0, float(row.get("estimated_cost_usd", 0.0) or 0.0))
+            duration_ms            += max(0, int(row.get("duration_ms", 0) or 0))
+
+    return LlmRuntimeSummary(
+        route_event_count=route_event_count,
+        requested_routes=requested_routes,
+        executed_routes=executed_routes,
+        providers=providers,
+        models=models,
+        external_model_used=external_model_used,
+        heuristic_fallback_used=heuristic_fallback_used,
+        fallback_reasons=fallback_reasons,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        estimated_cost_usd=round(estimated_cost_usd, 10),
+        duration_ms=duration_ms,
+    )
+
+
 def build_report_from_state(state: TriageState, llm_narrative: LlmResponse | None = None) -> TriageReport:
     """
     Build the final TriageReport model from current state.
@@ -782,10 +1165,11 @@ def build_report_from_state(state: TriageState, llm_narrative: LlmResponse | Non
     if not state.hypotheses:
         raise ValueError("At least one hypothesis is required before finalizing a report.")
 
-    top_hypothesis = state.top_hypothesis
-    confidence     = top_hypothesis.confidence if top_hypothesis else 0.0
-    report_id      = build_report_id(state.agent_run_id, state.alert.alert_key)
-    issue_title    = build_alert_title(state.alert)
+    top_hypothesis         = state.top_hypothesis
+    confidence             = top_hypothesis.confidence if top_hypothesis else 0.0
+    complexity_assessment = assess_incident_complexity(state)
+    report_id              = build_report_id(state.agent_run_id, state.alert.alert_key)
+    issue_title            = build_alert_title(state.alert)
 
     summary = (
         f"{state.alert.severity} alert: {issue_title}. "
@@ -804,6 +1188,8 @@ def build_report_from_state(state: TriageState, llm_narrative: LlmResponse | Non
         recommended_actions.append(f"LLM-assisted narrative: {llm_narrative.content}")
 
     recommended_actions.append("Review the stored evidence before approving any mutating remediation action.")
+    investigation_errors = normalize_investigation_errors(state.errors)
+    llm_runtime          = build_llm_runtime_summary(state.evidence)
 
     report = TriageReport(
         agent_run_id=state.agent_run_id,
@@ -815,12 +1201,20 @@ def build_report_from_state(state: TriageState, llm_narrative: LlmResponse | Non
         evidence=state.evidence,
         evidence_plan=state.evidence_plan,
         hypothesis_framing=state.hypothesis_framing,
+        llm_runtime=llm_runtime,
+        complexity_assessment=complexity_assessment,
+        investigation_errors=investigation_errors,
         confidence=confidence,
         recommended_actions=recommended_actions,
         approval_gated_actions=build_approval_actions(state=state, top_hypothesis=top_hypothesis),
         residual_risks=[
             "The agent did not mutate production data; remediation still requires human approval.",
             "If source data is genuinely absent, backfill will not repair the issue without regenerating or restoring landing data.",
+            *(
+                ["One or more investigation dependencies failed; treat the diagnosis as partial until those evidence gaps are resolved."]
+                if investigation_errors
+                else []
+            ),
         ],
         report_id=report_id,
     )
@@ -936,6 +1330,8 @@ def run_triage(
     checkpoint_busy_timeout_ms: int | None = None,
     checkpoint_thread_id: str | None = None,
     checkpoint_resume: bool = False,
+    checkpoint_replay_id: str | None = None,
+    checkpoint_replay_request_id: str | None = None,
 ) -> TriageReport:
     """
     Run one bounded LangGraph triage workflow for an alert.
@@ -951,6 +1347,8 @@ def run_triage(
         checkpoint_busy_timeout_ms: Optional SQLite lock timeout in milliseconds.
         checkpoint_thread_id: Required stable thread id when checkpointing is enabled.
         checkpoint_resume: Resume the latest persisted state instead of starting a new thread.
+        checkpoint_replay_id: Exact historical checkpoint selected for branched replay.
+        checkpoint_replay_request_id: Stable request id used to derive the replay child thread.
 
     Returns:
         Final triage report with S3 URIs populated.
@@ -962,6 +1360,7 @@ def run_triage(
         raise ValueError("Provide alert_id or alert_key to run triage.")
 
     runtime_config      = config or TriageRuntimeConfig()
+    runtime_contract_hash = build_runtime_contract_hash(runtime_config)
     checkpoint_settings = load_checkpoint_settings(
         mode=checkpoint_mode,
         sqlite_path=checkpoint_sqlite_path,
@@ -971,9 +1370,17 @@ def run_triage(
         agent_run_id=uuid4(),
         alert_id=UUID(str(alert_id)) if alert_id else None,
         alert_key=alert_key or "",
+        runtime_contract_hash=runtime_contract_hash,
         confidence_threshold=confidence_threshold,
         max_evidence_iterations=max_evidence_iterations,
     )
+    replay_checkpoint_id = (checkpoint_replay_id or "").strip()
+    replay_request_id    = (checkpoint_replay_request_id or "").strip()
+
+    if bool(replay_checkpoint_id) != bool(replay_request_id):
+        raise ValueError(
+            "checkpoint_replay_id and checkpoint_replay_request_id must be provided together."
+        )
 
     if checkpoint_settings.enabled and not checkpoint_thread_id:
         raise ValueError("checkpoint_thread_id is required when persistent checkpointing is enabled.")
@@ -981,17 +1388,28 @@ def run_triage(
     if checkpoint_resume and not checkpoint_settings.enabled:
         raise ValueError("checkpoint_resume requires an enabled checkpoint backend.")
 
+    if replay_checkpoint_id and not checkpoint_settings.enabled:
+        raise ValueError("Historical checkpoint replay requires an enabled checkpoint backend.")
+
+    if checkpoint_resume and replay_checkpoint_id:
+        raise ValueError("Use latest checkpoint resume or historical replay, not both.")
+
     if checkpoint_settings.mode == CHECKPOINT_MODE_OFF and checkpoint_thread_id:
         logger.info("Ignoring checkpoint thread id because checkpoint mode is off")
 
     logger.info(
-        "Starting triage graph | agent_run_id=%s alert_key=%s checkpoint_mode=%s checkpoint_thread_id=%s resume=%s",
+        "Starting triage graph | agent_run_id=%s alert_key=%s checkpoint_mode=%s "
+        "checkpoint_thread_id=%s resume=%s replay_checkpoint_id=%s",
         state.agent_run_id,
         alert_key,
         checkpoint_settings.mode,
         checkpoint_thread_id or "disabled",
         checkpoint_resume,
+        replay_checkpoint_id or "none",
     )
+
+    replay_metadata = None
+    source_state    = None
 
     with open_checkpoint_saver(checkpoint_settings) as checkpointer:
         graph = build_triage_graph(runtime_config, checkpointer=checkpointer)
@@ -1002,7 +1420,32 @@ def run_triage(
         else:
             graph_config = build_checkpoint_config(checkpoint_thread_id or "")
 
-            if checkpoint_resume:
+            if replay_checkpoint_id:
+                source_config = build_checkpoint_config(
+                    thread_id=checkpoint_thread_id or "",
+                    checkpoint_id=replay_checkpoint_id,
+                )
+
+                if not checkpoint_exists(checkpointer=checkpointer, config=source_config):
+                    raise ValueError("Historical checkpoint does not exist in the selected source thread.")
+
+                source_snapshot = graph.get_state(source_config)
+                source_state    = coerce_final_triage_state(dict(source_snapshot.values))
+                validate_historical_replay_state(
+                    state=source_state,
+                    requested_alert_id=alert_id,
+                    requested_alert_key=alert_key,
+                    runtime_contract_hash=runtime_contract_hash,
+                )
+                result, replay_metadata = replay_historical_checkpoint_branch(
+                    graph=graph,
+                    checkpointer=checkpointer,
+                    source_thread_id=checkpoint_thread_id or "",
+                    source_checkpoint_id=replay_checkpoint_id,
+                    replay_request_id=replay_request_id,
+                )
+
+            elif checkpoint_resume:
                 result, executed_pending_nodes = resume_checkpointed_graph(
                     graph=graph,
                     checkpointer=checkpointer,
@@ -1026,6 +1469,48 @@ def run_triage(
 
     if not final_state.report:
         raise ValueError("Triage graph completed without a report.")
+
+    if replay_metadata:
+        if source_state is None or final_state.agent_run_id != source_state.agent_run_id:
+            raise ValueError("Historical replay changed the persisted agent run identity.")
+
+        replay_audit_key = build_audit_idempotency_key(
+            "historical_checkpoint_replay_completed",
+            replay_metadata.source_thread_id,
+            replay_metadata.source_checkpoint_id,
+            replay_metadata.replay_thread_id,
+            final_state.agent_run_id,
+            final_state.report.markdown_report_s3_uri,
+        )
+        audit_client = build_clickhouse_client(
+            host=runtime_config.clickhouse_host,
+            port=runtime_config.clickhouse_port,
+        )
+        write_agent_audit_event(
+            client=audit_client,
+            action="historical_checkpoint_replay_completed",
+            status="success",
+            agent_run_id=final_state.agent_run_id,
+            alert_id=final_state.alert.alert_id if final_state.alert else None,
+            alert_key=final_state.alert.alert_key if final_state.alert else final_state.alert_key,
+            tool_name="checkpoint_replay",
+            input_payload={
+                "source_thread_id": replay_metadata.source_thread_id,
+                "source_checkpoint_id": replay_metadata.source_checkpoint_id,
+                "replay_request_id": replay_request_id,
+                "runtime_contract_hash": runtime_contract_hash,
+            },
+            output_payload={
+                "replay_thread_id": replay_metadata.replay_thread_id,
+                "source_writer_node": replay_metadata.source_writer_node,
+                "source_next_nodes": list(replay_metadata.source_next_nodes),
+                "executed_pending_nodes": replay_metadata.executed_pending_nodes,
+                "report_id": final_state.report.report_id,
+            },
+            row_count=len(final_state.evidence),
+            report_s3_uri=final_state.report.markdown_report_s3_uri,
+            idempotency_key=replay_audit_key,
+        )
 
     logger.info(
         "Triage graph completed | agent_run_id=%s confidence=%.2f markdown_uri=%s checkpoint_thread_id=%s",
@@ -1062,6 +1547,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-sqlite-path", default=None, help="Absolute SQLite checkpoint path.")
     parser.add_argument("--checkpoint-thread-id", default=None, help="Stable checkpoint thread identifier.")
     parser.add_argument("--checkpoint-resume", action="store_true", help="Resume an existing checkpoint thread.")
+    parser.add_argument(
+        "--checkpoint-replay-id",
+        default=None,
+        help="Exact historical checkpoint id selected for branched replay.",
+    )
+    parser.add_argument(
+        "--checkpoint-replay-request-id",
+        default=None,
+        help="Stable request id used to derive an idempotent replay child thread.",
+    )
 
     return parser
 
@@ -1094,6 +1589,8 @@ def main() -> None:
         checkpoint_sqlite_path=args.checkpoint_sqlite_path,
         checkpoint_thread_id=args.checkpoint_thread_id,
         checkpoint_resume=args.checkpoint_resume,
+        checkpoint_replay_id=args.checkpoint_replay_id,
+        checkpoint_replay_request_id=args.checkpoint_replay_request_id,
     )
     summary = {
         "status": "success",

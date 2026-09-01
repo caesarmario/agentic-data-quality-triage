@@ -55,6 +55,26 @@ def build_alert(metric: str = "row_count_positive") -> Alert:
     )
 
 
+def build_schema_alert() -> Alert:
+    """
+    Build a schema drift alert for category-policy tests.
+
+    Returns:
+        Validated Alert with exact detector run correlation.
+    """
+    return Alert(
+        alert_key="orders|schema_drift|2026-06-10|dq.raw_orders|schema_contract_drift|fingerprint",
+        alert_type="schema_drift",
+        severity="critical",
+        table_name="dq.raw_orders",
+        metric="schema_contract_drift",
+        dt="2026-06-10",
+        observed_value=2,
+        expected_value=0,
+        details={"source_schema_run_id": "manual__schema_planning_test"},
+    )
+
+
 def build_llm_response(structured_output: dict[str, object] | None) -> LlmResponse:
     """
     Build a normalized LLM response without an external provider call.
@@ -69,7 +89,7 @@ def build_llm_response(structured_output: dict[str, object] | None) -> LlmRespon
         agent_run_id=uuid4(),
         route_name=EVIDENCE_PLANNING_ROUTE,
         provider="gemini" if structured_output else "heuristic",
-        model="gemini-2.5-flash" if structured_output else "heuristic-v1",
+        model="gemini-3.5-flash-lite" if structured_output else "heuristic-v1",
         content=json.dumps(structured_output) if structured_output else "Local evidence policy fallback.",
         structured_output=structured_output,
         used_heuristic=structured_output is None,
@@ -184,12 +204,34 @@ def test_row_count_policy_requires_bounded_baseline_and_trend() -> None:
     assert categories == [
         "current_partition_row_count",
         "dq_history",
+        "incident_history",
         "pipeline_runs",
         "dbt_lineage",
         "recent_partition_trend",
     ]
     assert all(request.required for request in requests)
-    assert len(requests) == 5
+    assert len(requests) == 6
+
+
+def test_schema_alert_policy_uses_exact_schema_lineage_and_pipeline_evidence() -> None:
+    """
+    Ensure schema alerts do not run irrelevant partition or DQ-history collectors.
+
+    Returns:
+        None.
+    """
+    requests   = build_policy_requests(alert=build_schema_alert())
+    categories = [str(request.category) for request in requests]
+
+    assert categories == [
+        "schema_drift",
+        "incident_history",
+        "pipeline_runs",
+        "dbt_lineage",
+    ]
+    assert "current_partition_row_count" not in categories
+    assert "dq_history" not in categories
+    assert all(request.required for request in requests)
 
 
 # --- Defining Planner Tests
@@ -228,11 +270,13 @@ def test_llm_plan_is_completed_by_deterministic_policy(monkeypatch) -> None:
         "current_partition_row_count",
         "dq_history",
         "recent_partition_trend",
+        "incident_history",
         "pipeline_runs",
         "dbt_lineage",
     ]
     assert set(result.plan.policy_added_categories) == {
         "current_partition_row_count",
+        "incident_history",
         "pipeline_runs",
         "dbt_lineage",
         "recent_partition_trend",
@@ -260,11 +304,55 @@ def test_unavailable_provider_uses_policy_fallback(monkeypatch) -> None:
     assert [str(request.category) for request in result.plan.requests] == [
         "current_partition_row_count",
         "dq_history",
+        "incident_history",
         "pipeline_runs",
         "dbt_lineage",
     ]
     assert result.plan.llm_provider == "heuristic"
     assert result.error_type == ""
+
+
+def test_schema_planner_cannot_add_irrelevant_partition_category(monkeypatch) -> None:
+    """
+    Ensure contextual policy drops valid-but-irrelevant categories from a model proposal.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    structured_output = {
+        "investigation_question": "Which schema expectations changed and what depends on this table?",
+        "requests": [
+            {
+                "category": "current_partition_row_count",
+                "reason": "Attempt to add a row count that does not explain contract drift.",
+                "priority": 1,
+            },
+            {
+                "category": "schema_drift",
+                "reason": "Read the persisted contract comparison for this exact detector run.",
+                "priority": 1,
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        evidence_planning,
+        "run_llm_task",
+        lambda **kwargs: build_llm_response(structured_output=structured_output),
+    )
+
+    result     = build_evidence_plan_for_state(state=TriageState(alert=build_schema_alert()))
+    categories = [str(request.category) for request in result.plan.requests]
+
+    assert categories == [
+        "schema_drift",
+        "incident_history",
+        "pipeline_runs",
+        "dbt_lineage",
+    ]
+    assert "current_partition_row_count" not in categories
 
 
 def test_planner_exception_uses_error_fallback(monkeypatch) -> None:
@@ -324,14 +412,52 @@ def test_node_factory_resolves_only_allowlisted_collectors() -> None:
                     priority=2,
                     required=True,
                 ),
+                EvidenceRequest(
+                    category=EvidenceCategory.INCIDENT_HISTORY,
+                    reason="Compare bounded prior outcomes for this exact alert identity.",
+                    priority=3,
+                    required=True,
+                ),
             ],
             planner_source="provider_fallback",
         ),
     )
     builders = build_node_factory().resolve_evidence_builders(state=state)
 
-    assert [name for name, _ in builders] == ["dq_history", "dbt_lineage"]
+    assert [name for name, _ in builders] == [
+        "dq_history",
+        "dbt_lineage",
+        "incident_history",
+    ]
     assert state.errors == []
+
+
+def test_node_factory_routes_schema_alert_to_schema_specific_collector() -> None:
+    """
+    Ensure schema evidence plans resolve through the hardcoded collector allowlist.
+
+    Returns:
+        None.
+    """
+    state = TriageState(
+        alert=build_schema_alert(),
+        evidence_plan=EvidencePlan(
+            investigation_question="Which persisted schema findings explain this contract alert?",
+            requests=[
+                EvidenceRequest(
+                    category=EvidenceCategory.SCHEMA_DRIFT,
+                    reason="Read exact persisted schema contract findings.",
+                    priority=1,
+                    required=True,
+                )
+            ],
+            planner_source="provider_fallback",
+        ),
+    )
+    builders = build_node_factory().resolve_evidence_builders(state=state)
+
+    assert [name for name, _ in builders] == ["schema_drift"]
+    assert builders[0][1].__name__ == "collect_schema_drift_for_state"
 
 
 def test_report_contains_auditable_evidence_plan() -> None:

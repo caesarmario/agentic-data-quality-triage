@@ -30,6 +30,7 @@ from agent.graph import (
 )
 from agent.checkpointing import (
     CHECKPOINT_MODE_OFF,
+    build_checkpoint_replay_thread_id,
     build_checkpoint_thread_id,
     load_checkpoint_settings,
 )
@@ -185,12 +186,14 @@ def run_single_alert_triage(
         )
 
     logger.info(
-        "Running single alert triage | alert_id=%s alert_key=%s checkpoint_mode=%s checkpoint_thread_id=%s resume=%s",
+        "Running single alert triage | alert_id=%s alert_key=%s checkpoint_mode=%s "
+        "checkpoint_thread_id=%s resume=%s replay_checkpoint_id=%s",
         alert_id,
         alert_key,
         checkpoint_settings.mode,
         checkpoint_thread_id or "disabled",
         args.checkpoint_resume,
+        clean_optional(args.checkpoint_replay_id) or "none",
     )
 
     report = run_triage(
@@ -204,7 +207,18 @@ def run_single_alert_triage(
         checkpoint_busy_timeout_ms=checkpoint_settings.busy_timeout_ms,
         checkpoint_thread_id=checkpoint_thread_id,
         checkpoint_resume=args.checkpoint_resume,
+        checkpoint_replay_id=clean_optional(args.checkpoint_replay_id),
+        checkpoint_replay_request_id=clean_optional(args.checkpoint_replay_request_id),
     )
+
+    replay_thread_id = ""
+
+    if checkpoint_thread_id and clean_optional(args.checkpoint_replay_id):
+        replay_thread_id = build_checkpoint_replay_thread_id(
+            source_thread_id=checkpoint_thread_id,
+            source_checkpoint_id=str(args.checkpoint_replay_id),
+            replay_request_id=str(args.checkpoint_replay_request_id),
+        )
 
     return {
         "status": "success",
@@ -219,6 +233,9 @@ def run_single_alert_triage(
         "checkpoint_mode": checkpoint_settings.mode,
         "checkpoint_thread_id": checkpoint_thread_id or "",
         "checkpoint_resume_requested": args.checkpoint_resume,
+        "checkpoint_replay_id": clean_optional(args.checkpoint_replay_id) or "",
+        "checkpoint_replay_request_id": clean_optional(args.checkpoint_replay_request_id) or "",
+        "checkpoint_replay_thread_id": replay_thread_id,
     }
 
 
@@ -296,9 +313,11 @@ def run_batch_triage(args: argparse.Namespace) -> dict[str, Any]:
     alert_id  = clean_optional(args.alert_id)
     alert_key = clean_optional(args.alert_key)
     config    = build_runtime_config(args)
+    replay_id      = clean_optional(args.checkpoint_replay_id)
+    replay_request = clean_optional(args.checkpoint_replay_request_id)
 
-    if not enabled and not alert_id and not alert_key:
-        logger.info("Triage disabled by flag; skipping alert scan")
+    if not enabled:
+        logger.info("Triage disabled by flag; skipping all alert execution")
 
         return {
             "status": "skipped",
@@ -306,6 +325,13 @@ def run_batch_triage(args: argparse.Namespace) -> dict[str, Any]:
             "results": [],
             "triaged_count": 0,
         }
+
+    if replay_id or replay_request:
+        if not replay_id or not replay_request:
+            raise ValueError("Historical checkpoint replay requires both checkpoint and request identifiers.")
+
+        if bool(alert_id) == bool(alert_key):
+            raise ValueError("Historical checkpoint replay requires exactly one explicit alert_id or alert_key.")
 
     if alert_id or alert_key:
         results = [run_single_alert_triage(alert_id=alert_id, alert_key=alert_key, args=args, config=config)]
@@ -376,6 +402,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--checkpoint-resume",
         action="store_true",
         help="Resume each derived checkpoint thread instead of starting it.",
+    )
+    parser.add_argument(
+        "--checkpoint-replay-id",
+        default=None,
+        help="Exact historical checkpoint id selected for branched replay.",
+    )
+    parser.add_argument(
+        "--checkpoint-replay-request-id",
+        default=None,
+        help="Stable request id used to derive the replay child thread.",
     )
 
     return parser

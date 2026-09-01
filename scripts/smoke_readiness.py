@@ -40,6 +40,10 @@ DEFAULT_CLICKHOUSE_TABLES = [
     "dq.agent_audit_log",
     "dq.approval_requests",
     "dq.metadata_assets",
+    "dq.schema_snapshots",
+    "dq.schema_drift_results",
+    "dq.agent_run_context_events",
+    "dq.incident_memory",
 ]
 
 DEFAULT_S3_BUCKETS = [
@@ -54,13 +58,26 @@ DEFAULT_CH_UI_HEALTH_URL = os.getenv(
     "CH_UI_HEALTH_URL",
     "http://ch-ui:3488",
 )
+DEFAULT_STREAMLIT_HEALTH_URL = os.getenv(
+    "STREAMLIT_HEALTH_URL",
+    "http://streamlit:8501/_stcore/health",
+)
 DEFAULT_API_HEALTH_URL = os.getenv(
     "CONTROL_PLANE_API_HEALTH_URL",
     "http://api:8000/health",
 )
+DEFAULT_API_DAILY_SUMMARY_URL = os.getenv(
+    "CONTROL_PLANE_API_DAILY_SUMMARY_URL",
+    "http://api:8000/api/v1/summaries/daily?dt=2026-06-10",
+)
 DEFAULT_API_LIFE_HISTORY_URL = os.getenv(
     "CONTROL_PLANE_API_LIFE_HISTORY_URL",
     "http://api:8000/api/v1/evaluations/life?lookback_days=30&limit=1",
+)
+DEFAULT_API_INCIDENT_HISTORY_URL = os.getenv(
+    "CONTROL_PLANE_API_INCIDENT_HISTORY_URL",
+    "http://api:8000/api/v1/incidents/history?"
+    "alert_reference=DQ-READINESS-000000&lookback_days=30&limit=1",
 )
 DEFAULT_API_METADATA_ASSET_URL = os.getenv(
     "CONTROL_PLANE_API_METADATA_ASSET_URL",
@@ -323,17 +340,18 @@ def check_control_plane_api(
     opener: Any = urlopen,
 ) -> list[ReadinessCheck]:
     """
-    Verify the control-plane health and one representative read-only route.
+    Verify the control-plane health and representative read-only routes.
 
     Args:
         timeout_seconds: Bounded timeout applied to each HTTP request.
         opener: urllib-compatible opener injected by tests.
 
     Returns:
-        Health, LIFE history, metadata asset, and dbt blast-radius readiness checks.
+        Health, daily summary, LIFE history, incident history, metadata, and
+        blast-radius checks.
     """
     logger.info(
-        "Checking control-plane API health, LIFE history, metadata, and dbt blast-radius routes"
+        "Checking control-plane API health, daily summary, LIFE history, incident history, metadata, and dbt blast-radius routes"
     )
 
     return [
@@ -344,8 +362,20 @@ def check_control_plane_api(
             opener=opener,
         ),
         check_http_service(
+            service_name="control-plane-daily-summary",
+            url=DEFAULT_API_DAILY_SUMMARY_URL,
+            timeout_seconds=timeout_seconds,
+            opener=opener,
+        ),
+        check_http_service(
             service_name="control-plane-life-history",
             url=DEFAULT_API_LIFE_HISTORY_URL,
+            timeout_seconds=timeout_seconds,
+            opener=opener,
+        ),
+        check_http_service(
+            service_name="control-plane-incident-history",
+            url=DEFAULT_API_INCIDENT_HISTORY_URL,
             timeout_seconds=timeout_seconds,
             opener=opener,
         ),
@@ -430,6 +460,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-clickhouse", action="store_true", help="Skip ClickHouse table checks.")
     parser.add_argument("--skip-s3", action="store_true", help="Skip SeaweedFS S3 bucket checks.")
     parser.add_argument("--skip-ch-ui", action="store_true", help="Skip CH-UI HTTP readiness check.")
+    parser.add_argument("--skip-streamlit", action="store_true", help="Skip Streamlit HTTP readiness check.")
     parser.add_argument(
         "--require-api",
         action="store_true",
@@ -471,6 +502,14 @@ def main() -> None:
             check_http_service(
                 service_name="ch-ui",
                 url=DEFAULT_CH_UI_HEALTH_URL,
+            )
+        )
+
+    if not args.skip_streamlit:
+        checks.append(
+            check_http_service(
+                service_name="streamlit",
+                url=DEFAULT_STREAMLIT_HEALTH_URL,
             )
         )
 

@@ -7,11 +7,14 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import sys
+import tempfile
+import time
 from pathlib import Path
-from typing import Any, Callable, Literal, Sequence
+from typing import Any, Callable, Iterator, Literal, Sequence
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -24,7 +27,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.llm.client import LlmResponse, run_llm_task
-from agent.llm.config import load_model_routing_config
+from agent.llm.config import load_model_routing_config, resolve_route
+from agent.llm.costing import estimate_cost_usd, estimate_tokens
+from agent.supervisor.budgets import supervisor_llm_budget_scope
 from agent.tools.audit_log import build_llm_route_audit_payload, write_agent_audit_event
 from pipelines.common.clickhouse import build_clickhouse_client
 from pipelines.common.logging import logger
@@ -35,6 +40,12 @@ SMOKE_ACTION    = "llm_provider_smoke"
 SMOKE_TOOL_NAME = "llm_router"
 
 DEFAULT_SMOKE_ROUTE = "cheap_summary"
+SMOKE_ROUTE_NAMES = ("evidence_summary", "cheap_summary")
+EXTERNAL_SMOKE_ROUTE_NAMES = ("cheap_summary",)
+MAX_EXTERNAL_SMOKE_MODEL_CALLS = 1
+MAX_EXTERNAL_SMOKE_TOTAL_TOKENS = 4_000
+MAX_EXTERNAL_SMOKE_ESTIMATED_COST_USD = 0.01
+MAX_EXTERNAL_SMOKE_LATENCY_MS = 120_000
 SMOKE_SYSTEM_PROMPT = (
     "You are validating a data reliability copilot route. "
     "Answer briefly using only the supplied synthetic context."
@@ -87,6 +98,9 @@ class ProviderSmokeResult(BaseModel):
         content_sha256: Stable hash proving non-empty response generation.
         content_preview: Short sanitized response preview for Airflow logs.
         structured_output_status: Structured-output status recorded by the router.
+        external_provider_smoke: Whether this run explicitly allowed one external provider call.
+        projected_tokens: Preflight aggregate input and maximum output token estimate.
+        projected_cost_usd: Preflight estimated maximum cost in USD.
     """
 
     status: SmokeStatus
@@ -112,6 +126,9 @@ class ProviderSmokeResult(BaseModel):
     content_sha256: str                          = ""
     content_preview: str                         = ""
     structured_output_status: str                = ""
+    external_provider_smoke: bool                = False
+    projected_tokens: int                         = 0
+    projected_cost_usd: float                     = 0.0
 
 
 # --- Defining Exceptions
@@ -145,6 +162,15 @@ class ProviderSmokeRequirementError(RuntimeError):
         """
         super().__init__(message)
         self.result = result
+
+
+class ProviderSmokeBudgetError(ProviderSmokeRequirementError):
+    """
+    Represent a smoke run that exceeded its bounded external-call contract.
+
+    The audit event is written before this error is raised so Airflow retains
+    the rejected token and cost evidence without exposing provider secrets.
+    """
 
 
 # --- Building Sanitized Results
@@ -202,6 +228,9 @@ def build_smoke_result(
     requested_model: str,
     require_provider: bool,
     force_heuristic: bool,
+    external_provider_smoke: bool = False,
+    projected_tokens: int = 0,
+    projected_cost_usd: float = 0.0,
 ) -> ProviderSmokeResult:
     """
     Convert a normalized LLM response into a secret-safe smoke result.
@@ -213,6 +242,9 @@ def build_smoke_result(
         requested_model: Model configured for the requested route.
         require_provider: Whether fallback is allowed.
         force_heuristic: Whether heuristic execution was forced.
+        external_provider_smoke: Whether this run explicitly permitted one provider call.
+        projected_tokens: Preflight aggregate token estimate for external execution.
+        projected_cost_usd: Preflight maximum cost estimate for external execution.
 
     Returns:
         Sanitized provider smoke result.
@@ -259,6 +291,9 @@ def build_smoke_result(
         content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
         content_preview=build_content_preview(content),
         structured_output_status=str(metadata.get("structured_output_status") or ""),
+        external_provider_smoke=external_provider_smoke,
+        projected_tokens=projected_tokens,
+        projected_cost_usd=projected_cost_usd,
     )
 
 
@@ -307,6 +342,7 @@ def write_smoke_audit_event(
             "requested_provider": result.requested_provider,
             "require_provider": result.require_provider,
             "force_heuristic": result.force_heuristic,
+            "external_provider_smoke": result.external_provider_smoke,
             "context_classification": SMOKE_CONTEXT["data_classification"],
         },
         output_payload=result.model_dump(mode="json"),
@@ -321,6 +357,7 @@ def write_failed_execution_audit_event(
     require_provider: bool,
     force_heuristic: bool,
     error_type: str,
+    external_provider_smoke: bool = False,
 ) -> None:
     """
     Persist a sanitized audit event when routing cannot return a usable response.
@@ -333,6 +370,7 @@ def write_failed_execution_audit_event(
         require_provider: Whether strict provider execution was required.
         force_heuristic: Whether heuristic execution was forced.
         error_type: Exception class name only, without raw provider text.
+        external_provider_smoke: Whether this run explicitly permitted one provider call.
 
     Returns:
         None.
@@ -350,10 +388,120 @@ def write_failed_execution_audit_event(
             "requested_provider": requested_provider,
             "require_provider": require_provider,
             "force_heuristic": force_heuristic,
+            "external_provider_smoke": external_provider_smoke,
             "context_classification": SMOKE_CONTEXT["data_classification"],
         },
         output_payload={"error_type": error_type},
         error_message=error_type,
+    )
+
+
+# --- Validating Bounded External Smoke Execution
+def estimate_smoke_input_tokens() -> int:
+    """
+    Estimate the fixed synthetic context sent by one provider smoke request.
+
+    Returns:
+        Approximate input token count for preflight cost validation.
+    """
+    serialized_context = json.dumps(SMOKE_CONTEXT, ensure_ascii=True, sort_keys=True)
+
+    return estimate_tokens(f"{SMOKE_SYSTEM_PROMPT}\n{SMOKE_PROMPT}\n{serialized_context}")
+
+
+def validate_external_smoke_budget(route: Any) -> tuple[int, float]:
+    """
+    Validate the fixed provider-smoke budget before any external request.
+
+    Args:
+        route: Loaded route configuration for the allowlisted external smoke route.
+
+    Returns:
+        Projected aggregate token count and estimated maximum cost.
+
+    Raises:
+        ValueError: If route output, aggregate token, or estimated cost limits are unsafe.
+    """
+    input_tokens     = estimate_smoke_input_tokens()
+    projected_tokens = input_tokens + route.max_output_tokens
+    projected_cost   = estimate_cost_usd(
+        input_tokens=input_tokens,
+        output_tokens=route.max_output_tokens,
+        input_cost_per_1m_tokens=route.input_cost_per_1m_tokens,
+        output_cost_per_1m_tokens=route.output_cost_per_1m_tokens,
+    )
+
+    if route.max_output_tokens > MAX_EXTERNAL_SMOKE_TOTAL_TOKENS:
+        raise ValueError("External provider smoke route exceeds the allowed output token budget.")
+
+    if projected_tokens > MAX_EXTERNAL_SMOKE_TOTAL_TOKENS:
+        raise ValueError("External provider smoke route exceeds the 4,000 token aggregate budget.")
+
+    if projected_cost > MAX_EXTERNAL_SMOKE_ESTIMATED_COST_USD:
+        raise ValueError("External provider smoke route exceeds the USD 0.01 estimated cost budget.")
+
+    return projected_tokens, projected_cost
+
+
+@contextmanager
+def bounded_external_smoke_config(
+    config: Any,
+    route_name: str,
+) -> Iterator[Path]:
+    """
+    Create a temporary routing config that permits one external call at most.
+
+    The selected external route falls back directly to the deterministic
+    heuristic route. This prevents the normal routing chain from attempting a
+    second external provider during a failed strict smoke run.
+
+    Args:
+        config: Validated routing config loaded from the repository config file.
+        route_name: Allowlisted external smoke route name.
+
+    Yields:
+        Temporary YAML path for this single smoke invocation.
+    """
+    config_payload = config.model_dump(mode="json")
+    route_payload  = config_payload["routes"][route_name]
+
+    route_payload["fallback_route"] = "evidence_summary"
+
+    with tempfile.TemporaryDirectory(prefix="dq_llm_smoke_") as directory:
+        path = Path(directory) / "bounded_model_routing.yml"
+        path.write_text(json.dumps(config_payload), encoding="utf-8")
+
+        yield path
+
+
+def validate_external_smoke_result(result: ProviderSmokeResult) -> None:
+    """
+    Reject an external response that exceeds the post-call budget contract.
+
+    Args:
+        result: Sanitized routed smoke result.
+
+    Returns:
+        None.
+
+    Raises:
+        ProviderSmokeBudgetError: If actual tokens or estimated cost exceed limits.
+    """
+    actual_tokens = result.input_tokens + result.output_tokens
+
+    if actual_tokens <= MAX_EXTERNAL_SMOKE_TOTAL_TOKENS and (
+        result.estimated_cost_usd <= MAX_EXTERNAL_SMOKE_ESTIMATED_COST_USD
+    ):
+        return
+
+    result.status = "failed"
+
+    raise ProviderSmokeBudgetError(
+        (
+            "External provider smoke exceeded its bounded budget; "
+            f"aggregate_tokens={actual_tokens}; estimated_cost_usd={result.estimated_cost_usd:.8f}."
+        ),
+        result=result,
     )
 
 
@@ -362,6 +510,7 @@ def run_provider_smoke(
     route_name: str,
     require_provider: bool = False,
     force_heuristic: bool = False,
+    external_provider_smoke: bool = False,
     config_path: str | Path | None = None,
     client: Any | None = None,
     llm_runner: Callable[..., LlmResponse] = run_llm_task,
@@ -373,6 +522,7 @@ def run_provider_smoke(
         route_name: Route name from model_routing.yml.
         require_provider: Fail when fallback produces the final response.
         force_heuristic: Force deterministic no-LLM execution.
+        external_provider_smoke: Permit exactly one strict external provider call.
         config_path: Optional routing config path.
         client: Optional ClickHouse client override used by tests.
         llm_runner: Optional routed LLM callable override used by tests.
@@ -381,44 +531,96 @@ def run_provider_smoke(
         Sanitized successful provider smoke result.
 
     Raises:
-        ValueError: If the route is unknown or flags conflict.
+        ValueError: If the route is unsafe or execution flags conflict.
         ProviderSmokeExecutionError: If no usable routed response is produced.
         ProviderSmokeRequirementError: If strict provider execution falls back.
+        ProviderSmokeBudgetError: If actual external usage exceeds the bounded contract.
     """
     config = load_model_routing_config(config_path=config_path)
 
-    if route_name not in config.routes:
+    if route_name not in SMOKE_ROUTE_NAMES or route_name not in config.routes:
         raise ValueError(f"Unknown model route: {route_name}")
 
-    route              = config.routes[route_name]
-    requested_provider = route.provider
-    requested_model    = route.model or config.providers[requested_provider].default_model
+    route                  = config.routes[route_name]
+    requested_route        = resolve_route(route_name=route_name, config=config)
+    requested_provider     = route.provider
+    requested_model        = requested_route.model
     agent_run_id       = uuid4()
     runtime_client     = client or build_clickhouse_client()
 
     if force_heuristic and require_provider and requested_provider != "heuristic":
         raise ValueError("--force-heuristic cannot satisfy --require-provider for an external provider route.")
 
+    if external_provider_smoke and route_name not in EXTERNAL_SMOKE_ROUTE_NAMES:
+        raise ValueError("External provider smoke route is not allowlisted.")
+
+    if external_provider_smoke and not require_provider:
+        raise ValueError("External provider smoke requires strict provider execution.")
+
+    if external_provider_smoke and force_heuristic:
+        raise ValueError("External provider smoke cannot force heuristic execution.")
+
+    if not external_provider_smoke:
+        # The direct script is safe by default; only strict mode can enable provider IO.
+        force_heuristic = True
+        require_provider = False
+
+    projected_tokens   = 0
+    projected_cost_usd = 0.0
+
+    if external_provider_smoke:
+        projected_tokens, projected_cost_usd = validate_external_smoke_budget(route=route)
+
     logger.info(
-        "Starting LLM provider smoke | agent_run_id=%s route=%s requested_provider=%s requested_model=%s require_provider=%s force_heuristic=%s",
+        "Starting LLM provider smoke | agent_run_id=%s route=%s requested_provider=%s requested_model=%s external_provider_smoke=%s require_provider=%s force_heuristic=%s projected_tokens=%d projected_cost_usd=%.8f",
         agent_run_id,
         route_name,
         requested_provider,
         requested_model,
+        external_provider_smoke,
         require_provider,
         force_heuristic,
+        projected_tokens,
+        projected_cost_usd,
     )
 
     try:
-        response = llm_runner(
-            route_name=route_name,
-            prompt=SMOKE_PROMPT,
-            system_prompt=SMOKE_SYSTEM_PROMPT,
-            context=SMOKE_CONTEXT,
-            agent_run_id=agent_run_id,
-            config_path=config_path,
-            force_heuristic=force_heuristic,
-        )
+        if external_provider_smoke:
+            deadline_monotonic = time.monotonic() + (
+                MAX_EXTERNAL_SMOKE_LATENCY_MS / 1_000
+            )
+
+            # The shared ledger makes the one-call contract executable: it also
+            # disables hidden SDK retries and rejects any second external route.
+            with supervisor_llm_budget_scope(
+                max_model_calls=MAX_EXTERNAL_SMOKE_MODEL_CALLS,
+                token_budget=MAX_EXTERNAL_SMOKE_TOTAL_TOKENS,
+                estimated_cost_budget_usd=MAX_EXTERNAL_SMOKE_ESTIMATED_COST_USD,
+                deadline_monotonic=deadline_monotonic,
+            ):
+                with bounded_external_smoke_config(
+                    config=config,
+                    route_name=route_name,
+                ) as bounded_config_path:
+                    response = llm_runner(
+                        route_name=route_name,
+                        prompt=SMOKE_PROMPT,
+                        system_prompt=SMOKE_SYSTEM_PROMPT,
+                        context=SMOKE_CONTEXT,
+                        agent_run_id=agent_run_id,
+                        config_path=bounded_config_path,
+                        force_heuristic=False,
+                    )
+        else:
+            response = llm_runner(
+                route_name=route_name,
+                prompt=SMOKE_PROMPT,
+                system_prompt=SMOKE_SYSTEM_PROMPT,
+                context=SMOKE_CONTEXT,
+                agent_run_id=agent_run_id,
+                config_path=config_path,
+                force_heuristic=True,
+            )
 
     except Exception as exc:
         error_type = type(exc).__name__
@@ -439,6 +641,7 @@ def run_provider_smoke(
             require_provider=require_provider,
             force_heuristic=force_heuristic,
             error_type=error_type,
+            external_provider_smoke=external_provider_smoke,
         )
 
         raise ProviderSmokeExecutionError(
@@ -454,6 +657,7 @@ def run_provider_smoke(
             require_provider=require_provider,
             force_heuristic=force_heuristic,
             error_type="EmptyProviderResponse",
+            external_provider_smoke=external_provider_smoke,
         )
 
         raise ProviderSmokeExecutionError(
@@ -467,7 +671,16 @@ def run_provider_smoke(
         requested_model=requested_model,
         require_provider=require_provider,
         force_heuristic=force_heuristic,
+        external_provider_smoke=external_provider_smoke,
+        projected_tokens=projected_tokens,
+        projected_cost_usd=projected_cost_usd,
     )
+
+    if force_heuristic and not result.used_heuristic:
+        result.status = "failed"
+        write_smoke_audit_event(client=runtime_client, result=result)
+
+        raise ProviderSmokeExecutionError("Heuristic provider smoke unexpectedly attempted external execution.")
 
     if require_provider and not requested_provider_was_used(result):
         result.status = "failed"
@@ -489,6 +702,13 @@ def run_provider_smoke(
             ),
             result=result,
         )
+
+    if external_provider_smoke:
+        try:
+            validate_external_smoke_result(result=result)
+        except ProviderSmokeBudgetError:
+            write_smoke_audit_event(client=runtime_client, result=result)
+            raise
 
     write_smoke_audit_event(client=runtime_client, result=result)
 
@@ -517,21 +737,25 @@ def build_parser() -> argparse.ArgumentParser:
     Returns:
         Configured ArgumentParser with route and strictness controls.
     """
-    route_names = tuple(load_model_routing_config().routes)
     parser      = argparse.ArgumentParser(
         description="Run one sanitized LLM provider route smoke test with ClickHouse audit evidence."
     )
 
-    parser.add_argument("--route", default=DEFAULT_SMOKE_ROUTE, choices=route_names)
+    parser.add_argument("--route", default=DEFAULT_SMOKE_ROUTE, choices=SMOKE_ROUTE_NAMES)
     parser.add_argument(
         "--require-provider",
         action="store_true",
-        help="Fail when the configured provider is unavailable and routing falls back.",
+        help="Compatibility flag; use together with --strict-external-provider.",
     )
     parser.add_argument(
         "--force-heuristic",
         action="store_true",
         help="Force deterministic no-LLM execution for the local baseline.",
+    )
+    parser.add_argument(
+        "--strict-external-provider",
+        action="store_true",
+        help="Explicitly allow one strict external provider call for the cheap_summary route.",
     )
     parser.add_argument("--config-path", default=None, help="Optional model routing config path.")
 
@@ -550,11 +774,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     args = build_parser().parse_args(argv)
 
+    if args.require_provider and not args.strict_external_provider:
+        build_parser().error("--require-provider requires --strict-external-provider.")
+
     try:
         result = run_provider_smoke(
             route_name=args.route,
-            require_provider=args.require_provider,
+            require_provider=args.require_provider or args.strict_external_provider,
             force_heuristic=args.force_heuristic,
+            external_provider_smoke=args.strict_external_provider,
             config_path=args.config_path,
         )
 

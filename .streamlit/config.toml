@@ -1,0 +1,127 @@
+####
+## Streamlit Theme Configuration for Agentic Data Quality Triage
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+# --- Configuring Browser Behavior
+[browser]
+gatherUsageStats = false
+
+
+# --- Configuring Theme Settings Shared By Both Modes
+[theme]
+showSidebarBorder = true
+baseFontSize = 16
+baseFontWeight = 400
+
+
+# --- Configuring The Light Theme
+[theme.light]
+primaryColor = "#0B6B5B"
+backgroundColor = "#F6F8F5"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#18211B"
+linkColor = "#075E50"
+codeTextColor = "#23352C"
+codeBackgroundColor = "#EAF0EC"
+borderColor = "#CBD5CE"
+showWidgetBorder = true
+baseRadius = "12px"
+buttonRadius = "10px"
+font = "Aptos"
+headingFont = "Bahnschrift"
+codeFont = "Cascadia Mono"
+headingFontSizes = ["2.45rem", "1.85rem", "1.45rem", "1.16rem", "1rem", "0.9rem"]
+headingFontWeights = [650, 650, 600, 600, 600, 600]
+linkUnderline = false
+
+redColor = "#B9382E"
+redBackgroundColor = "#FBE9E7"
+redTextColor = "#84261F"
+orangeColor = "#A45114"
+orangeBackgroundColor = "#FCECDD"
+orangeTextColor = "#713608"
+yellowColor = "#8C6800"
+yellowBackgroundColor = "#FFF4CC"
+yellowTextColor = "#604700"
+greenColor = "#1B6E4B"
+greenBackgroundColor = "#E5F5EC"
+greenTextColor = "#14543B"
+blueColor = "#2B5CA8"
+blueBackgroundColor = "#E8EFFB"
+blueTextColor = "#1F477F"
+violetColor = "#7356A8"
+violetBackgroundColor = "#F0EBF8"
+violetTextColor = "#503B78"
+grayColor = "#58645C"
+grayBackgroundColor = "#EDF1EE"
+grayTextColor = "#3F4942"
+
+dataframeBorderColor = "#CBD5CE"
+dataframeHeaderBackgroundColor = "#EAF0EC"
+
+
+# --- Configuring The Light Sidebar
+[theme.light.sidebar]
+backgroundColor = "#EEF3EF"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#18211B"
+primaryColor = "#0B6B5B"
+borderColor = "#CBD5CE"
+codeBackgroundColor = "#E2EAE5"
+
+
+# --- Configuring The Dark Theme
+[theme.dark]
+primaryColor = "#0F766E"
+backgroundColor = "#0B1210"
+secondaryBackgroundColor = "#141D19"
+textColor = "#EBF4EF"
+linkColor = "#70DCC7"
+codeTextColor = "#D7E9DF"
+codeBackgroundColor = "#1C2923"
+borderColor = "#34443C"
+showWidgetBorder = true
+baseRadius = "12px"
+buttonRadius = "10px"
+font = "Aptos"
+headingFont = "Bahnschrift"
+codeFont = "Cascadia Mono"
+headingFontSizes = ["2.45rem", "1.85rem", "1.45rem", "1.16rem", "1rem", "0.9rem"]
+headingFontWeights = [650, 650, 600, 600, 600, 600]
+linkUnderline = false
+
+redColor = "#FF897F"
+redBackgroundColor = "#3A1E1C"
+redTextColor = "#FFC1BB"
+orangeColor = "#FFAF66"
+orangeBackgroundColor = "#382518"
+orangeTextColor = "#FFD1A5"
+yellowColor = "#E5C562"
+yellowBackgroundColor = "#342D16"
+yellowTextColor = "#F6DEA0"
+greenColor = "#5FD09A"
+greenBackgroundColor = "#173126"
+greenTextColor = "#A9E8C8"
+blueColor = "#7AA9F7"
+blueBackgroundColor = "#192A45"
+blueTextColor = "#BED4FA"
+violetColor = "#B49AE8"
+violetBackgroundColor = "#2B2340"
+violetTextColor = "#DACCF4"
+grayColor = "#97A69D"
+grayBackgroundColor = "#202B25"
+grayTextColor = "#C7D2CB"
+
+dataframeBorderColor = "#34443C"
+dataframeHeaderBackgroundColor = "#1C2923"
+
+
+# --- Configuring The Dark Sidebar
+[theme.dark.sidebar]
+backgroundColor = "#0F1714"
+secondaryBackgroundColor = "#18231E"
+textColor = "#EBF4EF"
+primaryColor = "#0F766E"
+borderColor = "#34443C"
+codeBackgroundColor = "#1C2923"

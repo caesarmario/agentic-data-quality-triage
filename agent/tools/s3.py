@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from botocore.exceptions import ClientError
+
 
 # --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -26,16 +28,25 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from agent.display import build_report_id
 from agent.state import TriageReport
-from agent.tools.audit_log import write_agent_audit_event
+from agent.tools.audit_log import build_audit_idempotency_key, write_agent_audit_event
 from pipelines.common.clickhouse import build_clickhouse_client
 from pipelines.common.logging import logger
 from pipelines.seeding.upload_to_s3 import build_s3_client
 
 
 # --- Defining Constants
-TOOL_NAME                = "s3_artifacts"
-DEFAULT_ARTIFACTS_BUCKET = "dq-artifacts"
-DEFAULT_REPORT_PREFIX    = "agent-reports"
+TOOL_NAME                 = "s3_artifacts"
+DEFAULT_ARTIFACTS_BUCKET  = "dq-artifacts"
+DEFAULT_REPORT_PREFIX     = "agent-reports"
+CONTENT_SHA256_METADATA   = "content-sha256"
+WRITE_POLICY_METADATA     = "write-policy"
+IMMUTABLE_KEY_POLICY      = "immutable-key-sha256"
+MAX_ARTIFACT_VERIFY_BYTES = 10 * 1024 * 1024
+
+
+# --- Defining Exceptions
+class ArtifactConflictError(RuntimeError):
+    """Raised when an immutable S3 key already contains different content."""
 
 
 # --- Defining Functions
@@ -103,6 +114,110 @@ def hash_text(value: str, length: int = 12) -> str:
     return digest[:safe_length]
 
 
+def hash_artifact_body(body: bytes) -> str:
+    """
+    Build the full SHA-256 digest for one artifact body.
+
+    Args:
+        body: Raw artifact bytes.
+
+    Returns:
+        Lowercase SHA-256 digest.
+    """
+    return hashlib.sha256(body).hexdigest()
+
+
+def is_s3_not_found_error(exc: ClientError) -> bool:
+    """
+    Return whether a boto3 ClientError represents a missing S3 object.
+
+    Args:
+        exc: ClientError raised by head_object or get_object.
+
+    Returns:
+        True for common S3-compatible missing-object codes.
+    """
+    error       = exc.response.get("Error", {})
+    error_code  = str(error.get("Code", ""))
+    status_code = int(exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0) or 0)
+
+    return error_code in {"404", "NoSuchKey", "NotFound"} or status_code == 404
+
+
+def read_existing_artifact_state(
+    client: Any,
+    bucket: str,
+    key: str,
+) -> tuple[str, int] | None:
+    """
+    Read the digest and byte length for an existing immutable artifact.
+
+    Args:
+        client: boto3-compatible S3 client.
+        bucket: S3 bucket name.
+        key: S3 object key.
+
+    Returns:
+        Tuple of SHA-256 digest and byte length, or None when the key is absent.
+
+    Raises:
+        ArtifactConflictError: If an existing artifact is too large or has invalid metadata.
+        ClientError: If S3 returns an error other than object-not-found.
+    """
+    try:
+        head = client.head_object(Bucket=bucket, Key=key)
+
+    except ClientError as exc:
+        if is_s3_not_found_error(exc):
+            return None
+
+        raise
+
+    content_length = int(head.get("ContentLength", 0) or 0)
+    metadata       = {str(name).lower(): str(value) for name, value in (head.get("Metadata") or {}).items()}
+    stored_digest  = metadata.get(CONTENT_SHA256_METADATA, "").lower()
+
+    if stored_digest:
+        if len(stored_digest) != 64 or any(char not in "0123456789abcdef" for char in stored_digest):
+            raise ArtifactConflictError(f"Existing S3 artifact has invalid SHA-256 metadata: s3://{bucket}/{key}")
+
+        return stored_digest, content_length
+
+    if content_length > MAX_ARTIFACT_VERIFY_BYTES:
+        raise ArtifactConflictError(
+            f"Existing S3 artifact exceeds the bounded digest verification size: s3://{bucket}/{key}"
+        )
+
+    response = client.get_object(Bucket=bucket, Key=key)
+    body     = response["Body"].read(MAX_ARTIFACT_VERIFY_BYTES + 1)
+
+    if len(body) > MAX_ARTIFACT_VERIFY_BYTES:
+        raise ArtifactConflictError(
+            f"Existing S3 artifact exceeds the bounded digest verification size: s3://{bucket}/{key}"
+        )
+
+    return hash_artifact_body(body), len(body)
+
+
+def serialize_json_artifact(payload: dict[str, Any] | list[Any]) -> str:
+    """
+    Serialize a JSON artifact deterministically for stable content hashing.
+
+    Args:
+        payload: JSON-serializable dictionary or list.
+
+    Returns:
+        Pretty-printed JSON with stable key order.
+    """
+    return json.dumps(
+        payload,
+        indent=2,
+        ensure_ascii=True,
+        default=str,
+        sort_keys=True,
+    )
+
+
 def put_text_artifact(
     bucket: str,
     key: str,
@@ -111,7 +226,11 @@ def put_text_artifact(
     endpoint_url: str | None = None,
 ) -> str:
     """
-    Write a text artifact to S3-compatible storage.
+    Write or reuse one immutable text artifact in S3-compatible storage.
+
+    This contract protects sequential retries and replays. SeaweedFS does not expose
+    a portable conditional create through this helper, so concurrent writers are not
+    represented as distributed exactly-once behavior.
 
     Args:
         bucket: Target S3 bucket.
@@ -123,10 +242,41 @@ def put_text_artifact(
     Returns:
         S3 URI of the stored object.
     """
-    client = build_s3_client(endpoint_url=endpoint_url)
-    body   = text.encode("utf-8")
+    client      = build_s3_client(endpoint_url=endpoint_url)
+    body        = text.encode("utf-8")
+    body_digest = hash_artifact_body(body)
+    s3_uri      = f"s3://{bucket}/{key}"
 
-    logger.info("Writing text artifact to S3 | bucket=%s key=%s bytes=%d", bucket, key, len(body))
+    existing_state = read_existing_artifact_state(
+        client=client,
+        bucket=bucket,
+        key=key,
+    )
+
+    if existing_state is not None:
+        existing_digest, existing_length = existing_state
+
+        if existing_digest != body_digest or existing_length != len(body):
+            raise ArtifactConflictError(
+                f"Immutable S3 artifact key already contains different content: {s3_uri}"
+            )
+
+        logger.info(
+            "Reusing immutable S3 artifact | uri=%s sha256=%s bytes=%d",
+            s3_uri,
+            body_digest,
+            len(body),
+        )
+
+        return s3_uri
+
+    logger.info(
+        "Writing immutable text artifact to S3 | bucket=%s key=%s sha256=%s bytes=%d",
+        bucket,
+        key,
+        body_digest,
+        len(body),
+    )
 
     # Explicit ContentType keeps Markdown/JSON artifacts readable in S3-compatible UIs.
     client.put_object(
@@ -134,10 +284,22 @@ def put_text_artifact(
         Key=key,
         Body=body,
         ContentType=content_type,
+        Metadata={
+            CONTENT_SHA256_METADATA: body_digest,
+            WRITE_POLICY_METADATA: IMMUTABLE_KEY_POLICY,
+        },
     )
 
-    s3_uri = f"s3://{bucket}/{key}"
-    logger.info("Text artifact written | uri=%s", s3_uri)
+    persisted_state = read_existing_artifact_state(
+        client=client,
+        bucket=bucket,
+        key=key,
+    )
+
+    if persisted_state != (body_digest, len(body)):
+        raise ArtifactConflictError(f"S3 artifact readback did not match the written content: {s3_uri}")
+
+    logger.info("Immutable text artifact written and verified | uri=%s sha256=%s", s3_uri, body_digest)
 
     return s3_uri
 
@@ -160,7 +322,7 @@ def put_json_artifact(
     Returns:
         S3 URI of the stored object.
     """
-    text = json.dumps(payload, indent=2, ensure_ascii=True, default=str)
+    text = serialize_json_artifact(payload)
 
     return put_text_artifact(
         bucket=bucket,
@@ -186,9 +348,9 @@ def build_report_artifact_keys(
         Tuple of Markdown key and JSON key.
     """
     dt_token          = report.alert.dt.isoformat() if report.alert.dt else "unknown"
-    alert_key_hash   = hash_text(report.alert.alert_key)
-    agent_run_id     = str(report.agent_run_id)
-    report_id        = report.report_id or f"RPT-{hash_text(agent_run_id, length=8).upper()}"
+    alert_key_hash    = hash_text(report.alert.alert_key)
+    agent_run_id      = str(report.agent_run_id)
+    report_id         = report.report_id or f"RPT-{hash_text(agent_run_id, length=8).upper()}"
     normalized_prefix = prefix.strip("/")
 
     base_key = (
@@ -269,6 +431,11 @@ def store_triage_report(
     )
 
     try:
+        report_payload = report.model_dump(mode="json")
+        json_text      = serialize_json_artifact(report_payload)
+        markdown_hash  = hash_artifact_body(report.markdown_report.encode("utf-8"))
+        json_hash      = hash_artifact_body(json_text.encode("utf-8"))
+
         markdown_uri = put_text_artifact(
             bucket=resolved_bucket,
             key=markdown_key,
@@ -276,10 +443,11 @@ def store_triage_report(
             content_type="text/markdown; charset=utf-8",
             endpoint_url=endpoint_url,
         )
-        json_uri = put_json_artifact(
+        json_uri = put_text_artifact(
             bucket=resolved_bucket,
             key=json_key,
-            payload=report.model_dump(mode="json"),
+            text=json_text,
+            content_type="application/json; charset=utf-8",
             endpoint_url=endpoint_url,
         )
         duration_ms = int((time.monotonic() - started_monotonic) * 1000)
@@ -292,7 +460,19 @@ def store_triage_report(
             "json_key": json_key,
             "markdown_report_s3_uri": markdown_uri,
             "json_report_s3_uri": json_uri,
+            "markdown_sha256": markdown_hash,
+            "json_sha256": json_hash,
+            "idempotency_contract": IMMUTABLE_KEY_POLICY,
         }
+
+        audit_idempotency_key = build_audit_idempotency_key(
+            "store_triage_report",
+            report.agent_run_id,
+            markdown_uri,
+            json_uri,
+            markdown_hash,
+            json_hash,
+        )
 
         write_agent_audit_event(
             client=client,
@@ -303,10 +483,17 @@ def store_triage_report(
             alert_key=report.alert.alert_key,
             tool_name=TOOL_NAME,
             duration_ms=duration_ms,
-            input_payload={"bucket": resolved_bucket, "prefix": prefix},
+            input_payload={
+                "bucket": resolved_bucket,
+                "prefix": prefix,
+                "idempotency_contract": IMMUTABLE_KEY_POLICY,
+                "markdown_sha256": markdown_hash,
+                "json_sha256": json_hash,
+            },
             output_payload=result,
             row_count=2,
             report_s3_uri=markdown_uri,
+            idempotency_key=audit_idempotency_key,
         )
 
         logger.info("Triage report artifacts stored | markdown_uri=%s json_uri=%s", markdown_uri, json_uri)

@@ -70,6 +70,14 @@ DENYLISTED_KEYWORDS = (
     "call",
 )
 
+DENYLISTED_READ_PATTERNS = {
+    "external_table_function": (
+        r"\b(?:s3|url|file|remote|remoteSecure|mysql|postgresql|jdbc|odbc|hdfs|"
+        r"azureBlobStorage|gcs|deltaLake|iceberg|cluster|clusterAllReplicas)\s*\("
+    ),
+    "outfile_clause": r"\binto\s+outfile\b",
+}
+
 LARGE_TABLE_DATE_COLUMNS = {
     "dq.raw_orders": ("dt", "order_date"),
     "dq.stg_orders": ("dt", "order_date"),
@@ -257,6 +265,24 @@ def assert_no_denylisted_keywords(sql: str) -> None:
             raise GuardrailViolation(f"Denied SQL keyword detected: {keyword}")
 
 
+def assert_no_unsafe_read_patterns(sql: str) -> None:
+    """
+    Reject read-looking SQL that can access external systems or write files.
+
+    Args:
+        sql: Normalized SQL statement.
+
+    Returns:
+        None.
+
+    Raises:
+        GuardrailViolation: If a denied table function or output clause is present.
+    """
+    for pattern_name, pattern in DENYLISTED_READ_PATTERNS.items():
+        if re.search(pattern, sql, flags=re.IGNORECASE):
+            raise GuardrailViolation(f"Denied SQL read pattern detected: {pattern_name}")
+
+
 def mentioned_large_tables(sql: str) -> list[str]:
     """
     Identify guarded large tables referenced by a SQL statement.
@@ -429,6 +455,7 @@ def guard_sql(sql: str, config: SqlGuardrailConfig | None = None) -> tuple[str, 
 
     assert_allowed_query_prefix(normalized_sql, resolved_config)
     assert_no_denylisted_keywords(normalized_sql)
+    assert_no_unsafe_read_patterns(normalized_sql)
     assert_required_date_filters(normalized_sql, resolved_config)
 
     guarded_sql, applied = enforce_limit(normalized_sql, resolved_config.hard_limit)

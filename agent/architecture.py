@@ -39,6 +39,15 @@ class SpecialistNodeSpec:
 # --- Defining Constants
 SUPERVISOR_ARCHITECTURE_NAME = "supervisor_lite_langgraph_triage"
 SHARED_STATE_MODEL           = "TriageState"
+BOUNDED_SPECIALIST_PILOTS    = (
+    "incident_triage_agent",
+    "metadata_lineage_agent",
+)
+CROSS_AGENT_CONTRACTS        = (
+    "AgentTaskEnvelope",
+    "AgentResultEnvelope",
+    "SupervisorState",
+)
 
 SPECIALIST_NODE_SPECS = (
     SpecialistNodeSpec(
@@ -62,8 +71,18 @@ SPECIALIST_NODE_SPECS = (
     SpecialistNodeSpec(
         node_name="gather_context",
         specialist_name="Evidence Collection Specialist",
-        responsibility="Map the EvidencePlan to deterministic SQL, DQ history, pipeline run, and dbt lineage collectors.",
-        tools=("clickhouse_sql", "dq_history", "pipeline_runs", "dbt_lineage"),
+        responsibility=(
+            "Map the EvidencePlan to deterministic SQL, DQ history, incident history, pipeline run, "
+            "dbt lineage, and schema drift collectors."
+        ),
+        tools=(
+            "clickhouse_sql",
+            "dq_history",
+            "incident_history",
+            "pipeline_runs",
+            "dbt_lineage",
+            "schema_drift",
+        ),
         reads_state=("alert", "evidence_plan", "agent_run_id"),
         writes_state=("evidence", "errors"),
         handoff_contract="Hypothesis nodes receive evidence items with tool names, summaries, rows, and audit trails.",
@@ -89,8 +108,8 @@ SPECIALIST_NODE_SPECS = (
     SpecialistNodeSpec(
         node_name="collect_extra_evidence",
         specialist_name="Extra Evidence Specialist",
-        responsibility="Run one bounded additional evidence query when confidence is below threshold.",
-        tools=("clickhouse_sql",),
+        responsibility="Retry one bounded alert-specific evidence query when confidence is below threshold.",
+        tools=("clickhouse_sql", "schema_drift"),
         reads_state=("alert", "evidence_iterations", "agent_run_id"),
         writes_state=("evidence", "evidence_iterations", "errors"),
         handoff_contract="Hypothesis generation receives one more bounded evidence item and an incremented loop count.",
@@ -164,6 +183,11 @@ def architecture_summary() -> dict[str, object]:
         "node_order": list(EXPECTED_NODE_ORDER),
         "handoff_style": "state_based_explicit_handoff",
         "autonomy_boundary": "single_supervisor_graph_not_fully_autonomous_boss_child_agents",
+        "bounded_specialist_pilots": list(BOUNDED_SPECIALIST_PILOTS),
+        "cross_agent_contracts": list(CROSS_AGENT_CONTRACTS),
+        "default_runtime": "supervisor_lite",
+        "control_plane_supervisor_status": "manual_airflow_pilot",
+        "control_plane_routing": "deterministic_single_handoff",
     }
 
     logger.info("Supervisor-lite architecture summary built | summary=%s", summary)

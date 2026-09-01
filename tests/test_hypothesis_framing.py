@@ -78,7 +78,7 @@ def build_llm_response(structured_output: dict[str, object] | None) -> LlmRespon
         agent_run_id=uuid4(),
         route_name=HYPOTHESIS_FRAMING_ROUTE,
         provider="gemini" if structured_output else "heuristic",
-        model="gemini-2.5-flash" if structured_output else "heuristic-v1",
+        model="gemini-3.5-flash-lite" if structured_output else "heuristic-v1",
         content=json.dumps(structured_output) if structured_output else "Deterministic hypothesis fallback.",
         structured_output=structured_output,
         used_heuristic=structured_output is None,

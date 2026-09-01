@@ -55,6 +55,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-sqlite-path", default=None, help="Absolute SQLite checkpoint path override.")
     parser.add_argument("--checkpoint-thread-id", default=None, help="Stable checkpoint thread identifier.")
     parser.add_argument("--checkpoint-resume", action="store_true", help="Resume an existing checkpoint thread.")
+    parser.add_argument(
+        "--checkpoint-replay-id",
+        default=None,
+        help="Exact historical checkpoint id selected for branched replay.",
+    )
+    parser.add_argument(
+        "--checkpoint-replay-request-id",
+        default=None,
+        help="Stable request id used to derive the replay child thread.",
+    )
 
     return parser
 
@@ -97,6 +107,8 @@ def main() -> None:
         checkpoint_sqlite_path=args.checkpoint_sqlite_path,
         checkpoint_thread_id=args.checkpoint_thread_id,
         checkpoint_resume=args.checkpoint_resume,
+        checkpoint_replay_id=args.checkpoint_replay_id,
+        checkpoint_replay_request_id=args.checkpoint_replay_request_id,
     )
     output = {
         "status": "success",
@@ -111,6 +123,8 @@ def main() -> None:
         "checkpoint_mode": args.checkpoint_mode,
         "checkpoint_thread_id": args.checkpoint_thread_id or "",
         "checkpoint_resume_requested": args.checkpoint_resume,
+        "checkpoint_replay_id": args.checkpoint_replay_id or "",
+        "checkpoint_replay_request_id": args.checkpoint_replay_request_id or "",
     }
 
     print(json.dumps(output, indent=2, default=str))

@@ -28,6 +28,7 @@ from agent.checkpointing import (
     checkpoint_exists,
     load_checkpoint_settings,
     open_checkpoint_saver,
+    replay_historical_checkpoint_branch,
     resume_checkpointed_graph,
     summarize_checkpoint_history,
     validate_checkpoint_thread_id,
@@ -38,7 +39,16 @@ from pipelines.common.logging import logger
 # --- Defining Constants
 DEFAULT_SMOKE_DB_PATH     = "/var/lib/agent-checkpoints/smoke.sqlite3"
 DEFAULT_MARKER_DIRECTORY = "/var/lib/agent-checkpoints/smoke-markers"
-SMOKE_PHASES             = ("initialize", "resume", "resume-complete", "verify")
+HISTORICAL_REPLAY_REQUEST_ID = "historical-replay-request-001"
+
+SMOKE_PHASES = (
+    "initialize",
+    "resume",
+    "resume-complete",
+    "historical-replay",
+    "historical-replay-repeat",
+    "verify",
+)
 
 
 # --- Defining State Contract
@@ -108,38 +118,83 @@ def read_marker_count(marker_path: Path) -> int:
     return count
 
 
-def increment_marker(marker_path: Path, thread_id: str) -> int:
+def apply_marker_once(marker_path: Path, thread_id: str) -> int:
     """
-    Atomically increment the smoke side-effect marker.
+    Apply or reuse one idempotent smoke side-effect marker.
+
+    The marker simulates an external system accepting an idempotency key. A
+    historical replay may execute the graph node again, but it must reuse the
+    already-applied external effect instead of incrementing it.
 
     Args:
         marker_path: Marker JSON file path.
         thread_id: Validated checkpoint thread identifier.
 
     Returns:
-        Updated external effect count.
+        External effect count, which is always one after successful application.
+
+    Raises:
+        ValueError: If an existing marker belongs to another thread or is not exactly one.
     """
-    current_count = read_marker_count(marker_path)
-    next_count    = current_count + 1
+    validated_thread = validate_checkpoint_thread_id(thread_id)
 
     marker_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = marker_path.with_suffix(".tmp")
-    temporary_path.write_text(
-        json.dumps(
-            {
-                "thread_id": validate_checkpoint_thread_id(thread_id),
-                "effect_count": next_count,
-            },
-            indent=2,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
-    temporary_path.replace(marker_path)
+    marker_payload = {
+        "thread_id": validated_thread,
+        "effect_count": 1,
+    }
 
-    logger.info("Checkpoint smoke marker incremented | thread_id=%s effect_count=%d", thread_id, next_count)
+    try:
+        # Exclusive creation models an external idempotency-key insert. The
+        # existing marker is reused by retries and historical replay branches.
+        with marker_path.open("x", encoding="utf-8") as marker_file:
+            marker_file.write(json.dumps(marker_payload, indent=2, sort_keys=True))
 
-    return next_count
+        logger.info(
+            "Checkpoint smoke marker applied | thread_id=%s effect_count=1",
+            validated_thread,
+        )
+
+    except FileExistsError:
+        existing_payload = json.loads(marker_path.read_text(encoding="utf-8"))
+
+        if existing_payload != marker_payload:
+            raise ValueError("Checkpoint smoke marker conflicts with the replay idempotency contract.")
+
+        logger.info(
+            "Checkpoint smoke marker reused | thread_id=%s effect_count=1",
+            validated_thread,
+        )
+
+    return 1
+
+
+def find_pre_effect_checkpoint(graph: Any, config: dict[str, Any]) -> Any:
+    """
+    Find the exact source checkpoint paused before the guarded effect node.
+
+    Args:
+        graph: Compiled checkpoint smoke graph.
+        config: Source thread configuration.
+
+    Returns:
+        Historical StateSnapshot whose only pending node is `effect`.
+
+    Raises:
+        ValueError: If the source history has zero or multiple matching checkpoints.
+    """
+    candidates = [
+        snapshot
+        for snapshot in graph.get_state_history(config)
+        if tuple(snapshot.next) == ("effect",)
+    ]
+
+    if len(candidates) != 1:
+        raise ValueError(
+            "Checkpoint smoke requires exactly one historical checkpoint paused before effect."
+        )
+
+    return candidates[0]
 
 
 # --- Defining Smoke Graph
@@ -191,7 +246,7 @@ def build_smoke_graph(
         Raises:
             ValueError: If the external marker count diverges from graph state.
         """
-        external_count = increment_marker(marker_path=marker_path, thread_id=state["thread_id"])
+        external_count = apply_marker_once(marker_path=marker_path, thread_id=state["thread_id"])
         state_count    = state["effect_count"] + 1
 
         if external_count != state_count:
@@ -250,7 +305,9 @@ def run_smoke_phase(
         mode=CHECKPOINT_MODE_SQLITE,
         sqlite_path=sqlite_path,
     )
-    config = build_checkpoint_config(validated_thread)
+    config               = build_checkpoint_config(validated_thread)
+    source_checkpoint_id = ""
+    replay_thread_id     = ""
 
     logger.info(
         "Starting checkpoint smoke phase | phase=%s thread_id=%s sqlite_path=%s",
@@ -303,6 +360,46 @@ def run_smoke_phase(
             if executed_pending_nodes is not expected_execution:
                 raise ValueError("Checkpoint resume execution did not match the selected phase.")
 
+        elif normalized_phase in {"historical-replay", "historical-replay-repeat"}:
+            if not checkpoint_exists(checkpointer=checkpointer, config=config):
+                raise ValueError("Checkpoint smoke source thread does not exist for historical replay.")
+
+            source_latest_before = graph.get_state(config)
+            source_checkpoint    = find_pre_effect_checkpoint(graph=graph, config=config)
+            source_checkpoint_id = str(
+                source_checkpoint.config.get("configurable", {}).get("checkpoint_id", "")
+            )
+
+            replay_values, replay_metadata = replay_historical_checkpoint_branch(
+                graph=graph,
+                checkpointer=checkpointer,
+                source_thread_id=validated_thread,
+                source_checkpoint_id=source_checkpoint_id,
+                replay_request_id=HISTORICAL_REPLAY_REQUEST_ID,
+            )
+            replay_thread_id      = replay_metadata.replay_thread_id
+            replay_config         = build_checkpoint_config(replay_thread_id)
+            replay_snapshot       = graph.get_state(replay_config)
+            source_latest_after   = graph.get_state(config)
+            expected_execution    = normalized_phase == "historical-replay"
+            executed_pending_nodes = replay_metadata.executed_pending_nodes
+
+            if replay_metadata.executed_pending_nodes is not expected_execution:
+                raise ValueError("Historical replay execution did not match the selected smoke phase.")
+
+            if source_latest_before.config != source_latest_after.config:
+                raise ValueError("Historical replay mutated the source thread latest checkpoint.")
+
+            if replay_snapshot.next:
+                raise ValueError("Historical replay child thread did not reach a complete state.")
+
+            replay_state = dict(replay_values)
+
+            if replay_state.get("prepare_count") != 1 or replay_state.get("effect_count") != 1:
+                raise ValueError("Historical replay child state does not preserve source node counts.")
+
+            snapshot = source_latest_after
+
         else:
             if not checkpoint_exists(checkpointer=checkpointer, config=config):
                 raise ValueError("Checkpoint smoke thread does not exist during verification.")
@@ -314,7 +411,7 @@ def run_smoke_phase(
         state   = dict(snapshot.values)
         marker_count = read_marker_count(marker_path)
 
-    if normalized_phase in {"resume", "resume-complete", "verify"}:
+    if normalized_phase != "initialize":
         if snapshot.next:
             raise ValueError("Checkpoint smoke thread is not complete after resume.")
 
@@ -332,6 +429,8 @@ def run_smoke_phase(
         "effect_count": int(state.get("effect_count", 0)),
         "external_effect_count": marker_count,
         "executed_pending_nodes": executed_pending_nodes,
+        "source_checkpoint_id": source_checkpoint_id,
+        "replay_thread_id": replay_thread_id,
     }
 
     logger.info("Checkpoint smoke phase completed | result=%s", result)

@@ -11,6 +11,7 @@ import os
 import sys
 import time
 from datetime import date
+from html import escape
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -31,8 +32,13 @@ from agent.graph import DEFAULT_CONFIDENCE_TARGET, DEFAULT_MAX_EVIDENCE_LOOP, Tr
 from agent.llm import copilot as copilot_service
 from agent.tools.alerts import list_alerts
 from agent.tools.audit_log import write_agent_audit_event
+from agent.tools.daily_summary import fetch_daily_quality_summary
 from agent.tools.s3 import parse_s3_uri
-from apps.common.control_plane import ControlPlaneClient, ControlPlaneTransportError
+from apps.common.control_plane import (
+    MAX_REPORT_BYTES,
+    ControlPlaneClient,
+    ControlPlaneTransportError,
+)
 from apps.common.llm_observability import enrich_audit_rows, latest_llm_route_from_rows
 from pipelines.common.clickhouse import build_clickhouse_client, quote_sql_literal
 from pipelines.common.logging import logger
@@ -49,9 +55,22 @@ CONTROL_PLANE_API_URL    = os.getenv("CONTROL_PLANE_API_URL", "").strip().rstrip
 COPILOT_API_TIMEOUT      = float(os.getenv("COPILOT_API_TIMEOUT_SECONDS", "15"))
 CONTROL_PLANE_APPROVAL_TOKEN = os.getenv("CONTROL_PLANE_APPROVAL_TOKEN", "").strip()
 
+SEVERITY_CSS_CLASSES = {
+    "critical": "dq-severity-critical",
+    "high": "dq-severity-critical",
+    "warning": "dq-severity-warning",
+    "medium": "dq-severity-warning",
+    "info": "dq-severity-info",
+    "low": "dq-severity-info",
+}
+
 COPILOT_GUIDED_PROMPTS = {
     "Explain this alert": "Explain this alert in plain language and tell me why it matters.",
     "Summarize evidence": "Summarize the evidence collected for this alert and separate facts from hypotheses.",
+    "Review prior investigations": (
+        "Has this Alert Ref been investigated before? Summarize earlier conclusions, "
+        "then explain what still must be verified from current evidence."
+    ),
     "Recommend next action": "Recommend the safest next investigation action for this alert.",
     "Draft backfill approval": "Draft an approval preview for a backfill if the evidence supports one.",
 }
@@ -64,68 +83,312 @@ st.set_page_config(
 )
 
 
+# --- Defining Control Plane Helpers
+def build_streamlit_control_plane_client(
+    api_base_url: str | None = None,
+    timeout_seconds: float = COPILOT_API_TIMEOUT,
+) -> ControlPlaneClient | None:
+    """
+    Build the optional shared API client used by Streamlit operations.
+
+    Args:
+        api_base_url: Optional explicit API URL. None uses the configured
+            CONTROL_PLANE_API_URL value.
+        timeout_seconds: HTTP timeout in seconds for one API request.
+
+    Returns:
+        Configured ControlPlaneClient when an API URL is available, otherwise
+        None so local development can use deterministic project tools.
+    """
+    resolved_url = (
+        CONTROL_PLANE_API_URL
+        if api_base_url is None
+        else api_base_url
+    ).strip().rstrip("/")
+
+    if not resolved_url:
+        return None
+
+    bounded_timeout = max(1.0, min(float(timeout_seconds), 60.0))
+
+    return ControlPlaneClient(
+        base_url=resolved_url,
+        timeout_seconds=bounded_timeout,
+    )
+
+
 # --- Defining Style Helpers
+def build_page_style_css() -> str:
+    """
+    Build semantic CSS that follows Streamlit's active light or dark theme.
+
+    The `--st-*` variables are provided by Streamlit and change automatically
+    when an operator switches theme from the app settings menu. Local `--dq-*`
+    aliases keep project components consistent without duplicating color values.
+
+    Returns:
+        CSS text for cards, status surfaces, metrics, code, and long reports.
+    """
+    return """
+        :root {
+            color-scheme: light dark;
+            --dq-surface: var(--st-secondary-background-color, #FFFFFF);
+            --dq-surface-subtle: color-mix(
+                in srgb,
+                var(--st-secondary-background-color, #FFFFFF) 84%,
+                var(--st-background-color, #F6F8F5)
+            );
+            --dq-text: var(--st-text-color, #18211B);
+            --dq-muted: var(--st-gray-text-color, #3F4942);
+            --dq-border: var(--st-border-color, #CBD5CE);
+            --dq-border-light: var(--st-border-color-light, #E3E9E5);
+            --dq-critical-bg: var(--st-red-background-color, #FBE9E7);
+            --dq-critical-text: var(--st-red-text-color, #84261F);
+            --dq-critical-border: var(--st-red-color, #B9382E);
+            --dq-warning-bg: var(--st-orange-background-color, #FCECDD);
+            --dq-warning-text: var(--st-orange-text-color, #713608);
+            --dq-warning-border: var(--st-orange-color, #A45114);
+            --dq-stable-bg: var(--st-green-background-color, #E5F5EC);
+            --dq-stable-text: var(--st-green-text-color, #14543B);
+            --dq-stable-border: var(--st-green-color, #1B6E4B);
+            --dq-info-bg: var(--st-blue-background-color, #E8EFFB);
+            --dq-info-text: var(--st-blue-text-color, #1F477F);
+            --dq-info-border: var(--st-blue-color, #2B5CA8);
+            --dq-shadow: 0 12px 32px color-mix(
+                in srgb,
+                var(--st-text-color, #18211B) 9%,
+                transparent
+            );
+        }
+
+        .stApp {
+            background: var(--st-background-color, #F6F8F5);
+            color: var(--dq-text);
+        }
+
+        .block-container {
+            max-width: 1500px;
+            padding-top: 2rem;
+            padding-bottom: 3rem;
+        }
+
+        section[data-testid="stSidebar"] {
+            border-right: 1px solid var(--dq-border);
+        }
+
+        div[data-testid="stMetric"] {
+            min-height: 7.2rem;
+            padding: 0.85rem 1rem;
+            border: 1px solid var(--dq-border);
+            border-radius: 14px;
+            background: var(--dq-surface);
+            box-shadow: 0 4px 16px color-mix(
+                in srgb,
+                var(--st-text-color, #18211B) 5%,
+                transparent
+            );
+        }
+
+        div[data-testid="stMetricLabel"] {
+            color: var(--dq-muted);
+        }
+
+        div[data-testid="stMetricValue"] {
+            color: var(--dq-text);
+            font-size: 1.7rem;
+            line-height: 1.15;
+        }
+
+        .dq-card {
+            border: 1px solid var(--dq-border);
+            border-radius: 16px;
+            padding: 1.1rem 1.2rem;
+            background: var(--dq-surface);
+            color: var(--dq-text);
+            box-shadow: var(--dq-shadow);
+        }
+
+        .dq-card code,
+        .dq-health code {
+            display: inline-block;
+            max-width: 100%;
+            overflow-wrap: anywhere;
+            white-space: normal;
+            color: inherit;
+            background: color-mix(in srgb, currentColor 9%, transparent);
+            border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+            border-radius: 6px;
+            padding: 0.12rem 0.38rem;
+        }
+
+        .dq-muted {
+            color: var(--dq-muted);
+            font-size: 0.92rem;
+            line-height: 1.5;
+        }
+
+        .dq-separator {
+            border-top: 1px solid var(--dq-border-light);
+            margin: 1rem 0;
+        }
+
+        .dq-health {
+            border-radius: 16px;
+            padding: 1.05rem 1.2rem;
+            margin: 0.6rem 0 1.2rem 0;
+            border: 1px solid var(--dq-border);
+            box-shadow: var(--dq-shadow);
+        }
+
+        .dq-health .dq-muted,
+        .dq-severity-critical .dq-muted,
+        .dq-severity-warning .dq-muted,
+        .dq-severity-info .dq-muted {
+            color: inherit;
+            opacity: 0.86;
+        }
+
+        .dq-health-critical,
+        .dq-severity-critical {
+            background: var(--dq-critical-bg);
+            color: var(--dq-critical-text);
+            border-color: var(--dq-critical-border);
+        }
+
+        .dq-health-warning,
+        .dq-severity-warning {
+            background: var(--dq-warning-bg);
+            color: var(--dq-warning-text);
+            border-color: var(--dq-warning-border);
+        }
+
+        .dq-health-stable {
+            background: var(--dq-stable-bg);
+            color: var(--dq-stable-text);
+            border-color: var(--dq-stable-border);
+        }
+
+        .dq-severity-info {
+            background: var(--dq-info-bg);
+            color: var(--dq-info-text);
+            border-color: var(--dq-info-border);
+        }
+
+        div[data-testid="stExpander"],
+        div[data-testid="stCodeBlock"],
+        div[data-testid="stJson"] {
+            border-color: var(--dq-border);
+            border-radius: 12px;
+        }
+
+        .st-key-triage_report_document,
+        .st-key-artifact_report_document {
+            background: var(--dq-surface-subtle);
+            border-color: var(--dq-border) !important;
+        }
+
+        .st-key-triage_report_document [data-testid="stMarkdownContainer"],
+        .st-key-artifact_report_document [data-testid="stMarkdownContainer"] {
+            max-width: 88ch;
+        }
+
+        .st-key-triage_report_document [data-testid="stMarkdownContainer"] p,
+        .st-key-triage_report_document [data-testid="stMarkdownContainer"] li,
+        .st-key-artifact_report_document [data-testid="stMarkdownContainer"] p,
+        .st-key-artifact_report_document [data-testid="stMarkdownContainer"] li {
+            line-height: 1.68;
+        }
+
+        @media (max-width: 768px) {
+            .block-container {
+                padding-top: 1.25rem;
+                padding-left: 1rem;
+                padding-right: 1rem;
+            }
+
+            div[data-testid="stMetric"] {
+                min-height: auto;
+            }
+        }
+    """
+
+
 def apply_page_style() -> None:
     """
-    Apply lightweight Streamlit CSS for a more intentional demo UI.
+    Apply the semantic project CSS after Streamlit resolves the active theme.
 
     Returns:
         None.
     """
+    active_theme = str(st.context.theme.type or "system")
+
+    logger.info("Applying Streamlit semantic theme | active_theme=%s", active_theme)
     st.markdown(
-        """
-        <style>
-            .block-container {
-                padding-top: 2rem;
-                padding-bottom: 3rem;
-            }
-
-            div[data-testid="stMetricValue"] {
-                font-size: 1.75rem;
-            }
-
-            .dq-card {
-                border: 1px solid rgba(49, 91, 143, 0.18);
-                border-radius: 18px;
-                padding: 1.1rem 1.2rem;
-                background:
-                    linear-gradient(135deg, rgba(232, 242, 255, 0.82), rgba(255, 255, 255, 0.96));
-                box-shadow: 0 10px 30px rgba(34, 57, 91, 0.08);
-            }
-
-            .dq-muted {
-                color: #65758b;
-                font-size: 0.92rem;
-            }
-
-            .dq-separator {
-                border-top: 1px solid rgba(49, 91, 143, 0.18);
-                margin: 1rem 0;
-            }
-
-            .dq-health {
-                border-radius: 20px;
-                padding: 1rem 1.2rem;
-                margin: 0.6rem 0 1.2rem 0;
-                border: 1px solid rgba(49, 91, 143, 0.16);
-                box-shadow: 0 12px 34px rgba(34, 57, 91, 0.08);
-            }
-
-            .dq-health-critical {
-                background: linear-gradient(135deg, rgba(255, 236, 230, 0.94), rgba(255, 252, 250, 0.98));
-            }
-
-            .dq-health-warning {
-                background: linear-gradient(135deg, rgba(255, 247, 219, 0.94), rgba(255, 253, 245, 0.98));
-            }
-
-            .dq-health-stable {
-                background: linear-gradient(135deg, rgba(228, 248, 238, 0.94), rgba(250, 255, 253, 0.98));
-            }
-        </style>
-        """,
+        f"<style>{build_page_style_css()}</style>",
         unsafe_allow_html=True,
     )
+
+
+def severity_css_class(value: Any) -> str:
+    """
+    Map one alert severity into an allowlisted semantic CSS class.
+
+    Args:
+        value: Raw alert severity from ClickHouse or a test fixture.
+
+    Returns:
+        Critical, warning, info, or neutral card class.
+    """
+    normalized = str(value or "").strip().lower()
+
+    return SEVERITY_CSS_CLASSES.get(normalized, "dq-severity-neutral")
+
+
+def escape_html_text(value: Any) -> str:
+    """
+    Escape one operator-facing value before inserting it into custom HTML.
+
+    Args:
+        value: Alert label, metric, table, reference, or system key.
+
+    Returns:
+        HTML-safe text without changing the underlying value.
+    """
+    return escape(str(value or ""), quote=True)
+
+
+def render_report_document(
+    markdown_text: str,
+    container_key: str,
+    source_label: str,
+) -> None:
+    """
+    Render one long Markdown report inside a theme-aware reading surface.
+
+    Args:
+        markdown_text: Markdown report generated by triage or loaded from S3.
+        container_key: Stable Streamlit key used by semantic CSS selectors.
+        source_label: Short operator-facing description of the report source.
+
+    Returns:
+        None.
+    """
+    normalized_markdown = str(markdown_text or "").strip()
+
+    if not normalized_markdown:
+        st.info("The selected report is empty.")
+        return
+
+    logger.info(
+        "Rendering Streamlit report document | source=%s | characters=%s",
+        source_label,
+        len(normalized_markdown),
+    )
+
+    # Keep long reports visually separate from controls and constrain line length for readability.
+    with st.container(border=True, key=container_key):
+        st.caption(source_label)
+        st.markdown(normalized_markdown)
 
 
 def render_header() -> None:
@@ -244,24 +507,97 @@ def summarize_alert_rows(alerts: list[dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
-def classify_reliability_state(summary: dict[str, Any]) -> dict[str, str]:
+def summarize_daily_quality_payload(payload: dict[str, Any]) -> dict[str, int]:
     """
-    Classify the current alert set into a demo-friendly reliability state.
+    Normalize one daily DQ summary into fixed operator metric names.
+
+    Args:
+        payload: Validated daily summary returned by FastAPI or the local tool.
+
+    Returns:
+        Dictionary containing check outcomes and open-alert severity counts.
+    """
+    check_counts = {
+        str(item.get("status") or "").strip().lower(): int(item.get("count") or 0)
+        for item in payload.get("check_counts", [])
+    }
+    alert_counts = {
+        str(item.get("severity") or "").strip().lower(): int(item.get("count") or 0)
+        for item in payload.get("alert_counts", [])
+    }
+
+    summary = {
+        "total_checks": int(payload.get("total_checks") or 0),
+        "passed_checks": check_counts.get("pass", 0),
+        "warning_checks": check_counts.get("warn", 0),
+        "failed_checks": check_counts.get("fail", 0),
+        "skipped_checks": check_counts.get("skip", 0),
+        "total_open_alerts": int(payload.get("total_open_alerts") or 0),
+        "critical_alerts": alert_counts.get("critical", 0),
+        "warning_alerts": alert_counts.get("warning", 0),
+    }
+
+    logger.info(
+        "Built Streamlit daily quality summary | dt=%s checks=%d failed=%d open_alerts=%d",
+        payload.get("dt"),
+        summary["total_checks"],
+        summary["failed_checks"],
+        summary["total_open_alerts"],
+    )
+
+    return summary
+
+
+def classify_reliability_state(
+    summary: dict[str, Any],
+    daily_summary: dict[str, Any] | None = None,
+    summary_error: str | None = None,
+) -> dict[str, str]:
+    """
+    Classify reliability from daily checks plus the currently loaded alerts.
 
     Args:
         summary: Alert summary returned by summarize_alert_rows.
+        daily_summary: Optional validated daily DQ summary payload.
+        summary_error: Optional daily-summary loading error shown fail-closed.
 
     Returns:
         Dictionary containing label, CSS class, and explanation.
     """
-    if summary["critical_count"] > 0:
+    daily_counts = summarize_daily_quality_payload(daily_summary) if daily_summary else {}
+
+    if (
+        summary["critical_count"] > 0
+        or daily_counts.get("failed_checks", 0) > 0
+        or daily_counts.get("critical_alerts", 0) > 0
+    ):
         return {
             "label": "Critical attention required",
             "css_class": "dq-health-critical",
-            "message": "At least one critical DQ alert is open in the current filter. Run triage before trusting downstream marts.",
+            "message": "A failed DQ check or critical alert requires investigation before downstream data is trusted.",
         }
 
-    if summary["warning_count"] > 0 or summary["open_count"] > 0:
+    if summary_error:
+        return {
+            "label": "Daily quality status unavailable",
+            "css_class": "dq-health-warning",
+            "message": "The daily DQ snapshot could not be loaded. Alert workflows remain available, but this state must not be treated as healthy.",
+        }
+
+    if daily_summary and daily_counts.get("total_checks", 0) == 0:
+        return {
+            "label": "Daily checks have not run",
+            "css_class": "dq-health-warning",
+            "message": "No DQ check result exists for the selected date. Wait for the scheduled pipeline or investigate the missing run before trusting the data.",
+        }
+
+    if (
+        summary["warning_count"] > 0
+        or summary["open_count"] > 0
+        or daily_counts.get("warning_checks", 0) > 0
+        or daily_counts.get("skipped_checks", 0) > 0
+        or daily_counts.get("warning_alerts", 0) > 0
+    ):
         return {
             "label": "Warning watchlist",
             "css_class": "dq-health-warning",
@@ -269,43 +605,174 @@ def classify_reliability_state(summary: dict[str, Any]) -> dict[str, str]:
         }
 
     return {
-        "label": "Stable for selected filters",
+        "label": "Stable for selected date and filters",
         "css_class": "dq-health-stable",
-        "message": "No material alert is loaded for the current filter. Continue monitoring pipeline runs and DQ checks.",
+        "message": "No failed daily check or material alert is visible for the selected scope. Continue monitoring scheduled runs.",
     }
 
 
-@st.cache_data(ttl=15, show_spinner=False)
-def load_alert_rows(status: str, dt: str | None, limit: int) -> list[dict[str, Any]]:
+def fetch_streamlit_alert_rows(
+    status: str,
+    dt: str | None,
+    limit: int,
+    api_base_url: str | None = None,
+) -> tuple[list[dict[str, Any]], str]:
     """
-    Load alerts from ClickHouse through the existing alert lookup tool.
+    Fetch alerts through FastAPI with transport-only local fallback.
 
     Args:
         status: Alert lifecycle status filter.
         dt: Optional business date in YYYY-MM-DD format.
         limit: Maximum alerts to return.
+        api_base_url: Optional API URL override used by tests or local tools.
 
     Returns:
-        List of alert rows.
+        Tuple containing public alert rows and the selected transport label.
+
+    Raises:
+        ControlPlaneResponseError: If the API returns an invalid, rejected, or
+            identity-mismatched response. These failures are not hidden by a
+            local fallback.
+    """
+    api_client = build_streamlit_control_plane_client(api_base_url=api_base_url)
+
+    if api_client:
+        try:
+            payload = api_client.list_alerts(
+                status=status,
+                dt=dt or None,
+                limit=limit,
+            )
+
+            return list(payload["alerts"]), "api"
+
+        except ControlPlaneTransportError as exc:
+            logger.warning(
+                "Streamlit alert API unavailable; using local alert tool | error_type=%s",
+                type(exc).__name__,
+            )
+
+    # A local read is allowed only when the API is not configured or cannot be reached.
+    payload = list_alerts(status=status, dt=dt or None, limit=limit)
+
+    return list(payload["alerts"]), "local"
+
+
+def fetch_streamlit_daily_summary(
+    dt: str,
+    api_base_url: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    """
+    Fetch one daily DQ snapshot through FastAPI with transport-only fallback.
+
+    Args:
+        dt: Exact business date in YYYY-MM-DD format.
+        api_base_url: Optional API URL override used by tests or local tools.
+
+    Returns:
+        Tuple containing a public daily-summary payload and transport label.
+
+    Raises:
+        ControlPlaneResponseError: If the API response violates its public
+            identity, aggregate, or privacy contract.
+    """
+    api_client = build_streamlit_control_plane_client(api_base_url=api_base_url)
+
+    if api_client:
+        try:
+            payload = api_client.get_daily_summary(dt=dt)
+
+            return payload, "api"
+
+        except ControlPlaneTransportError as exc:
+            logger.warning(
+                "Streamlit daily-summary API unavailable; using local tool | error_type=%s",
+                type(exc).__name__,
+            )
+
+    # Local fallback remains deterministic, audited, and stripped of internal SQL metadata.
+    payload = dict(fetch_daily_quality_summary(dt=dt))
+    payload.pop("sql", None)
+
+    return payload, "local"
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def load_alert_rows(
+    status: str,
+    dt: str | None,
+    limit: int,
+    api_base_url: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Load and cache alert rows for the Streamlit operator surface.
+
+    Args:
+        status: Alert lifecycle status filter.
+        dt: Optional business date in YYYY-MM-DD format.
+        limit: Maximum alerts to return.
+        api_base_url: Optional API URL override used by tests or local tools.
+
+    Returns:
+        List of public alert rows.
     """
     logger.info("Loading alerts for Streamlit | status=%s dt=%s limit=%s", status, dt, limit)
 
-    payload = list_alerts(status=status, dt=dt or None, limit=limit)
+    rows, transport = fetch_streamlit_alert_rows(
+        status=status,
+        dt=dt,
+        limit=limit,
+        api_base_url=api_base_url,
+    )
 
-    return payload["alerts"]
+    logger.info("Loaded Streamlit alerts | transport=%s rows=%d", transport, len(rows))
+
+    return rows
 
 
-@st.cache_data(ttl=10, show_spinner=False)
-def load_audit_rows(alert_key: str, limit: int = 25) -> list[dict[str, Any]]:
+@st.cache_data(ttl=15, show_spinner=False)
+def load_daily_quality_summary(
+    dt: str,
+    api_base_url: str | None = None,
+) -> tuple[dict[str, Any], str]:
     """
-    Load recent agent audit rows for one alert.
+    Load and cache one daily DQ snapshot for the Reliability Overview.
 
     Args:
-        alert_key: Stable alert key.
-        limit: Maximum audit rows to return.
+        dt: Exact business date in YYYY-MM-DD format.
+        api_base_url: Optional API URL override used by tests or local tools.
 
     Returns:
-        List of recent audit log rows.
+        Tuple containing the public daily summary and selected transport.
+    """
+    logger.info("Loading daily quality summary for Streamlit | dt=%s", dt)
+
+    payload, transport = fetch_streamlit_daily_summary(
+        dt=dt,
+        api_base_url=api_base_url,
+    )
+
+    logger.info(
+        "Loaded Streamlit daily quality summary | dt=%s transport=%s checks=%d open_alerts=%d",
+        dt,
+        transport,
+        payload["total_checks"],
+        payload["total_open_alerts"],
+    )
+
+    return payload, transport
+
+
+def load_local_audit_rows(alert_key: str, limit: int) -> list[dict[str, Any]]:
+    """
+    Read and sanitize audit events directly from local ClickHouse.
+
+    Args:
+        alert_key: Stable system alert key.
+        limit: Maximum audit events to return.
+
+    Returns:
+        Enriched audit rows without raw LLM input or output payloads.
     """
     client     = build_clickhouse_client()
     safe_limit = max(1, min(limit, 100))
@@ -336,7 +803,82 @@ def load_audit_rows(alert_key: str, limit: int = 25) -> list[dict[str, Any]]:
     raw_rows   = [dict(zip(columns, row)) for row in result.result_rows]
     rows, _    = enrich_audit_rows(rows=raw_rows)
 
-    logger.info("Loaded audit rows for Streamlit | alert_key=%s rows=%d", alert_key, len(rows))
+    return rows
+
+
+def fetch_streamlit_audit_rows(
+    alert_key: str,
+    limit: int = 25,
+    api_base_url: str | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    """
+    Fetch audit history through FastAPI with transport-only local fallback.
+
+    Args:
+        alert_key: Stable system alert key.
+        limit: Maximum audit events to return.
+        api_base_url: Optional API URL override used by tests or local tools.
+
+    Returns:
+        Tuple containing sanitized audit rows and selected transport label.
+
+    Raises:
+        ControlPlaneResponseError: If the API response violates the public
+            audit contract. Contract failures never trigger local reads.
+    """
+    safe_limit = max(1, min(limit, 100))
+    api_client = build_streamlit_control_plane_client(api_base_url=api_base_url)
+
+    if api_client:
+        try:
+            payload = api_client.get_audit_logs(
+                alert_key=alert_key,
+                limit=safe_limit,
+            )
+
+            return list(payload["rows"]), "api"
+
+        except ControlPlaneTransportError as exc:
+            logger.warning(
+                "Streamlit audit API unavailable; using local ClickHouse read | "
+                "alert_key=%s error_type=%s",
+                alert_key,
+                type(exc).__name__,
+            )
+
+    # Preserve local operability without masking API contract or identity failures.
+    return load_local_audit_rows(alert_key=alert_key, limit=safe_limit), "local"
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def load_audit_rows(
+    alert_key: str,
+    limit: int = 25,
+    api_base_url: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Load and cache recent agent audit rows for one alert.
+
+    Args:
+        alert_key: Stable alert key.
+        limit: Maximum audit rows to return.
+        api_base_url: Optional API URL override used by tests or local tools.
+
+    Returns:
+        List of recent audit log rows.
+    """
+    rows, transport = fetch_streamlit_audit_rows(
+        alert_key=alert_key,
+        limit=limit,
+        api_base_url=api_base_url,
+    )
+
+    logger.info(
+        "Loaded audit rows for Streamlit | alert_key=%s transport=%s rows=%d",
+        alert_key,
+        transport,
+        len(rows),
+    )
 
     return rows
 
@@ -371,18 +913,20 @@ def build_llm_runtime_summary(audit_rows: list[dict[str, Any]]) -> dict[str, Any
     }
 
 
-def read_s3_text(s3_uri: str) -> str:
+def read_s3_text(s3_uri: str, max_bytes: int | None = None) -> str:
     """
     Read a text artifact from local S3-compatible storage.
 
     Args:
         s3_uri: S3 URI to read.
+        max_bytes: Optional hard byte limit for bounded report fallback reads.
 
     Returns:
         UTF-8 decoded text body.
 
     Raises:
         ValueError: If the URI is malformed.
+        ValueError: If the artifact exceeds max_bytes when a bound is provided.
         botocore.exceptions.BotoCoreError: If the artifact cannot be read.
     """
     bucket, key = parse_s3_uri(s3_uri)
@@ -391,9 +935,62 @@ def read_s3_text(s3_uri: str) -> str:
     logger.info("Reading S3 text artifact for Streamlit | uri=%s", s3_uri)
 
     response = client.get_object(Bucket=bucket, Key=key)
-    body     = response["Body"].read()
+    body     = (
+        response["Body"].read()
+        if max_bytes is None
+        else response["Body"].read(max(1, int(max_bytes)) + 1)
+    )
+
+    if max_bytes is not None and len(body) > max(1, int(max_bytes)):
+        raise ValueError(f"S3 text artifact exceeds the {max_bytes}-byte safety limit.")
 
     return body.decode("utf-8")
+
+
+def read_report_text(
+    s3_uri: str,
+    api_base_url: str | None = None,
+    max_bytes: int = MAX_REPORT_BYTES,
+) -> tuple[str, str]:
+    """
+    Read one bounded triage report through the shared control-plane boundary.
+
+    Args:
+        s3_uri: Approved Markdown or JSON report artifact URI.
+        api_base_url: Optional API URL override used by tests or local tools.
+        max_bytes: Maximum UTF-8 report bytes that may be returned.
+
+    Returns:
+        Tuple containing report text and selected transport label.
+
+    Raises:
+        ControlPlaneResponseError: If the API rejects the artifact or violates
+            identity and byte-bound contracts.
+        ValueError: If the URI is invalid or the local fallback exceeds the
+            same hard report size bound.
+    """
+    safe_max_bytes = max(1, min(int(max_bytes), MAX_REPORT_BYTES))
+    api_client     = build_streamlit_control_plane_client(api_base_url=api_base_url)
+
+    if api_client:
+        try:
+            payload = api_client.read_report_artifact(
+                s3_uri=s3_uri,
+                max_bytes=safe_max_bytes,
+            )
+
+            return str(payload["text"]), "api"
+
+        except ControlPlaneTransportError as exc:
+            logger.warning(
+                "Streamlit report API unavailable; using bounded local S3 read | "
+                "uri=%s error_type=%s",
+                s3_uri,
+                type(exc).__name__,
+            )
+
+    # Local fallback retains the public API byte bound instead of reading unbounded content.
+    return read_s3_text(s3_uri=s3_uri, max_bytes=safe_max_bytes), "local"
 
 
 def find_report_uri(alert: dict[str, Any], audit_rows: list[dict[str, Any]]) -> str:
@@ -427,34 +1024,74 @@ def run_selected_alert_triage(
     confidence_threshold: float,
     max_evidence_iterations: int,
     manifest_s3_uri: str,
+    api_base_url: str | None = None,
 ) -> dict[str, Any]:
     """
-    Run the LangGraph triage workflow for a selected alert.
+    Run selected-alert triage through FastAPI with transport-only fallback.
 
     Args:
         alert_key: Stable alert key.
         confidence_threshold: Minimum confidence target before finalizing.
         max_evidence_iterations: Maximum bounded extra-evidence loops.
         manifest_s3_uri: S3 URI for dbt manifest lineage evidence.
+        api_base_url: Optional API URL override used by tests or local tools.
 
     Returns:
-        Triage report summary and the report model.
+        Triage report summary, transport metadata, and typed report model.
+
+    Raises:
+        ControlPlaneResponseError: If the API rejects the request, returns a
+            malformed report, or violates alert and run identity contracts.
     """
-    config = TriageRuntimeConfig(manifest_s3_uri=manifest_s3_uri or None)
+    api_client      = build_streamlit_control_plane_client(api_base_url=api_base_url)
+    started_at      = time.monotonic()
+    transport       = "local"
+    fallback_reason = "control_plane_api_not_configured" if api_client is None else ""
 
-    logger.info("Running Streamlit-triggered triage | alert_key=%s", alert_key)
+    if api_client:
+        try:
+            logger.info("Running Streamlit triage through API | alert_key=%s", alert_key)
 
-    started_at = time.monotonic()
-    report     = run_triage(
-        alert_key=alert_key,
-        confidence_threshold=confidence_threshold,
-        max_evidence_iterations=max_evidence_iterations,
-        config=config,
-    )
+            report    = api_client.run_triage_report(
+                alert_key=alert_key,
+                confidence_threshold=confidence_threshold,
+                max_evidence_iterations=max_evidence_iterations,
+                manifest_s3_uri=manifest_s3_uri,
+            )
+            transport = "api"
+
+        except ControlPlaneTransportError as exc:
+            fallback_reason = "control_plane_transport_unavailable"
+
+            logger.warning(
+                "Streamlit triage API unavailable; using local LangGraph fallback | "
+                "alert_key=%s error_type=%s",
+                alert_key,
+                type(exc).__name__,
+            )
+
+    if transport == "local":
+        config = TriageRuntimeConfig(manifest_s3_uri=manifest_s3_uri or None)
+
+        logger.info(
+            "Running Streamlit triage locally | alert_key=%s fallback_reason=%s",
+            alert_key,
+            fallback_reason,
+        )
+
+        report = run_triage(
+            alert_key=alert_key,
+            confidence_threshold=confidence_threshold,
+            max_evidence_iterations=max_evidence_iterations,
+            config=config,
+        )
+
     duration_ms = int((time.monotonic() - started_at) * 1000)
 
     summary = {
         "status": "success",
+        "transport": transport,
+        "fallback_reason": fallback_reason,
         "duration_ms": duration_ms,
         "agent_run_id": str(report.agent_run_id),
         "alert_display_id": report.alert.alert_display_id,
@@ -465,6 +1102,13 @@ def run_selected_alert_triage(
         "json_report_s3_uri": report.json_report_s3_uri,
         "approval_gated_actions": [action.model_dump(mode="json") for action in report.approval_gated_actions],
     }
+
+    logger.info(
+        "Completed Streamlit triage | alert_key=%s transport=%s duration_ms=%d",
+        alert_key,
+        transport,
+        duration_ms,
+    )
 
     return {"summary": summary, "report": report}
 
@@ -620,6 +1264,9 @@ def request_ui_copilot_api(
         "has_report": response_payload.get("context_source") == "alert_report_audit",
         "evidence_count": int(response_payload.get("evidence_count") or 0),
         "audit_count": int(response_payload.get("audit_count") or 0),
+        "incident_history_count": int(
+            response_payload.get("incident_history_count") or 0
+        ),
         "agent_run_id": str(response_payload.get("agent_run_id") or ""),
         "transport": "api",
         "fallback_reason": "",
@@ -696,6 +1343,7 @@ def answer_ui_copilot_question(
         "has_report": context["has_report"],
         "evidence_count": context["evidence_count"],
         "audit_count": context["audit_count"],
+        "incident_history_count": 0,
         "agent_run_id": "",
         "transport": "local",
         "fallback_reason": fallback_reason,
@@ -986,6 +1634,260 @@ def load_life_evaluation_rows(
     return rows
 
 
+# --- Defining Incident History Helpers
+@st.cache_data(ttl=30, show_spinner=False)
+def load_incident_history_rows(
+    alert_reference: str,
+    lookback_days: int = 90,
+    limit: int = 10,
+    api_base_url: str = CONTROL_PLANE_API_URL,
+) -> list[dict[str, Any]]:
+    """
+    Load bounded previous investigations through the shared read-only API.
+
+    Args:
+        alert_reference: Human Alert Ref, system alert key, or alert UUID.
+        lookback_days: Mandatory recent history window.
+        limit: Maximum previous investigations returned.
+        api_base_url: Control-plane API URL.
+
+    Returns:
+        Sanitized incident-history rows ordered newest first.
+
+    Raises:
+        ValueError: If API configuration or alert identity is missing.
+        ControlPlaneClientError: If transport or response validation fails.
+    """
+    normalized_reference = alert_reference.strip()
+
+    if not normalized_reference:
+        raise ValueError("An Alert Ref is required for incident history.")
+
+    if not api_base_url.strip():
+        raise ValueError("CONTROL_PLANE_API_URL is required for incident history.")
+
+    api_client = ControlPlaneClient(
+        base_url=api_base_url,
+        timeout_seconds=COPILOT_API_TIMEOUT,
+    )
+    payload = api_client.get_incident_history(
+        alert_reference=normalized_reference,
+        lookback_days=lookback_days,
+        limit=limit,
+    )
+    rows = list(payload["rows"])
+
+    logger.info(
+        "Loaded incident history for Streamlit | alert_reference=%s rows=%d lookback_days=%d",
+        normalized_reference,
+        len(rows),
+        lookback_days,
+    )
+
+    return rows
+
+
+def summarize_incident_history_rows(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """
+    Build operator metrics for previous durable investigations.
+
+    Args:
+        rows: Sanitized incident-history rows.
+
+    Returns:
+        Counts for total, successful, approval-gated, reports, and evidence pointers.
+    """
+    return {
+        "total": len(rows),
+        "successful": sum(row.get("outcome_status") == "success" for row in rows),
+        "approval_required": sum(
+            row.get("requires_human_approval") is True
+            or row.get("approval_state") == "pending"
+            for row in rows
+        ),
+        "reports": sum(bool(row.get("report_s3_uri")) for row in rows),
+        "evidence_references": sum(
+            int(row.get("evidence_reference_count") or 0)
+            for row in rows
+        ),
+    }
+
+
+def build_incident_history_display_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Convert internal history contracts into human-readable table rows.
+
+    Args:
+        rows: Sanitized incident-history rows from the shared API.
+
+    Returns:
+        Operator-facing rows without parent UUIDs or long system alert keys.
+    """
+    display_rows: list[dict[str, Any]] = []
+
+    for row in rows:
+        category = str(row.get("top_hypothesis_category") or "")
+        display_rows.append(
+            {
+                "Investigated At": row.get("recorded_at"),
+                "Alert Ref": row.get("alert_display_id"),
+                "Report Ref": row.get("report_id") or "Not assigned",
+                "Status": str(row.get("outcome_status") or "unknown").replace("_", " ").title(),
+                "Likely Cause": category.replace("_", " ").title() if category else "Not classified",
+                "Confidence": row.get("confidence"),
+                "Evidence": int(row.get("evidence_reference_count") or 0),
+                "Approval": str(row.get("approval_state") or "not_required")
+                .replace("_", " ")
+                .title(),
+                "Report": row.get("report_s3_uri"),
+            }
+        )
+
+    return display_rows
+
+
+# --- Defining Checkpoint Recovery Helpers
+def request_ui_checkpoint_history(
+    *,
+    checkpoint_namespace: str,
+    alert_id: str = "",
+    alert_key: str = "",
+    history_limit: int = 50,
+    history_next_node: str = "store_report",
+    api_base_url: str = CONTROL_PLANE_API_URL,
+    api_timeout: float = COPILOT_API_TIMEOUT,
+) -> dict[str, Any]:
+    """
+    Request sanitized checkpoint history through the shared control-plane API.
+
+    Args:
+        checkpoint_namespace: Existing source Airflow triage namespace.
+        alert_id: Optional source alert UUID.
+        alert_key: Optional stable source alert key.
+        history_limit: Maximum newest-first checkpoints returned.
+        history_next_node: Pending node used to select the replay candidate.
+        api_base_url: Control-plane API URL.
+        api_timeout: HTTP timeout in seconds.
+
+    Returns:
+        Validated read-only checkpoint history.
+
+    Raises:
+        ValueError: If the API boundary is not configured.
+        ControlPlaneClientError: If transport or response validation fails.
+    """
+    if not api_base_url.strip():
+        raise ValueError("CONTROL_PLANE_API_URL is required for checkpoint history.")
+
+    api_client = ControlPlaneClient(
+        base_url=api_base_url,
+        timeout_seconds=api_timeout,
+    )
+    payload = api_client.get_checkpoint_history(
+        checkpoint_namespace=checkpoint_namespace,
+        alert_id=alert_id,
+        alert_key=alert_key,
+        history_limit=history_limit,
+        history_next_node=history_next_node,
+    )
+
+    logger.info(
+        "Loaded checkpoint history for Streamlit | namespace=%s history_count=%d matching=%d",
+        checkpoint_namespace,
+        int(payload["history_count"]),
+        int(payload["matching_checkpoint_count"]),
+    )
+
+    return payload
+
+
+def request_ui_checkpoint_replay_preview(
+    *,
+    checkpoint_namespace: str,
+    checkpoint_id: str,
+    alert_id: str = "",
+    alert_key: str = "",
+    replay_request_id: str = "",
+    history_limit: int = 50,
+    history_next_node: str = "store_report",
+    api_base_url: str = CONTROL_PLANE_API_URL,
+    api_timeout: float = COPILOT_API_TIMEOUT,
+) -> dict[str, Any]:
+    """
+    Build a non-executing Airflow replay preview through the shared API.
+
+    Args:
+        checkpoint_namespace: Existing source Airflow triage namespace.
+        checkpoint_id: Exact replay candidate selected from current history.
+        alert_id: Optional source alert UUID.
+        alert_key: Optional stable source alert key.
+        replay_request_id: Optional explicit idempotency key.
+        history_limit: Maximum history rows re-read by the API.
+        history_next_node: Required pending node for replay.
+        api_base_url: Control-plane API URL.
+        api_timeout: HTTP timeout in seconds.
+
+    Returns:
+        Validated replay preview that has not triggered Airflow.
+
+    Raises:
+        ValueError: If the API boundary is not configured.
+        ControlPlaneClientError: If transport or response validation fails.
+    """
+    if not api_base_url.strip():
+        raise ValueError("CONTROL_PLANE_API_URL is required for checkpoint replay preview.")
+
+    api_client = ControlPlaneClient(
+        base_url=api_base_url,
+        timeout_seconds=api_timeout,
+    )
+    payload = api_client.preview_checkpoint_replay(
+        checkpoint_namespace=checkpoint_namespace,
+        checkpoint_id=checkpoint_id,
+        alert_id=alert_id,
+        alert_key=alert_key,
+        replay_request_id=replay_request_id,
+        history_limit=history_limit,
+        history_next_node=history_next_node,
+    )
+
+    logger.info(
+        "Built Streamlit checkpoint replay preview | namespace=%s checkpoint_id=%s replay_request_id=%s",
+        checkpoint_namespace,
+        checkpoint_id,
+        payload["replay_request_id"],
+    )
+
+    return payload
+
+
+def build_checkpoint_history_display_rows(
+    history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Convert sanitized checkpoint metadata into concise operator table rows.
+
+    Args:
+        history: Newest-first checkpoint snapshot dictionaries.
+
+    Returns:
+        Human-readable checkpoint rows without raw graph state.
+    """
+    return [
+        {
+            "Created At": row.get("created_at"),
+            "Step": row.get("step"),
+            "Source": str(row.get("source") or "unknown").replace("_", " ").title(),
+            "Pending Nodes": ", ".join(row.get("next_nodes") or []) or "Complete",
+            "Complete": bool(row.get("is_complete")),
+            "Checkpoint ID": row.get("checkpoint_id"),
+        }
+        for row in history
+    ]
+
+
 # --- Defining Lineage Impact Helpers
 def request_ui_dbt_blast_radius(
     table_name: str,
@@ -1163,9 +2065,13 @@ def render_sidebar_filters() -> dict[str, Any]:
             options=["open", "acknowledged", "triaged", "resolved"],
             index=0,
         )
-        dt_filter_enabled = st.checkbox("Filter by business date", value=False)
-        selected_dt       = st.date_input("Business date", value=date.today(), disabled=not dt_filter_enabled)
+        selected_dt       = st.date_input("Daily summary date", value=date.today())
+        dt_filter_enabled = st.checkbox("Restrict alert list to summary date", value=False)
         limit             = st.slider("Alert limit", min_value=5, max_value=100, value=DEFAULT_ALERT_LIMIT, step=5)
+
+        st.caption(
+            "The date always controls the daily DQ snapshot. The checkbox only restricts the alert list."
+        )
 
         st.divider()
         st.header("Triage Settings")
@@ -1190,12 +2096,14 @@ def render_sidebar_filters() -> dict[str, Any]:
 
     if refresh_clicked:
         load_alert_rows.clear()
+        load_daily_quality_summary.clear()
         load_audit_rows.clear()
         load_life_evaluation_rows.clear()
 
     return {
         "status": status,
         "dt": selected_dt.isoformat() if dt_filter_enabled else None,
+        "summary_dt": selected_dt.isoformat(),
         "limit": limit,
         "confidence_threshold": confidence_threshold,
         "max_evidence_iterations": max_evidence_iterations,
@@ -1224,12 +2132,49 @@ def render_alert_metrics(alerts: list[dict[str, Any]]) -> None:
     col_tables.metric("Affected Tables", summary["affected_table_count"])
 
 
-def render_reliability_overview(alerts: list[dict[str, Any]]) -> None:
+def render_daily_quality_metrics(
+    daily_summary: dict[str, Any],
+    transport: str,
+) -> None:
     """
-    Render a reliability overview for the currently loaded alert filters.
+    Render deterministic daily check and open-alert totals.
+
+    Args:
+        daily_summary: Validated daily quality summary payload.
+        transport: API or local fallback transport label.
+
+    Returns:
+        None.
+    """
+    summary = summarize_daily_quality_payload(daily_summary)
+
+    st.caption(
+        f"Daily DQ snapshot | dt={daily_summary.get('dt')} | source={transport}"
+    )
+
+    col_checks, col_passed, col_warning, col_failed, col_alerts = st.columns(5)
+
+    col_checks.metric("Daily Checks", summary["total_checks"])
+    col_passed.metric("Passed", summary["passed_checks"])
+    col_warning.metric("Warnings", summary["warning_checks"])
+    col_failed.metric("Failed", summary["failed_checks"])
+    col_alerts.metric("Open Alerts", summary["total_open_alerts"])
+
+
+def render_reliability_overview(
+    alerts: list[dict[str, Any]],
+    daily_summary: dict[str, Any] | None = None,
+    daily_summary_transport: str = "",
+    daily_summary_error: str | None = None,
+) -> None:
+    """
+    Render daily DQ health plus the currently loaded alert-filter context.
 
     Args:
         alerts: Alert rows currently loaded in the UI.
+        daily_summary: Optional deterministic daily DQ snapshot.
+        daily_summary_transport: API or local fallback transport label.
+        daily_summary_error: Optional snapshot loading failure.
 
     Returns:
         None.
@@ -1237,10 +2182,16 @@ def render_reliability_overview(alerts: list[dict[str, Any]]) -> None:
     st.subheader("Reliability Overview")
 
     summary = summarize_alert_rows(alerts)
-    state   = classify_reliability_state(summary)
+    state   = classify_reliability_state(
+        summary=summary,
+        daily_summary=daily_summary,
+        summary_error=daily_summary_error,
+    )
 
     dates_text  = ", ".join(summary["affected_dates"][:5]) if summary["affected_dates"] else "No affected dt loaded"
     tables_text = ", ".join(summary["affected_tables"][:5]) if summary["affected_tables"] else "No affected table loaded"
+    dates_html  = escape_html_text(dates_text)
+    tables_html = escape_html_text(tables_text)
 
     st.markdown(
         f"""
@@ -1249,14 +2200,27 @@ def render_reliability_overview(alerts: list[dict[str, Any]]) -> None:
             <span class="dq-muted">{state["message"]}</span>
             <div class="dq-separator"></div>
             <span class="dq-muted">Affected dates</span><br>
-            <code>{dates_text}</code><br><br>
+            <code>{dates_html}</code><br><br>
             <span class="dq-muted">Affected tables</span><br>
-            <code>{tables_text}</code>
+            <code>{tables_html}</code>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    if daily_summary:
+        render_daily_quality_metrics(
+            daily_summary=daily_summary,
+            transport=daily_summary_transport,
+        )
+
+    else:
+        st.warning(
+            "Daily DQ snapshot unavailable. Alert operations remain visible, but this page is not claiming a healthy state. "
+            f"Detail: {daily_summary_error or 'No summary payload was returned.'}"
+        )
+
+    st.caption("Loaded alert filter context")
     render_alert_metrics(alerts)
 
     col_reports, col_status, col_next = st.columns([1, 1, 2])
@@ -1390,6 +2354,267 @@ def render_life_evaluation_history_panel() -> None:
     )
 
 
+def render_incident_history_panel(alert: dict[str, Any]) -> None:
+    """
+    Render previous evidence-backed investigations for the selected alert.
+
+    Args:
+        alert: Currently selected alert row.
+
+    Returns:
+        None.
+    """
+    alert_ref = str(
+        alert.get("alert_display_id")
+        or alert.get("alert_key")
+        or alert.get("alert_id")
+        or ""
+    ).strip()
+
+    st.subheader("Previous Investigations")
+    st.caption(
+        "Durable investigation outcomes for this exact alert. The panel shows bounded facts and "
+        "evidence references, not hidden prompts, raw SQL, or unrestricted conversation history."
+    )
+
+    if not alert_ref:
+        st.info("This alert has no stable reference for history lookup.")
+        return
+
+    try:
+        rows = load_incident_history_rows(
+            alert_reference=alert_ref,
+            lookback_days=90,
+            limit=10,
+        )
+
+    except Exception as exc:
+        logger.warning(
+            "Incident history is unavailable | alert_reference=%s error=%s",
+            alert_ref,
+            exc,
+        )
+        st.info(f"Previous investigations are unavailable: {type(exc).__name__}: {exc}")
+        return
+
+    if not rows:
+        st.caption(
+            "No previous investigation was found in the last 90 days. Run triage to create the first evidence-backed record."
+        )
+        return
+
+    summary = summarize_incident_history_rows(rows)
+    latest  = rows[0]
+    col_runs, col_success, col_evidence, col_reports, col_approval = st.columns(5)
+
+    col_runs.metric("Investigations", summary["total"])
+    col_success.metric("Completed", summary["successful"])
+    col_evidence.metric("Evidence Refs", summary["evidence_references"])
+    col_reports.metric("Reports", summary["reports"])
+    col_approval.metric("Needs Approval", summary["approval_required"])
+
+    st.markdown("#### Latest Readout")
+    st.write(str(latest.get("summary") or "No investigation summary is available."))
+
+    if latest.get("top_hypothesis_category"):
+        category = str(latest["top_hypothesis_category"]).replace("_", " ").title()
+        confidence = latest.get("confidence")
+        confidence_text = (
+            f"{float(confidence):.0%} confidence"
+            if isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+            else "confidence not recorded"
+        )
+        st.caption(f"Likely cause: {category} | {confidence_text}")
+
+    st.dataframe(
+        dataframe_from_rows(build_incident_history_display_rows(rows)),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    with st.expander("Technical references", expanded=False):
+        st.json(
+            {
+                "memory_id": latest.get("memory_id"),
+                "parent_run_id": latest.get("parent_run_id"),
+                "system_alert_key": latest.get("alert_key"),
+                "resolution_reference": latest.get("resolution_reference"),
+            }
+        )
+
+
+def render_checkpoint_recovery_panel(alert: dict[str, Any]) -> None:
+    """
+    Render read-only checkpoint history and a non-executing replay preview.
+
+    Args:
+        alert: Currently selected source-of-truth alert row.
+
+    Returns:
+        None.
+    """
+    alert_id          = str(alert.get("alert_id") or "").strip()
+    alert_key         = str(alert.get("alert_key") or "").strip()
+    alert_display_id  = str(alert.get("alert_display_id") or alert_id or "checkpoint")
+    identity_options: dict[str, tuple[str, str]] = {}
+
+    if alert_id:
+        identity_options["Alert ID"] = (alert_id, "alert_id")
+
+    if alert_key:
+        identity_options["System alert key"] = (alert_key, "alert_key")
+
+    st.subheader("Checkpoint Recovery")
+    st.caption(
+        "Inspect sanitized LangGraph history and prepare an Airflow replay preview. "
+        "This panel never reads raw graph state and never triggers DAG 40."
+    )
+
+    if not identity_options:
+        st.info("This alert has no stable identity for checkpoint lookup.")
+        return
+
+    with st.expander("Inspect source triage checkpoints", expanded=False):
+        identity_label = st.selectbox(
+            "Identity used by the source DAG 40 run",
+            options=list(identity_options),
+            help=(
+                "Choose the same identity passed to the original Airflow triage run. "
+                "Using another identity produces a different checkpoint thread."
+            ),
+            key=f"checkpoint_identity_{alert_display_id}",
+        )
+        identity_value, identity_field = identity_options[identity_label]
+        checkpoint_namespace = st.text_input(
+            "Checkpoint namespace",
+            placeholder="manual__triage_triage_YYYYMMDDTHHMMSSffffff",
+            help="Use the checkpoint namespace printed in the source DAG 40 task log.",
+            key=f"checkpoint_namespace_{alert_display_id}",
+        ).strip()
+        history_state_key = f"checkpoint_history_result_{alert_display_id}"
+        preview_state_key = f"checkpoint_replay_preview_{alert_display_id}"
+
+        if st.button(
+            "Inspect checkpoint history",
+            type="secondary",
+            disabled=not checkpoint_namespace,
+            key=f"inspect_checkpoint_{alert_display_id}",
+        ):
+            try:
+                request_kwargs = {
+                    "checkpoint_namespace": checkpoint_namespace,
+                    "alert_id": identity_value if identity_field == "alert_id" else "",
+                    "alert_key": identity_value if identity_field == "alert_key" else "",
+                }
+                history_payload = request_ui_checkpoint_history(**request_kwargs)
+                st.session_state[history_state_key] = {
+                    "checkpoint_namespace": checkpoint_namespace,
+                    "alert_reference": identity_value,
+                    "identity_field": identity_field,
+                    "payload": history_payload,
+                }
+                st.session_state.pop(preview_state_key, None)
+
+            except Exception as exc:
+                logger.warning(
+                    "Checkpoint history is unavailable | alert_ref=%s namespace=%s error=%s",
+                    alert_display_id,
+                    checkpoint_namespace,
+                    exc,
+                )
+                st.error(f"Checkpoint history is unavailable: {type(exc).__name__}: {exc}")
+
+        stored_history = st.session_state.get(history_state_key)
+
+        if not isinstance(stored_history, dict):
+            st.caption("Enter the source Airflow namespace, then inspect its sanitized history.")
+            return
+
+        if (
+            stored_history.get("checkpoint_namespace") != checkpoint_namespace
+            or stored_history.get("alert_reference") != identity_value
+            or stored_history.get("identity_field") != identity_field
+        ):
+            st.info("Namespace or identity changed. Inspect again before preparing a replay preview.")
+            return
+
+        history_payload = stored_history["payload"]
+        selected        = history_payload["selected_checkpoint"]
+        col_history, col_matches, col_step, col_state = st.columns(4)
+
+        col_history.metric("Checkpoints", int(history_payload["history_count"]))
+        col_matches.metric("Replay Candidates", int(history_payload["matching_checkpoint_count"]))
+        col_step.metric("Selected Step", int(selected["step"]))
+        col_state.metric("Pending Node", ", ".join(selected["next_nodes"]))
+
+        st.dataframe(
+            dataframe_from_rows(build_checkpoint_history_display_rows(history_payload["history"])),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.info(
+            "History inspection is read-only. The selected checkpoint only becomes executable "
+            "after an operator explicitly triggers Airflow DAG 40."
+        )
+
+        replay_request_id = st.text_input(
+            "Replay request ID (optional)",
+            help=(
+                "Leave blank to generate a stable idempotency key from the alert, namespace, "
+                "and checkpoint. Reusing the key reuses the same replay child thread."
+            ),
+            key=f"checkpoint_replay_request_{alert_display_id}",
+        ).strip()
+
+        if st.button(
+            "Build Airflow replay preview",
+            type="primary",
+            key=f"preview_checkpoint_replay_{alert_display_id}",
+        ):
+            try:
+                preview_kwargs = {
+                    "checkpoint_namespace": checkpoint_namespace,
+                    "checkpoint_id": str(selected["checkpoint_id"]),
+                    "alert_id": identity_value if identity_field == "alert_id" else "",
+                    "alert_key": identity_value if identity_field == "alert_key" else "",
+                    "replay_request_id": replay_request_id,
+                }
+                st.session_state[preview_state_key] = request_ui_checkpoint_replay_preview(
+                    **preview_kwargs
+                )
+
+            except Exception as exc:
+                logger.warning(
+                    "Checkpoint replay preview failed | alert_ref=%s namespace=%s error=%s",
+                    alert_display_id,
+                    checkpoint_namespace,
+                    exc,
+                )
+                st.error(f"Replay preview failed: {type(exc).__name__}: {exc}")
+
+        replay_preview = st.session_state.get(preview_state_key)
+
+        if isinstance(replay_preview, dict):
+            st.success("Replay preview validated. No Airflow DagRun was triggered.")
+            st.write(replay_preview["summary"])
+
+            with st.expander("Airflow DAG 40 replay configuration", expanded=True):
+                st.json(replay_preview["dag_run_conf"])
+
+            with st.expander("Technical replay references", expanded=False):
+                st.json(
+                    {
+                        "dag_id": replay_preview["dag_id"],
+                        "source_thread_id": replay_preview["source_thread_id"],
+                        "source_checkpoint_id": replay_preview["source_checkpoint_id"],
+                        "replay_request_id": replay_preview["replay_request_id"],
+                        "replay_thread_id": replay_preview["replay_thread_id"],
+                        "airflow_triggered": replay_preview["airflow_triggered"],
+                        "side_effects_executed": replay_preview["side_effects_executed"],
+                    }
+                )
+
+
 def render_alert_table(alerts: list[dict[str, Any]]) -> None:
     """
     Render the alert table.
@@ -1441,19 +2666,26 @@ def render_selected_alert(alert: dict[str, Any]) -> None:
     """
     st.subheader("Selected Alert")
 
+    severity_class = severity_css_class(alert.get("severity"))
+    severity_text  = escape_html_text(str(alert.get("severity") or "unknown").upper())
+    table_name     = escape_html_text(alert.get("table_name") or "Unknown table")
+    metric_name    = escape_html_text(alert.get("metric") or "Unknown metric")
+    alert_ref      = escape_html_text(alert.get("alert_display_id") or "Not assigned")
+    system_key     = escape_html_text(alert.get("alert_key") or "Not available")
+
     col_left, col_right = st.columns([1.2, 1])
 
     with col_left:
         st.markdown(
             f"""
-            <div class="dq-card">
-                <b>{alert.get("severity", "unknown").upper()}</b><br>
-                <span class="dq-muted">{alert.get("table_name")} / {alert.get("metric")}</span>
+            <div class="dq-card {severity_class}">
+                <b>{severity_text}</b><br>
+                <span class="dq-muted">{table_name} / {metric_name}</span>
                 <div class="dq-separator"></div>
                 <span class="dq-muted">Alert Ref</span><br>
-                <code>{alert.get("alert_display_id")}</code><br><br>
+                <code>{alert_ref}</code><br><br>
                 <span class="dq-muted">System Alert Key</span><br>
-                <code>{alert.get("alert_key")}</code>
+                <code>{system_key}</code>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1643,7 +2875,16 @@ def render_triage_panel(alert: dict[str, Any], settings: dict[str, Any]) -> None
 
             st.session_state["latest_triage_result"] = result
             load_audit_rows.clear()
-            st.success("Triage completed and report artifacts were stored.")
+            transport = str(result["summary"].get("transport") or "local")
+            transport_label = (
+                "Control Plane API"
+                if transport == "api"
+                else "bounded local fallback"
+            )
+
+            st.success(
+                f"Triage completed through {transport_label} and report artifacts were stored."
+            )
 
         except Exception as exc:
             logger.exception("Streamlit triage failed | alert_key=%s", alert_key)
@@ -1666,7 +2907,11 @@ def render_triage_panel(alert: dict[str, Any], settings: dict[str, Any]) -> None
     tab_report, tab_evidence, tab_actions = st.tabs(["Report", "Evidence", "Approval Actions"])
 
     with tab_report:
-        st.markdown(report.markdown_report)
+        render_report_document(
+            markdown_text=report.markdown_report,
+            container_key="triage_report_document",
+            source_label="Generated triage report",
+        )
 
     with tab_evidence:
         evidence_rows = [
@@ -1840,10 +3085,18 @@ def render_audit_panel(alert: dict[str, Any]) -> None:
         with st.expander("Read latest report artifact", expanded=False):
             st.code(report_uri)
 
-            if st.button("Read report from S3", use_container_width=True):
+            if st.button("Read report artifact", use_container_width=True):
                 try:
-                    report_text = read_s3_text(report_uri)
-                    st.markdown(report_text)
+                    report_text, transport = read_report_text(report_uri)
+                    render_report_document(
+                        markdown_text=report_text,
+                        container_key="artifact_report_document",
+                        source_label=(
+                            "Report loaded through the Control Plane API"
+                            if transport == "api"
+                            else "Report loaded through bounded local S3 fallback"
+                        ),
+                    )
 
                 except Exception as exc:
                     st.error(f"Failed to read report artifact: {exc}")
@@ -1939,10 +3192,14 @@ def render_copilot_panel(alert: dict[str, Any]) -> None:
         )
 
     st.markdown("#### Alert Context")
-    col_ref, col_report, col_evidence, col_audit = st.columns(4)
+    col_ref, col_report, col_evidence, col_history, col_audit = st.columns(5)
     col_ref.metric("Alert Ref", alert_ref)
     col_report.metric("Matching Report", "Yes" if latest.get("has_report") else "No")
     col_evidence.metric("Evidence Items", int(latest.get("evidence_count") or 0))
+    col_history.metric(
+        "Prior Investigations",
+        int(latest.get("incident_history_count") or 0),
+    )
     col_audit.metric("Audit Events", int(latest.get("audit_count") or 0))
 
     st.markdown("#### Guardrail")
@@ -2048,10 +3305,31 @@ def main() -> None:
         )
 
     except Exception as exc:
-        st.error(f"Unable to load alerts from ClickHouse: {exc}")
+        st.error(f"Unable to load alerts through the control-plane boundary: {exc}")
         st.stop()
 
-    render_reliability_overview(alerts)
+    daily_summary           = None
+    daily_summary_transport = ""
+    daily_summary_error     = None
+
+    try:
+        daily_summary, daily_summary_transport = load_daily_quality_summary(
+            dt=settings["summary_dt"],
+        )
+
+    except Exception as exc:
+        daily_summary_error = f"{type(exc).__name__}: {exc}"
+        logger.exception(
+            "Unable to load Streamlit daily quality summary | dt=%s",
+            settings["summary_dt"],
+        )
+
+    render_reliability_overview(
+        alerts=alerts,
+        daily_summary=daily_summary,
+        daily_summary_transport=daily_summary_transport,
+        daily_summary_error=daily_summary_error,
+    )
     render_approval_queue_panel()
     render_life_evaluation_history_panel()
     render_alert_table(alerts)
@@ -2068,6 +3346,12 @@ def main() -> None:
 
     st.divider()
     render_selected_alert(selected_alert)
+
+    st.divider()
+    render_incident_history_panel(selected_alert)
+
+    st.divider()
+    render_checkpoint_recovery_panel(selected_alert)
 
     st.divider()
     render_lineage_impact_panel(selected_alert)

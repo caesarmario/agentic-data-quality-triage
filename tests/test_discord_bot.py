@@ -17,7 +17,7 @@ from apps.discord_bot import bot, service
 
 
 # --- Defining Constants
-EXPECTED_COMMANDS = {
+LEGACY_COMMANDS = {
     "alerts",
     "approve",
     "ask",
@@ -26,6 +26,9 @@ EXPECTED_COMMANDS = {
     "reject",
     "triage",
 }
+
+GROUPED_COMMANDS  = {f"dq {command}" for command in LEGACY_COMMANDS}
+EXPECTED_COMMANDS = LEGACY_COMMANDS | GROUPED_COMMANDS
 
 
 # --- Defining Test Helpers
@@ -71,6 +74,21 @@ def test_startup_diagnostics_are_secret_safe_and_commands_are_registered() -> No
     assert environment["CONTROL_PLANE_APPROVAL_TOKEN"] not in serialized
 
 
+def test_discord_runtime_uses_only_required_gateway_intents() -> None:
+    """
+    Validate slash-command operation does not enable broad or privileged intents.
+
+    Returns:
+        None.
+    """
+    assert bot.intents.guilds is True
+    assert bot.intents.message_content is False
+    assert bot.intents.members is False
+    assert bot.intents.presences is False
+    assert bot.intents.guild_messages is False
+    assert bot.intents.dm_messages is False
+
+
 def test_smoke_cli_reports_configuration_without_connecting(monkeypatch, capsys) -> None:
     """
     Ensure smoke mode never starts Discord network IO.
@@ -98,7 +116,7 @@ def test_smoke_cli_reports_configuration_without_connecting(monkeypatch, capsys)
 
     assert return_code == 0
     assert '"status": "ready"' in output
-    assert '"registered_command_count": 7' in output
+    assert '"registered_command_count": 14' in output
     assert '"message_content_intent_enabled": false' in output
     assert environment["DISCORD_BOT_TOKEN"] not in output
     assert environment["CONTROL_PLANE_APPROVAL_TOKEN"] not in output
@@ -132,7 +150,15 @@ def test_tree_registers_expected_slash_commands() -> None:
         for command in bot.tree.get_commands(guild=bot.guild_object())
     }
 
-    assert commands == EXPECTED_COMMANDS
+    assert commands == LEGACY_COMMANDS | {"dq"}
+
+    dq_command = next(
+        command
+        for command in bot.tree.get_commands(guild=bot.guild_object())
+        if command.name == "dq"
+    )
+
+    assert {command.name for command in dq_command.commands} == LEGACY_COMMANDS
 
 
 # --- Defining API Readiness Tests
@@ -274,6 +300,106 @@ def test_fetch_discord_alerts_does_not_hide_contract_failure(monkeypatch) -> Non
         service.fetch_discord_alerts("open", None, 5)
 
 
+def test_fetch_discord_daily_summary_prefers_control_plane_api(monkeypatch) -> None:
+    """
+    Ensure Discord obtains daily aggregates from the shared API when available.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    expected = {
+        "dt": "2026-06-10",
+        "check_counts": [{"status": "pass", "count": 10}],
+        "alert_counts": [],
+        "total_checks": 10,
+        "total_open_alerts": 0,
+    }
+
+    class ApiClient:
+        """Daily-summary API test double."""
+
+        def get_daily_summary(self, dt: str) -> dict[str, Any]:
+            """Return one deterministic summary for the requested date."""
+            assert dt == "2026-06-10"
+            return expected
+
+    monkeypatch.setattr(service, "build_control_plane_client", lambda **kwargs: ApiClient())
+    monkeypatch.setattr(
+        service,
+        "fetch_daily_quality_summary",
+        lambda **kwargs: pytest.fail("Local daily summary tool should not run."),
+    )
+
+    payload, transport = service.fetch_discord_daily_summary("2026-06-10")
+
+    assert payload == expected
+    assert transport == "api"
+
+
+def test_fetch_discord_daily_summary_falls_back_only_on_transport_failure(monkeypatch) -> None:
+    """
+    Ensure API connectivity failures use the audited deterministic local tool.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    class UnavailableClient:
+        """Transport-failing daily-summary API test double."""
+
+        def get_daily_summary(self, dt: str) -> dict[str, Any]:
+            """Raise a transport-only failure."""
+            raise ControlPlaneTransportError("network unavailable")
+
+    expected = {
+        "dt": "2026-06-10",
+        "check_counts": [],
+        "alert_counts": [],
+        "total_checks": 0,
+        "total_open_alerts": 0,
+    }
+    monkeypatch.setattr(service, "build_control_plane_client", lambda **kwargs: UnavailableClient())
+    monkeypatch.setattr(service, "fetch_daily_quality_summary", lambda **kwargs: expected)
+
+    payload, transport = service.fetch_discord_daily_summary("2026-06-10")
+
+    assert payload == expected
+    assert transport == "local"
+
+
+def test_fetch_discord_daily_summary_does_not_hide_contract_failure(monkeypatch) -> None:
+    """
+    Ensure malformed or rejected API responses do not silently query ClickHouse locally.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    class RejectedClient:
+        """Contract-rejecting daily-summary API test double."""
+
+        def get_daily_summary(self, dt: str) -> dict[str, Any]:
+            """Raise a non-retryable response failure."""
+            raise ControlPlaneResponseError("invalid response")
+
+    monkeypatch.setattr(service, "build_control_plane_client", lambda **kwargs: RejectedClient())
+    monkeypatch.setattr(
+        service,
+        "fetch_daily_quality_summary",
+        lambda **kwargs: pytest.fail("Contract failures must not use local fallback."),
+    )
+
+    with pytest.raises(ControlPlaneResponseError):
+        service.fetch_discord_daily_summary("2026-06-10")
+
+
 def test_answer_discord_question_uses_api_correlation(monkeypatch) -> None:
     """
     Ensure grounded Copilot answers retain API audit correlation.
@@ -293,6 +419,7 @@ def test_answer_discord_question_uses_api_correlation(monkeypatch) -> None:
                 "answer": "The partition is empty.",
                 "agent_run_id": "run-123",
                 "alert_key": "system-key",
+                "incident_history_count": 2,
             }
 
     monkeypatch.setattr(service, "build_control_plane_client", lambda **kwargs: ApiClient())
@@ -304,6 +431,7 @@ def test_answer_discord_question_uses_api_correlation(monkeypatch) -> None:
         "transport": "api",
         "agent_run_id": "run-123",
         "alert_key": "system-key",
+        "incident_history_count": 2,
     }
 
 

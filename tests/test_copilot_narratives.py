@@ -364,3 +364,85 @@ def test_operator_answer_fallback_uses_existing_report_before_suggesting_triage(
     assert "approval-gated backfill preview" in text.lower()
     assert "run /triage" not in text.lower()
     assert "explicit approval" in text.lower()
+
+
+def test_operator_answer_fallback_explains_prior_investigations_without_overclaiming(
+    monkeypatch,
+) -> None:
+    """
+    Validate no-provider history answers stay exact-match and non-authoritative.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setattr(
+        copilot,
+        "run_llm_task",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("provider unavailable")
+        ),
+    )
+
+    text = copilot.build_operator_answer(
+        question="Has this alert been investigated before?",
+        alert=sample_alert(),
+        incident_history_rows=[
+            {
+                "recorded_at": "2026-08-20T13:37:00+00:00",
+                "outcome_status": "success",
+                "summary": "A previous investigation found a missing segment.",
+                "confidence": 0.72,
+                "top_hypothesis_category": "missing_segment",
+                "report_id": "RPT-27BDC120",
+                "requires_human_approval": False,
+                "evidence_reference_count": 4,
+                "approval_state": "not_required",
+                "memory_id": "must-not-reach-the-model",
+                "parent_run_id": "must-not-reach-the-model",
+                "alert_key": "must-not-reach-the-model",
+                "decision_facts": {"hidden": True},
+            }
+        ],
+    )
+
+    assert "1" in text
+    assert "missing segment" in text.lower()
+    assert "RPT-27BDC120" in text
+    assert "comparison context only" in text.lower()
+    assert "does not prove the current root cause" in text.lower()
+    assert "does not establish recurrence across different dates" in text.lower()
+    assert "must-not-reach-the-model" not in text
+
+
+def test_operator_answer_fallback_reports_no_exact_history_without_claiming_never(
+    monkeypatch,
+) -> None:
+    """
+    Ensure an empty exact-match result is not described as global incident absence.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setattr(
+        copilot,
+        "run_llm_task",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("provider unavailable")
+        ),
+    )
+
+    text = copilot.build_operator_answer(
+        question="Show previous investigation history.",
+        alert=sample_alert(),
+        incident_history_rows=[],
+    )
+
+    assert "no earlier investigation record" in text.lower()
+    assert "does not prove" in text.lower()
+    assert "another alert" in text.lower()

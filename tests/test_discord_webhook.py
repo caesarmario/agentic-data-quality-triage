@@ -441,15 +441,21 @@ def test_resolve_run_dates_supports_single_date_and_inclusive_range() -> None:
     ]
 
 
-def test_quality_alert_dag_runs_discord_webhook_after_alert_generation() -> None:
+def test_quality_alert_dag_runs_discord_webhook_after_each_alert_stage() -> None:
     """
-    Verify Airflow owns scheduled webhook invocation after alert generation.
+    Verify Airflow delivers schema alerts early and DQ alerts after checks.
 
     Returns:
         None.
     """
     dag_source = Path("dags/30_dag_dq_orders_quality_alerts.py").read_text(encoding="utf-8")
 
-    assert 'task_id="t40_push_discord_alerts"' in dag_source
-    assert "python -m apps.discord_bot.webhook $DATE_ARGS" in dag_source
-    assert "t30_generate_orders_alerts\n        >> t40_push_discord_alerts\n        >> t90_finish" in dag_source
+    assert 'task_id="t30_push_schema_drift_alerts"' in dag_source
+    assert 'task_id="t70_push_discord_alerts"' in dag_source
+    assert dag_source.count("python -m apps.discord_bot.webhook $DATE_ARGS") == 2
+    assert (
+        "t20_generate_schema_drift_alerts\n"
+        "        >> t30_push_schema_drift_alerts\n"
+        "        >> t40_profile_orders_tables"
+    ) in dag_source
+    assert "t60_generate_orders_alerts\n        >> t70_push_discord_alerts\n        >> t90_finish" in dag_source

@@ -53,16 +53,81 @@ Use these sections when they apply:
 Discord exposes typed slash command options:
 
 ```text
-/alerts dt:<YYYY-MM-DD> status:open limit:10
-/daily_summary dt:<YYYY-MM-DD>
-/triage alert_key:<Alert Ref or system key>
-/ask question:<question> alert_key:<optional Alert Ref>
-/backfill_preview start_date:<YYYY-MM-DD> end_date:<YYYY-MM-DD> target_dag_id:<DAG ID> reason:<reason>
-/approve request_id:<APR ID> comment:<review note>
-/reject request_id:<APR ID> comment:<review note>
+/dq alerts dt:<YYYY-MM-DD> status:open limit:10
+/dq daily_summary dt:<YYYY-MM-DD>
+/dq triage alert_key:<Alert Ref or system key>
+/dq ask question:<question> alert_key:<optional Alert Ref>
+/dq backfill_preview start_date:<YYYY-MM-DD> end_date:<YYYY-MM-DD> target_dag_id:<DAG ID> reason:<reason>
+/dq approve request_id:<APR ID> comment:<review note>
+/dq reject request_id:<APR ID> comment:<review note>
 ```
 
 Guild-scoped command registration is used for the local demo so command changes synchronize quickly.
+Legacy top-level aliases remain available for one compatibility release, but new examples and operator guidance use the canonical `/dq` namespace.
+
+
+## Bot Permissions And Channel Contract
+
+Use the smallest practical Discord installation scope for this local portfolio bot:
+
+- OAuth scopes: `bot` and `applications.commands`.
+- Bot permissions: View Channels and Send Messages.
+- Optional permission: Read Message History only when operators need Discord-side context continuity.
+- Disabled privileged intent: Message Content.
+- Runtime gateway intent: Guilds only.
+
+The command transport remains slash-command based. The bot does not inspect arbitrary server messages and does not need member, presence, moderation, voice, reaction, or message-content access.
+
+Use three explicit channel roles:
+
+- `dq-alerts` receives deterministic alert summaries and scheduled webhook delivery.
+- `dq-triage` receives evidence-backed triage reports and Copilot answers.
+- `dq-ops-private` receives approval previews and approve/reject decisions when the optional private operations channel is configured.
+
+If `dq-ops-private` is not configured, approval messages fall back to `dq-triage`. Approval messages remain non-executing; Airflow owns the remediation boundary.
+
+
+## Static Formatting Versus AI Copilot Reasoning
+
+The deterministic formatter and the LLM-assisted Copilot serve different purposes. Portfolio screenshots should show that difference explicitly instead of presenting every formatted sentence as AI output.
+
+### Deterministic Alert Message
+
+This message is assembled from trusted ClickHouse fields. It is stable, testable, and available without an API key.
+
+```text
+# 🚨 Critical Data Quality Alert
+## Raw Orders Data has missing or unusually low row count
+
+### Quick Read
+Raw Orders Data has no rows for 2026-05-04.
+Triage this alert before trusting downstream data.
+
+### Key Facts
+Alert Ref DQ-20260504-A1B2C3
+Observed / Expected 0 / 1
+
+### Recommended Next Step
+/dq triage alert_key:DQ-20260504-A1B2C3
+```
+
+### LLM-Assisted Copilot Readout
+
+This message is generated only after guarded tools provide bounded alert, evidence, lineage, pipeline, and incident-history context. Provider, model, route, token, cost, duration, and fallback metadata remain auditable.
+
+```text
+# 🤖 DQ Copilot
+## Why this alert needs investigation
+
+The warehouse partition is empty, but that does not yet prove the landing file is missing. The latest pipeline evidence should be checked first because an unsuccessful ClickHouse load can produce the same symptom even when the S3 object exists.
+
+The safest next action is to run triage and compare the landing artifact, load status, and downstream row counts. A backfill should remain approval-gated until those checks agree.
+
+Confidence 0.82
+Suggested command /dq triage alert_key:DQ-20260504-A1B2C3
+```
+
+The Copilot may improve explanation and action wording, but it cannot execute SQL, trigger Airflow, mutate data, or approve remediation.
 
 
 ## Alert Summary Template
@@ -84,7 +149,7 @@ Triage this alert before trusting downstream data.
 **Status** `Open`
 
 ### Recommended Next Step
-/triage alert_key:DQ-20260504-A1B2C3
+/dq triage alert_key:DQ-20260504-A1B2C3
 
 ### Technical Reference
 Alert Data Transport api
@@ -148,8 +213,8 @@ Needs Attention
 ⚠️ Open Warning 1
 
 ### Next Commands
-/alerts dt:2026-05-04 status:open limit:10
-/triage alert_key:<Alert Ref>
+/dq alerts dt:2026-05-04 status:open limit:10
+/dq triage alert_key:<Alert Ref>
 
 ### ----------------------------------------
 ```
@@ -162,16 +227,32 @@ Needs Attention
 ## Operator Answer
 
 ### Direct Answer
-The affected date should not be trusted yet because the raw partition is empty.
+I found two earlier investigation records for this Alert Ref. The latest prior report identified a missing segment, but that conclusion must be checked against the current evidence before any action is approved.
+
+### Alert Context
+Alert Ref `DQ-20260504-A1B2C3`
+Previous Investigation Records `2`
+Prior records are comparison context only, not proof of the current root cause.
+
+### Question
+Has this alert been investigated before?
 
 ### Guardrail
 I can explain, summarize, and recommend next steps, but I will not execute remediation without approval.
 
 ### Suggested Next Command
-/triage alert_key:DQ-20260504-A1B2C3
+/dq triage alert_key:DQ-20260504-A1B2C3
 
 ### ----------------------------------------
 ```
+
+Use the shared bounded Copilot path for history questions:
+
+```text
+/dq ask question:Has this alert been investigated before? alert_key:DQ-20260504-A1B2C3
+```
+
+The answer may summarize earlier outcomes for the same exact Alert Ref. It must not claim that the issue recurred across other dates unless separate current evidence proves that pattern.
 
 
 ## Backfill Approval Template
@@ -190,8 +271,8 @@ I can explain, summarize, and recommend next steps, but I will not execute remed
 No Airflow DAG was triggered. This command writes approval and audit state only.
 
 ### Decision Commands
-/approve request_id:APR-20260504-A1B2C3D4 comment:Reviewed exact scope
-/reject request_id:APR-20260504-A1B2C3D4 comment:Scope is unsafe
+/dq approve request_id:APR-20260504-A1B2C3D4 comment:Reviewed exact scope
+/dq reject request_id:APR-20260504-A1B2C3D4 comment:Scope is unsafe
 
 ### ----------------------------------------
 ```

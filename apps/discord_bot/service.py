@@ -15,15 +15,14 @@ from agent.graph import DEFAULT_CONFIDENCE_TARGET, DEFAULT_MAX_EVIDENCE_LOOP, Tr
 from agent.llm.copilot import build_operator_answer, build_triage_copilot_note
 from agent.state import TriageReport
 from agent.tools.alerts import list_alerts, load_alert
+from agent.tools.daily_summary import fetch_daily_quality_summary
 from apps.common.control_plane import (
     ControlPlaneClient,
     ControlPlaneClientError,
     ControlPlaneResponseError,
     ControlPlaneTransportError,
 )
-from pipelines.common.clickhouse import build_clickhouse_client, format_date_literal, quote_sql_literal
 from pipelines.common.logging import logger
-from pipelines.seeding.helpers import parse_date
 
 
 # --- Defining Constants
@@ -101,79 +100,48 @@ def probe_control_plane_health(
 
 
 # --- Defining Data Helpers
-def rows_to_dicts(
-    columns: list[str],
-    rows: list[tuple[Any, ...]],
-) -> list[dict[str, Any]]:
-    """
-    Convert ClickHouse tuple rows into dictionaries.
-
-    Args:
-        columns: Ordered result column names.
-        rows: ClickHouse result rows.
-
-    Returns:
-        List of row dictionaries.
-    """
-    return [dict(zip(columns, row)) for row in rows]
-
-
-def fetch_daily_summary_rows(
+def fetch_discord_daily_summary(
     dt: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    api_base_url: str | None = None,
+) -> tuple[dict[str, Any], str]:
     """
-    Fetch one date's DQ status and open-alert severity counts.
+    Fetch one daily summary through FastAPI with transport-only local fallback.
 
     Args:
         dt: Business date in YYYY-MM-DD format.
+        api_base_url: Optional API URL override.
 
     Returns:
-        Tuple containing check-status rows and alert-severity rows.
+        Daily summary payload and transport label.
+
+    Raises:
+        ControlPlaneResponseError: If FastAPI rejects or violates the response contract.
     """
-    run_dt = parse_date(dt)
-    client = build_clickhouse_client()
+    api_client = build_control_plane_client(api_base_url=api_base_url)
 
-    checks_result = client.query(
-        f"""
-        SELECT
-            status,
-            count() AS count
-        FROM dq.dq_check_results
-        WHERE dt = {format_date_literal(run_dt)}
-        GROUP BY status
-        ORDER BY status
-        """
-    )
-    alerts_result = client.query(
-        f"""
-        SELECT
-            severity,
-            count() AS count
-        FROM dq.alerts
-        WHERE dt = {format_date_literal(run_dt)}
-          AND status = {quote_sql_literal(DEFAULT_ALERT_STATUS)}
-        GROUP BY severity
-        ORDER BY severity
-        """
-    )
+    if api_client:
+        try:
+            return api_client.get_daily_summary(dt=dt), "api"
 
-    check_rows = rows_to_dicts(
-        list(checks_result.column_names or []),
-        checks_result.result_rows,
-    )
-    alert_rows = rows_to_dicts(
-        list(alerts_result.column_names or []),
-        alerts_result.result_rows,
-    )
+        except ControlPlaneTransportError as exc:
+            logger.warning(
+                "Discord daily summary API unavailable; using local tool | error_type=%s",
+                type(exc).__name__,
+            )
+
+        except ControlPlaneResponseError:
+            raise
+
+    payload = fetch_daily_quality_summary(dt=dt)
 
     logger.info(
-        "Fetched Discord daily summary rows | dt=%s checks=%d alerts=%d",
+        "Fetched Discord daily summary through local fallback | dt=%s checks=%d alerts=%d",
         dt,
-        len(check_rows),
-        len(alert_rows),
+        payload["total_checks"],
+        payload["total_open_alerts"],
     )
 
-    return check_rows, alert_rows
+    return payload, "local"
 
 
 def fetch_discord_alerts(
@@ -323,7 +291,7 @@ def answer_discord_question(
     question: str,
     alert_key: str = "",
     api_base_url: str | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """
     Answer a Discord Copilot question with optional alert grounding.
 
@@ -333,7 +301,8 @@ def answer_discord_question(
         api_base_url: Optional API URL override.
 
     Returns:
-        Answer, transport, correlation id, and normalized alert key.
+        Answer, transport, correlation id, normalized alert key, and bounded
+        incident-history count.
     """
     normalized_alert_key = alert_key.strip()
     api_client           = build_control_plane_client(api_base_url=api_base_url)
@@ -351,6 +320,9 @@ def answer_discord_question(
                 "transport": "api",
                 "agent_run_id": str(response.get("agent_run_id") or ""),
                 "alert_key": str(response.get("alert_key") or normalized_alert_key),
+                "incident_history_count": int(
+                    response.get("incident_history_count") or 0
+                ),
             }
 
         except ControlPlaneTransportError as exc:
@@ -381,6 +353,7 @@ def answer_discord_question(
         "answer": answer,
         "transport": "local",
         "agent_run_id": "",
+        "incident_history_count": 0,
         "alert_key": (
             alert_context.alert_key
             if alert_context is not None

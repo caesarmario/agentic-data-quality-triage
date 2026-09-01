@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -26,6 +27,8 @@ from pipelines.common.logging import logger
 
 
 # --- Defining Constants
+VALIDATION_EXTERNAL_LLM_ENABLED = "false"
+
 VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
     "all": (),
     "airflow": (
@@ -35,19 +38,33 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
     ),
     "agent": (
         "tests/test_agent_architecture.py",
+        "tests/test_agent_context.py",
         "tests/test_approval_queue.py",
+        "tests/test_audit_log.py",
         "tests/test_alert_lifecycle.py",
         "tests/test_alert_lookup.py",
         "tests/test_clickhouse_sql_guardrails.py",
         "tests/test_copilot_narratives.py",
+        "tests/test_control_plane_supervisor.py",
         "tests/test_dbt_lineage.py",
         "tests/test_evidence_planning.py",
         "tests/test_hypothesis_framing.py",
         "tests/test_human_display_helpers.py",
+        "tests/test_incident_history_tool.py",
         "tests/test_llm_routing.py",
+        "tests/test_metadata_lineage_agent.py",
+        "tests/test_schema_drift_evidence.py",
+        "tests/test_schema_drift_agent.py",
+        "tests/test_s3_artifacts.py",
+        "tests/test_sql_review_agent.py",
+        "tests/test_specialist_contracts.py",
+        "tests/test_supervisor_routing_policy.py",
+        "tests/test_supervisor_resilience.py",
+        "tests/test_table_health_tool.py",
         "tests/test_triage_evaluation.py",
     ),
     "api": (
+        "tests/test_daily_summary_tool.py",
         "tests/test_api_app.py",
         "tests/test_control_plane_client.py",
         "tests/test_smoke_readiness.py",
@@ -55,11 +72,14 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
     "checkpoint": (
         "tests/test_agent_checkpointing.py",
         "tests/test_airflow_dag_design.py",
+        "tests/test_audit_log.py",
+        "tests/test_s3_artifacts.py",
         "tests/test_validation_suite.py",
     ),
     "discord": (
         "tests/test_control_plane_client.py",
         "tests/test_copilot_narratives.py",
+        "tests/test_daily_summary_tool.py",
         "tests/test_discord_bot.py",
         "tests/test_discord_formatters.py",
         "tests/test_discord_webhook.py",
@@ -77,6 +97,7 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
     "life": (
         "tests/test_life_evaluation.py",
         "tests/test_life_history.py",
+        "tests/test_life_replay.py",
         "tests/test_airflow_dag_design.py",
         "tests/test_validation_suite.py",
     ),
@@ -85,6 +106,7 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
     ),
     "metadata": (
         "tests/test_metadata_catalog.py",
+        "tests/test_metadata_lineage_agent.py",
         "tests/test_metadata_registry.py",
         "tests/test_api_app.py",
         "tests/test_control_plane_client.py",
@@ -97,6 +119,15 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_dq_evidence.py",
         "tests/test_incident_policy.py",
         "tests/test_smoke_readiness.py",
+    ),
+    "schema": (
+        "tests/test_schema_drift.py",
+        "tests/test_schema_drift_alerts.py",
+        "tests/test_schema_drift_evidence.py",
+        "tests/test_schema_drift_agent.py",
+        "tests/test_airflow_dag_design.py",
+        "tests/test_smoke_readiness.py",
+        "tests/test_validation_suite.py",
     ),
     "ui": (
         "tests/test_streamlit_helpers.py",
@@ -182,8 +213,13 @@ def run_validation_suite(suite: str) -> int:
     """
     normalized = suite.strip().lower()
     command    = build_pytest_command(normalized)
+    child_env  = os.environ.copy()
     started_at = datetime.now(timezone.utc)
     started    = time.monotonic()
+
+    # Airflow validation must never spend external provider credit. Individual
+    # tests may still opt in locally while using fully mocked provider clients.
+    child_env["EXTERNAL_LLM_ENABLED"] = VALIDATION_EXTERNAL_LLM_ENABLED
 
     logger.info(
         "Starting validation suite | suite=%s started_at=%s command=%s",
@@ -193,7 +229,12 @@ def run_validation_suite(suite: str) -> int:
     )
 
     # Do not capture output: pytest stdout/stderr must remain visible in Airflow logs.
-    completed   = subprocess.run(command, cwd=PROJECT_ROOT, check=False)
+    completed   = subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        check=False,
+        env=child_env,
+    )
     duration_ms = int((time.monotonic() - started) * 1000)
     status      = "passed" if completed.returncode == 0 else "failed"
 

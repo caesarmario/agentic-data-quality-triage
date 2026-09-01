@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Literal
+from typing import Iterator, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -27,11 +29,22 @@ from pipelines.common.logging import logger
 
 # --- Defining Constants
 DEFAULT_MODEL_ROUTING_CONFIG_PATH = PROJECT_ROOT / "configs" / "agent" / "model_routing.yml"
+EXTERNAL_LLM_ENABLED_ENV          = "EXTERNAL_LLM_ENABLED"
+
+TRUE_ENV_VALUES  = frozenset({"1", "true", "yes", "on"})
+FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off", ""})
 
 ProviderType = Literal["heuristic", "openai_compatible"]
 ReasoningTier = Literal["none", "cheap", "mid", "strong"]
 RiskTier = Literal["low", "medium", "high"]
 StructuredOutputMode = Literal["off", "preferred"]
+
+
+# --- Defining Run-Scoped Provider Permission
+EXTERNAL_LLM_RUNTIME_PERMISSION: ContextVar[bool | None] = ContextVar(
+    "external_llm_runtime_permission",
+    default=None,
+)
 
 
 # --- Defining Classes
@@ -245,6 +258,67 @@ def getenv_from_config(env_name: str) -> str:
     return os.getenv(env_name, "").strip()
 
 
+def resolve_external_llm_enabled() -> bool:
+    """
+    Resolve the global external-provider kill switch.
+
+    External providers remain disabled by default even when a key is present. This
+    prevents normal tests and local pipeline runs from spending API credit merely
+    because credentials exist in the runtime environment.
+
+    Returns:
+        True only when EXTERNAL_LLM_ENABLED contains an accepted true value.
+
+    Raises:
+        ValueError: If the environment value is not an accepted boolean literal.
+    """
+    raw_value = os.getenv(EXTERNAL_LLM_ENABLED_ENV, "false").strip().lower()
+
+    if raw_value in TRUE_ENV_VALUES:
+        return True
+
+    if raw_value in FALSE_ENV_VALUES:
+        return False
+
+    raise ValueError(
+        f"{EXTERNAL_LLM_ENABLED_ENV} must be one of: "
+        "true, false, 1, 0, yes, no, on, or off."
+    )
+
+
+def external_llm_runtime_allowed() -> bool:
+    """
+    Resolve the current request-level external-provider permission.
+
+    Returns:
+        True when no narrower runtime policy is installed or it explicitly allows calls.
+    """
+    permission = EXTERNAL_LLM_RUNTIME_PERMISSION.get()
+
+    return permission is not False
+
+
+@contextmanager
+def external_llm_permission_scope(allowed: bool) -> Iterator[None]:
+    """
+    Apply an explicit external-provider permission to one bounded execution scope.
+
+    Args:
+        allowed: Whether nested model routes may use an external provider when the
+            global environment kill switch is also enabled.
+
+    Yields:
+        None while the request-level permission is active.
+    """
+    token = EXTERNAL_LLM_RUNTIME_PERMISSION.set(bool(allowed))
+
+    try:
+        yield
+
+    finally:
+        EXTERNAL_LLM_RUNTIME_PERMISSION.reset(token)
+
+
 def resolve_route(
     route_name: str | None = None,
     config: ModelRoutingConfig | None = None,
@@ -278,8 +352,20 @@ def resolve_route(
     model         = getenv_from_config(provider.model_env) or route.model or provider.default_model
     api_key       = getenv_from_config(provider.api_key_env)
     base_url      = getenv_from_config(provider.base_url_env)
+    external_llm_enabled = (
+        resolve_external_llm_enabled()
+        and external_llm_runtime_allowed()
+    )
 
-    use_heuristic   = force_heuristic or provider.provider_type == "heuristic" or not provider.enabled
+    use_heuristic   = (
+        force_heuristic
+        or provider.provider_type == "heuristic"
+        or not provider.enabled
+        or (
+            provider.provider_type == "openai_compatible"
+            and not external_llm_enabled
+        )
+    )
     fallback_reason = ""
 
     if force_heuristic:
@@ -290,6 +376,9 @@ def resolve_route(
 
     elif not provider.enabled:
         fallback_reason = f"provider_disabled:{provider_name}"
+
+    elif provider.provider_type == "openai_compatible" and not external_llm_enabled:
+        fallback_reason = "external_llm_disabled"
 
     elif not use_heuristic and provider.provider_type == "openai_compatible" and not api_key:
         use_heuristic   = True

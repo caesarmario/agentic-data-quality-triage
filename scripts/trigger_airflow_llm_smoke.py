@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -21,12 +22,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from dags.dq_platform.llm_smoke import LLM_SMOKE_ROUTE_NAMES
 from pipelines.common.logging import logger
 
 
 # --- Defining Constants
 LLM_SMOKE_DAG_ID = "92_dag_dq_llm_provider_smoke"
+EXTERNAL_SMOKE_ROUTE_NAMES = ("cheap_summary",)
+SAFE_RUN_ID                = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 # --- Defining Functions
@@ -45,7 +47,7 @@ def validate_route_name(route_name: str) -> str:
     """
     normalized = route_name.strip().lower()
 
-    if normalized not in LLM_SMOKE_ROUTE_NAMES:
+    if normalized not in EXTERNAL_SMOKE_ROUTE_NAMES:
         raise ValueError(f"Unknown LLM smoke route: {route_name}")
 
     return normalized
@@ -82,7 +84,8 @@ def build_trigger_command(
     Args:
         route_name: Allowlisted model route name.
         run_id: Explicit Airflow run id.
-        require_provider: Whether fallback should fail the selected route task.
+        require_provider: Explicit strict external-provider opt-in. When false,
+            the selected task remains heuristic-only and zero-cost.
 
     Returns:
         Subprocess argument list containing one valid JSON conf argument.
@@ -91,7 +94,7 @@ def build_trigger_command(
     conf        = json.dumps(
         {
             "route_name": normalized,
-            "require_provider": require_provider,
+            "run_external_provider": bool(require_provider),
         },
         separators=(",", ":"),
     )
@@ -137,7 +140,8 @@ def trigger_llm_smoke(
 
     Args:
         route_name: Allowlisted model route name.
-        require_provider: Whether the selected provider must answer without fallback.
+        require_provider: Explicit strict external-provider opt-in. When false,
+            the DagRun exercises only the zero-cost heuristic path.
         run_id: Optional explicit Airflow run id for audit correlation.
 
     Returns:
@@ -145,6 +149,9 @@ def trigger_llm_smoke(
     """
     normalized      = validate_route_name(route_name)
     resolved_run_id = run_id.strip() or build_llm_smoke_run_id(normalized)
+
+    if not SAFE_RUN_ID.fullmatch(resolved_run_id):
+        raise ValueError("Airflow run ID contains unsupported characters.")
 
     run_command(["airflow", "dags", "unpause", LLM_SMOKE_DAG_ID])
     run_command(
@@ -158,7 +165,7 @@ def trigger_llm_smoke(
     print(f"LLM_SMOKE_DAG_ID={LLM_SMOKE_DAG_ID}")
     print(f"LLM_SMOKE_RUN_ID={resolved_run_id}")
     print(f"LLM_SMOKE_ROUTE={normalized}")
-    print(f"LLM_SMOKE_REQUIRE_PROVIDER={str(require_provider).lower()}")
+    print(f"LLM_SMOKE_EXTERNAL_PROVIDER={str(require_provider).lower()}")
 
     return resolved_run_id
 
@@ -173,12 +180,12 @@ def build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(description="Trigger the manual Airflow LLM provider smoke DAG.")
 
-    parser.add_argument("--route", default="cheap_summary", choices=LLM_SMOKE_ROUTE_NAMES)
+    parser.add_argument("--route", default="cheap_summary", choices=EXTERNAL_SMOKE_ROUTE_NAMES)
     parser.add_argument("--run-id", default="", help="Optional explicit run id for audit lookup.")
     parser.add_argument(
         "--require-provider",
         action="store_true",
-        help="Fail the DagRun when the selected route uses a fallback provider.",
+        help="Explicitly run one strict external provider call; omitted means zero-cost heuristic mode.",
     )
 
     return parser

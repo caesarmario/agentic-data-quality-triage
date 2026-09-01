@@ -36,6 +36,10 @@ from agent.llm.structured_output import (
     parse_structured_output,
     summarize_structured_output_error,
 )
+from agent.supervisor.budgets import (
+    SupervisorLlmBudgetExceeded,
+    active_supervisor_llm_budget,
+)
 from pipelines.common.logging import logger
 
 
@@ -43,7 +47,17 @@ from pipelines.common.logging import logger
 TOOL_NAME = "llm_router"
 
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 30.0
-DEFAULT_PROVIDER_MAX_RETRIES     = 1
+DEFAULT_PROVIDER_MAX_RETRIES     = 0
+
+
+# --- Defining Exceptions
+class ExternalLlmExecutionDisabled(RuntimeError):
+    """
+    Reject direct external-provider execution when routing policy selected fallback.
+
+    This fail-closed boundary prevents callers from bypassing the global kill switch
+    by invoking the provider implementation directly with a non-executable route.
+    """
 
 
 # --- Defining Classes
@@ -360,16 +374,96 @@ def create_openai_compatible_client(resolved_route: ResolvedRoute) -> Any:
     # Import lazily so local no-LLM demos do not initialize provider clients.
     from openai import OpenAI
 
+    supervised_budget = active_supervisor_llm_budget()
+    timeout_seconds   = resolve_provider_timeout_seconds()
+
+    if supervised_budget:
+        remaining_ms = supervised_budget.remaining_latency_ms()
+
+        if remaining_ms < 1_000:
+            raise SupervisorLlmBudgetExceeded("latency_ms_budget_exceeded")
+
+        timeout_seconds = min(timeout_seconds, remaining_ms / 1_000)
+
     client_kwargs = {
         "api_key": resolved_route.api_key,
-        "timeout": resolve_provider_timeout_seconds(),
-        "max_retries": resolve_provider_max_retries(),
+        "timeout": timeout_seconds,
+        # Hidden SDK retries cannot be counted reliably by the supervisor ledger.
+        "max_retries": 0 if supervised_budget else resolve_provider_max_retries(),
     }
 
     if resolved_route.base_url:
         client_kwargs["base_url"] = resolved_route.base_url
 
     return OpenAI(**client_kwargs)
+
+
+def reserve_supervised_provider_call(
+    messages: list[dict[str, str]],
+    resolved_route: ResolvedRoute,
+) -> UUID | None:
+    """
+    Reserve one explicit external provider call under supervisor policy.
+
+    Args:
+        messages: Exact messages sent to the provider.
+        resolved_route: Provider route containing output and costing limits.
+
+    Returns:
+        Reservation UUID when supervised, otherwise None.
+
+    Raises:
+        SupervisorLlmBudgetExceeded: If a supervised call exceeds its budget.
+    """
+    ledger = active_supervisor_llm_budget()
+
+    if ledger is None:
+        return None
+
+    projected_input_tokens = estimate_messages_input_tokens(messages=messages)
+    projected_tokens       = (
+        projected_input_tokens + resolved_route.route.max_output_tokens
+    )
+    projected_cost = estimate_cost_usd(
+        input_tokens=projected_input_tokens,
+        output_tokens=resolved_route.route.max_output_tokens,
+        input_cost_per_1m_tokens=resolved_route.route.input_cost_per_1m_tokens,
+        output_cost_per_1m_tokens=resolved_route.route.output_cost_per_1m_tokens,
+    )
+
+    return ledger.reserve_model_call(
+        projected_tokens=projected_tokens,
+        projected_cost_usd=projected_cost,
+    )
+
+
+def reconcile_supervised_provider_call(
+    reservation_id: UUID | None,
+    response: LlmResponse,
+) -> None:
+    """
+    Replace one supervised reservation with actual normalized provider usage.
+
+    Args:
+        reservation_id: Optional active reservation UUID.
+        response: Normalized provider response containing usage and cost.
+
+    Returns:
+        None.
+    """
+    if reservation_id is None:
+        return
+
+    ledger = active_supervisor_llm_budget()
+
+    if ledger is None:
+        raise RuntimeError("Supervised LLM reservation lost its active budget context.")
+
+    ledger.reconcile_model_call(
+        reservation_id=reservation_id,
+        actual_tokens=response.input_tokens + response.output_tokens,
+        actual_cost_usd=response.estimated_cost_usd,
+    )
 
 
 def build_chat_completion_kwargs(
@@ -450,8 +544,15 @@ def run_openai_compatible_route(
         Normalized LlmResponse.
 
     Raises:
+        ExternalLlmExecutionDisabled: If routing policy selected heuristic fallback.
         Exception: If provider execution fails outside the bounded schema compatibility retry.
     """
+    if resolved_route.use_heuristic or resolved_route.provider.provider_type == "heuristic":
+        raise ExternalLlmExecutionDisabled(
+            "External LLM execution is disabled by routing policy. "
+            "Use run_llm_task so the configured heuristic fallback remains auditable."
+        )
+
     client               = create_openai_compatible_client(resolved_route=resolved_route)
     base_messages        = build_messages(request=request)
     structured_requested = bool(
@@ -481,6 +582,11 @@ def run_openai_compatible_route(
         structured_requested,
     )
 
+    reservation_id = reserve_supervised_provider_call(
+        messages=executed_messages,
+        resolved_route=resolved_route,
+    )
+
     try:
         completion = client.chat.completions.create(**completion_kwargs)
 
@@ -506,6 +612,10 @@ def run_openai_compatible_route(
             resolved_route.model,
             type(exc).__name__,
         )
+        reservation_id = reserve_supervised_provider_call(
+            messages=executed_messages,
+            resolved_route=resolved_route,
+        )
         completion = client.chat.completions.create(**completion_kwargs)
 
     choice  = completion.choices[0]
@@ -526,7 +636,7 @@ def run_openai_compatible_route(
 
     duration_ms = int((time.monotonic() - started_monotonic) * 1000)
 
-    return build_response(
+    response = build_response(
         request=request,
         resolved_route=resolved_route,
         content=content,
@@ -543,6 +653,13 @@ def run_openai_compatible_route(
             "reasoning_tokens": reasoning_tokens,
         },
     )
+
+    reconcile_supervised_provider_call(
+        reservation_id=reservation_id,
+        response=response,
+    )
+
+    return response
 
 
 def finalize_routing_metadata(

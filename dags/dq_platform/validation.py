@@ -29,6 +29,7 @@ VALIDATION_SUITE_NAMES = (
     "mcp",
     "metadata",
     "pipelines",
+    "schema",
     "ui",
 )
 

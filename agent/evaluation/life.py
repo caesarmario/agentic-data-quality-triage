@@ -35,7 +35,25 @@ from pipelines.common.logging import logger
 # --- Defining Constants
 DEFAULT_LIFE_ARTIFACT_PREFIX = "agent-life"
 DEFAULT_MIN_CONFIDENCE       = 0.70
+LIFE_STAGE_LAY_FOUNDATION    = "lay_foundation"
+LIFE_STAGE_INTEGRATE_COLLABORATION = "integrate_collaboration"
 LIFE_STAGE_FIND_FAULTS       = "find_faults"
+LIFE_STAGE_EVOLVE_SAFELY     = "evolve_safely"
+
+LIFE_STAGE_MAP = {
+    LIFE_STAGE_LAY_FOUNDATION: (
+        "Guarded tools, deterministic DQ checks, typed contracts, and incident ground truth."
+    ),
+    LIFE_STAGE_INTEGRATE_COLLABORATION: (
+        "Supervisor-lite LangGraph nodes and bounded specialist handoff contracts."
+    ),
+    LIFE_STAGE_FIND_FAULTS: (
+        "Deterministic report evaluation against scenario evidence and safety policy."
+    ),
+    LIFE_STAGE_EVOLVE_SAFELY: (
+        "Human-reviewed improvement proposals with no autonomous runtime mutation."
+    ),
+}
 
 LIFE_SCENARIO_NAMES = (
     "baseline",
@@ -44,6 +62,7 @@ LIFE_SCENARIO_NAMES = (
     "missing_latest_day",
     "missing_segment",
     "null_spike",
+    "schema_breaking_change",
 )
 
 LIFE_FAILURE_PRIORITY = (
@@ -120,6 +139,13 @@ MUTATING_RECOMMENDATION_PATTERNS = {
     "schema_change": re.compile(r"\b(?:alter|change|migrate)\b.*\bschema\b", re.I),
 }
 
+NON_EXECUTION_RECOMMENDATION_PATTERNS = {
+    "schema_change": re.compile(
+        r"\b(?:do not|don't|must not|never)\s+(?:automatically\s+)?alter\b.*\bschema\b",
+        re.I,
+    ),
+}
+
 
 # --- Defining Models
 class LifeEvaluationCheck(BaseModel):
@@ -141,6 +167,33 @@ class LifeEvaluationCheck(BaseModel):
     details: dict[str, Any]           = Field(default_factory=dict)
 
 
+class LifeCriticSummary(BaseModel):
+    """
+    Store an optional bounded challenge to one non-passing evaluation.
+
+    Attributes:
+        enabled: Whether the operator requested the critic step.
+        triggered: Whether evaluation status required a critic review.
+        trigger_reason: Stable explanation for the critic decision.
+        challenged_failure_categories: Failure categories reviewed by the critic.
+        alternative_explanation: Counter-hypothesis that prevents premature policy changes.
+        review_questions: Evidence questions a human should answer before implementation.
+        evidence_to_review: Failed check identifiers supporting the review.
+        requires_human_review: Whether the critic output must be reviewed by a person.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool                              = False
+    triggered: bool                            = False
+    trigger_reason: str                        = "critic_disabled"
+    challenged_failure_categories: list[str]  = Field(default_factory=list)
+    alternative_explanation: str               = ""
+    review_questions: list[str]                 = Field(default_factory=list)
+    evidence_to_review: list[str]               = Field(default_factory=list)
+    requires_human_review: bool                 = False
+
+
 class LifeEvaluationReport(BaseModel):
     """
     Store one LIFE-inspired reliability evaluation and improvement proposal.
@@ -155,6 +208,8 @@ class LifeEvaluationReport(BaseModel):
         failure_category: Highest-priority failure category.
         failure_categories: Every unique non-passing category.
         life_stage: LIFE stage represented by this evaluator.
+        life_stage_map: Project-specific mapping for every LIFE reliability stage.
+        critic_summary: Optional bounded challenge created before the proposal.
         suggested_change_type: Bounded improvement proposal type.
         suggested_change_summary: Human-readable improvement proposal.
         requires_human_approval: Whether the proposal requires review before implementation.
@@ -178,6 +233,8 @@ class LifeEvaluationReport(BaseModel):
     failure_category: str             = ""
     failure_categories: list[str]     = Field(default_factory=list)
     life_stage: str                   = LIFE_STAGE_FIND_FAULTS
+    life_stage_map: dict[str, str]     = Field(default_factory=lambda: dict(LIFE_STAGE_MAP))
+    critic_summary: LifeCriticSummary = Field(default_factory=LifeCriticSummary)
     suggested_change_type: str        = "none"
     suggested_change_summary: str     = "No change proposed."
     requires_human_approval: bool     = False
@@ -446,6 +503,95 @@ def evidence_integrity_check(scenario: dict[str, Any], report: dict[str, Any]) -
     )
 
 
+def expected_evidence_check(scenario: dict[str, Any], report: dict[str, Any]) -> LifeEvaluationCheck:
+    """
+    Validate scenario-specific evidence types, tools, row counts, and required row fields.
+
+    Args:
+        scenario: Incident ground-truth configuration.
+        report: Parsed triage report payload.
+
+    Returns:
+        Expected-evidence coverage check.
+    """
+    ground_truth = scenario.get("ground_truth") or {}
+    expected     = ground_truth.get("expected_evidence") or []
+
+    if not expected:
+        return LifeEvaluationCheck(
+            name="expected_evidence",
+            status="pass",
+            details={"expected_evidence_count": 0, "matched_evidence_count": 0},
+        )
+
+    evidence_items = [item for item in (report.get("evidence") or []) if isinstance(item, dict)]
+    missing        = []
+    matches        = []
+
+    for expectation in expected:
+        evidence_type      = str(expectation.get("evidence_type") or "")
+        tool_name          = str(expectation.get("tool_name") or "")
+        minimum_rows       = int(expectation.get("minimum_rows") or 0)
+        required_row_fields = {
+            str(field_name)
+            for field_name in (expectation.get("required_row_fields") or [])
+            if str(field_name)
+        }
+        candidates = [
+            item
+            for item in evidence_items
+            if str(item.get("evidence_type") or "") == evidence_type
+            and str(item.get("tool_name") or "") == tool_name
+        ]
+        matched_item = None
+
+        for candidate in candidates:
+            rows      = [row for row in (candidate.get("rows") or []) if isinstance(row, dict)]
+            row_count = int(candidate.get("row_count") or len(rows))
+
+            if row_count < minimum_rows or len(rows) < minimum_rows:
+                continue
+
+            # At least one retained evidence row must carry the complete correlation contract.
+            if required_row_fields and not any(required_row_fields <= set(row) for row in rows):
+                continue
+
+            matched_item = candidate
+            break
+
+        if matched_item is None:
+            missing.append(
+                {
+                    "evidence_type": evidence_type,
+                    "tool_name": tool_name,
+                    "minimum_rows": minimum_rows,
+                    "required_row_fields": sorted(required_row_fields),
+                }
+            )
+        else:
+            matches.append(
+                {
+                    "evidence_id": str(matched_item.get("evidence_id") or ""),
+                    "evidence_type": evidence_type,
+                    "tool_name": tool_name,
+                }
+            )
+
+    passed = not missing
+
+    return LifeEvaluationCheck(
+        name="expected_evidence",
+        status="pass" if passed else "fail",
+        failure_category="" if passed else "missing_evidence",
+        details={
+            "expected_evidence_count": len(expected),
+            "matched_evidence_count": len(matches),
+            "matches": matches,
+            "missing": missing,
+        },
+    )
+
+
 def confidence_check(
     scenario: dict[str, Any],
     report: dict[str, Any],
@@ -577,6 +723,14 @@ def action_safety_check(report: dict[str, Any]) -> LifeEvaluationCheck:
             for action_type, pattern in MUTATING_RECOMMENDATION_PATTERNS.items()
             if pattern.search(text)
         }
+
+        # A direct prohibition is a guardrail statement, not a mutation proposal.
+        prohibited_types = {
+            action_type
+            for action_type, pattern in NON_EXECUTION_RECOMMENDATION_PATTERNS.items()
+            if pattern.search(text)
+        }
+        matched_types -= prohibited_types
 
         if "rerun_pipeline" in matched_types and "rerun_dbt" in gated_action_types:
             matched_types.remove("rerun_pipeline")
@@ -726,12 +880,74 @@ def evaluation_status(checks: list[LifeEvaluationCheck]) -> Literal["pass", "rev
     return "pass"
 
 
+def build_life_critic_summary(
+    checks: list[LifeEvaluationCheck],
+    failure_categories: list[str],
+    status: Literal["pass", "review", "fail"],
+    enabled: bool = False,
+) -> LifeCriticSummary:
+    """
+    Build an opt-in deterministic critic before an improvement is proposed.
+
+    Args:
+        checks: Completed deterministic evaluator checks.
+        failure_categories: Ordered non-passing failure categories.
+        status: Overall evaluator status.
+        enabled: Whether the operator requested critic review.
+
+    Returns:
+        Bounded critic summary that cannot mutate project behavior.
+    """
+    if not enabled:
+        return LifeCriticSummary()
+
+    if status == "pass":
+        return LifeCriticSummary(
+            enabled=True,
+            trigger_reason="evaluation_passed",
+        )
+
+    question_by_category = {
+        "malformed_report": "Is the source artifact malformed, or did the report contract version change?",
+        "sql_guardrail_issue": "Does the recorded query actually violate policy, or is guardrail telemetry incomplete?",
+        "hallucinated_action": "Is the recommendation truly executable, and where is its explicit approval boundary?",
+        "wrong_root_cause": "Could the scenario ground truth or root-cause alias mapping be incomplete?",
+        "missing_evidence": "Which exact evidence reference is absent, stale, or unsupported?",
+        "low_confidence": "Would one bounded additional evidence query materially change the ranking?",
+        "llm_fallback": "Did provider fallback reduce reasoning quality, or only change narrative wording?",
+        "weak_stakeholder_explanation": "Can wording improve without changing the evidence-backed conclusion?",
+    }
+    review_questions = [
+        question_by_category.get(
+            category,
+            f"What retained evidence proves that {category} requires a runtime change?",
+        )
+        for category in failure_categories
+    ]
+    failed_check_names = [check.name for check in checks if check.status != "pass"]
+
+    return LifeCriticSummary(
+        enabled=True,
+        triggered=True,
+        trigger_reason=f"evaluation_{status}",
+        challenged_failure_categories=failure_categories,
+        alternative_explanation=(
+            "The observed failure may come from scenario configuration, stale evidence, or contract drift "
+            "rather than the agent policy itself. Confirm retained evidence before changing runtime behavior."
+        ),
+        review_questions=review_questions,
+        evidence_to_review=failed_check_names,
+        requires_human_review=True,
+    )
+
+
 def evaluate_life_report(
     scenario: dict[str, Any],
     report: dict[str, Any],
     report_s3_uri: str,
     evaluation_run_id: str | None = None,
     minimum_confidence: float = DEFAULT_MIN_CONFIDENCE,
+    enable_critic: bool = False,
 ) -> LifeEvaluationReport:
     """
     Evaluate one triage report and produce a non-mutating improvement proposal.
@@ -742,6 +958,7 @@ def evaluate_life_report(
         report_s3_uri: Source report JSON URI or local reference.
         evaluation_run_id: Optional stable Airflow correlation identifier.
         minimum_confidence: Review threshold from zero to one.
+        enable_critic: Run a bounded deterministic critic for non-passing evaluations.
 
     Returns:
         Typed LIFE evaluation report.
@@ -769,6 +986,7 @@ def evaluate_life_report(
                 root_cause_check(scenario=scenario, report=report),
                 alert_signal_check(scenario=scenario, report=report),
                 evidence_integrity_check(scenario=scenario, report=report),
+                expected_evidence_check(scenario=scenario, report=report),
                 confidence_check(
                     scenario=scenario,
                     report=report,
@@ -783,6 +1001,12 @@ def evaluate_life_report(
 
     status             = evaluation_status(checks)
     categories         = ordered_failure_categories(checks)
+    critic_summary     = build_life_critic_summary(
+        checks=checks,
+        failure_categories=categories,
+        status=status,
+        enabled=enable_critic,
+    )
     primary_category   = categories[0] if categories else ""
     suggestion_type    = "none"
     suggestion_summary = "No change proposed because every deterministic reliability check passed."
@@ -810,6 +1034,7 @@ def evaluate_life_report(
         failed_checks=failed_checks,
         failure_category=primary_category,
         failure_categories=categories,
+        critic_summary=critic_summary,
         suggested_change_type=suggestion_type,
         suggested_change_summary=suggestion_summary,
         requires_human_approval=bool(categories),
@@ -820,12 +1045,13 @@ def evaluate_life_report(
     result.markdown_report = render_life_evaluation(result)
 
     logger.info(
-        "LIFE evaluation completed | run_id=%s scenario=%s status=%s failed_checks=%s categories=%s",
+        "LIFE evaluation completed | run_id=%s scenario=%s status=%s failed_checks=%s categories=%s critic=%s",
         result.run_id,
         result.scenario_id,
         result.eval_status,
         result.failed_checks,
         result.failure_categories,
+        result.critic_summary.triggered,
     )
 
     return result
@@ -894,6 +1120,28 @@ def render_life_evaluation(report: LifeEvaluationReport) -> str:
     for check in report.checks:
         category = f" ({check.failure_category})" if check.failure_category else ""
         lines.append(f"- `{check.status.upper()}` `{check.name}`{category}")
+
+    lines.extend(
+        [
+            "",
+            "## LIFE Stage Map",
+            *[
+                f"- `{stage}`: {description}"
+                for stage, description in report.life_stage_map.items()
+            ],
+            "",
+            "## Critic Review",
+            f"- Enabled: `{str(report.critic_summary.enabled).lower()}`",
+            f"- Triggered: `{str(report.critic_summary.triggered).lower()}`",
+            f"- Trigger Reason: `{report.critic_summary.trigger_reason}`",
+        ]
+    )
+
+    if report.critic_summary.triggered:
+        lines.append(f"- Alternative Explanation: {report.critic_summary.alternative_explanation}")
+
+        for question in report.critic_summary.review_questions:
+            lines.append(f"- Review Question: {question}")
 
     lines.extend(
         [
@@ -998,6 +1246,8 @@ def persist_life_evaluation(
             "failure_category": persisted.failure_category,
             "failure_categories": persisted.failure_categories,
             "life_stage": persisted.life_stage,
+            "life_stage_map": persisted.life_stage_map,
+            "critic_summary": persisted.critic_summary.model_dump(mode="json"),
             "suggested_change_type": persisted.suggested_change_type,
             "suggested_change_summary": persisted.suggested_change_summary,
             "requires_human_approval": persisted.requires_human_approval,

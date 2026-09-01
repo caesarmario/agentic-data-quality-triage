@@ -45,7 +45,7 @@ Manual `dag_run.conf` example:
 {"validation_suite": "all", "require_api": true}
 ```
 
-Allowed suites: `all`, `airflow`, `agent`, `api`, `checkpoint`, `discord`, `dq`, `life`, `llm`, `mcp`, `metadata`, `pipelines`, and `ui`.
+Allowed suites: `all`, `airflow`, `agent`, `api`, `checkpoint`, `discord`, `dq`, `life`, `llm`, `mcp`, `metadata`, `pipelines`, `schema`, and `ui`.
 """
 
 

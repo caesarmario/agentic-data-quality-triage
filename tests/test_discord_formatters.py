@@ -279,6 +279,7 @@ def test_format_daily_summary_includes_copilot_readout() -> None:
         check_rows=[{"status": "fail", "count": 1}],
         alert_rows=[{"severity": "critical", "count": 1}],
         assistant_note="This day needs investigation before downstream metrics are trusted.",
+        data_transport="api",
     )
 
     assert "Day Status" in message
@@ -287,6 +288,7 @@ def test_format_daily_summary_includes_copilot_readout() -> None:
     assert "Alert Risk" in message
     assert "Copilot Analysis" in message
     assert "needs investigation" in message
+    assert "Data Transport `api`" in message
     assert DISCORD_SEPARATOR in message
 
 
@@ -303,10 +305,13 @@ def test_format_operator_answer_includes_guardrail() -> None:
         alert_key="orders|dq_failure|2026-05-04|dq.raw_orders|row_count_positive|table",
         transport="api",
         agent_run_id="44444444-4444-4444-4444-444444444444",
+        incident_history_count=2,
     )
 
     assert "DQ Copilot" in message
     assert "Direct Answer" in message
+    assert "Previous Investigation Records `2`" in message
+    assert "comparison context only" in message
     assert "Suggested Next Command" in message
     assert "Run triage" in message
     assert "will not execute remediation without approval" in message
@@ -338,8 +343,8 @@ def test_format_backfill_preview_is_durable_and_non_mutating_by_text() -> None:
     assert "Safety Check" in message
     assert "No Airflow DAG was triggered" in message
     assert "APR-20260504-A1B2C3D4" in message
-    assert "/approve" in message
-    assert "/reject" in message
+    assert "/dq approve" in message
+    assert "/dq reject" in message
     assert DISCORD_SEPARATOR in message
 
 
@@ -431,8 +436,8 @@ def test_documented_templates_match_discord_runtime_and_command_syntax() -> None
     assert "APR-20260504-A1B2C3D4" in document
     assert "mocked approval" not in document.lower()
     assert "BACKFILL APPROVAL REQUEST" in document
-    assert "/triage alert_key:DQ-20260504-A1B2C3" in document
-    assert "/approve request_id:APR-20260504-A1B2C3D4" in document
+    assert "/dq triage alert_key:DQ-20260504-A1B2C3" in document
+    assert "/dq approve request_id:APR-20260504-A1B2C3D4" in document
     assert "slash command" in document.lower()
     assert "DISCORD_GUILD_ID" in document
 

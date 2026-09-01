@@ -19,7 +19,7 @@ from dq_platform.helpers import (
     runner_plain_bash_task,
     start_task,
 )
-from dq_platform.llm_smoke import LLM_SMOKE_ROUTE_NAMES, emit_llm_smoke_summary
+from dq_platform.llm_smoke import emit_llm_smoke_summary
 
 
 # --- Getting Logger
@@ -29,30 +29,37 @@ logger = logging.getLogger(__name__)
 # --- Defining DAG ID And Documentation
 DAG_ID = "92_dag_dq_llm_provider_smoke"
 
+# Only this low-risk route may make one explicitly approved external request.
+EXTERNAL_SMOKE_ROUTE_NAMES = ("cheap_summary",)
+DEFAULT_EXTERNAL_SMOKE_ROUTE = EXTERNAL_SMOKE_ROUTE_NAMES[0]
+
 DOC_MD = """
 # 92 - LLM Provider Smoke
 
 Manual administrative DAG for validating the provider-agnostic LLM router without
 running a full incident triage workflow.
 
-The DAG always runs a deterministic heuristic baseline first. It then runs one
-allowlisted model route using the configured fallback chain.
+The DAG always runs a deterministic heuristic baseline first. The selected
+route also runs in heuristic mode by default, so triggering this DAG does not
+spend provider credit unless the operator explicitly sets
+`run_external_provider` to `true`.
 
-Default fallback-safe example:
-
-```json
-{"route_name": "cheap_summary", "require_provider": false}
-```
-
-Strict provider example:
+Default zero-cost example:
 
 ```json
-{"route_name": "cheap_summary", "require_provider": true}
+{"route_name": "cheap_summary", "run_external_provider": false}
 ```
 
-Fallback-safe mode succeeds when Gemini, OpenAI, or xAI is unavailable but the
-router returns a usable heuristic response. Strict mode fails unless the provider
-configured for the selected route produces the final response.
+Strict external-provider example:
+
+```json
+{"route_name": "cheap_summary", "run_external_provider": true}
+```
+
+External mode permits one configured provider call only. Its fallback chain is
+bounded to the local heuristic route, and the runner rejects a projected total
+above 4,000 tokens or USD 0.01. External mode fails unless the configured
+provider produces the final response.
 
 All prompts and context are synthetic. API keys, raw reasoning, and raw provider
 errors are excluded from Airflow output and ClickHouse audit payloads.
@@ -65,19 +72,19 @@ def llm_smoke_dag_params() -> dict[str, Param]:
     Build allowlisted parameters for manual provider smoke runs.
 
     Returns:
-        Dictionary containing route and strict-provider parameters.
+        Dictionary containing route and explicit external-provider parameters.
     """
     return {
         "route_name": Param(
-            "cheap_summary",
+            DEFAULT_EXTERNAL_SMOKE_ROUTE,
             type="string",
-            enum=list(LLM_SMOKE_ROUTE_NAMES),
-            description="Model routing entry tested after the heuristic baseline.",
+            enum=list(EXTERNAL_SMOKE_ROUTE_NAMES),
+            description="Allowlisted low-risk route used when external smoke is explicitly enabled.",
         ),
-        "require_provider": Param(
+        "run_external_provider": Param(
             False,
             type="boolean",
-            description="Fail if the selected route falls back instead of using its configured provider.",
+            description="Explicitly run one strict external provider call; false keeps this task zero-cost.",
         ),
     }
 
@@ -119,7 +126,9 @@ with DAG(
         project_command=(
             "python scripts/smoke_llm_provider.py "
             "--route '{{ dag_run.conf.get(\"route_name\", \"cheap_summary\") }}' "
-            "{% if dag_run.conf.get(\"require_provider\", false) %}--require-provider{% endif %}"
+            "{% if dag_run.conf.get(\"run_external_provider\", false) %}"
+            "--strict-external-provider"
+            "{% else %}--force-heuristic{% endif %}"
         ),
         execution_timeout=timedelta(minutes=5),
     )

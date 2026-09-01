@@ -36,6 +36,7 @@ DEFAULT_CATEGORY_ALIASES = {
     "late_arriving_batch": {"late_arriving", "freshness_gap"},
     "duplicate_ingestion": {"duplicate_ingestion", "unknown_data_issue"},
     "completeness_regression": {"completeness_regression", "unknown_data_issue"},
+    "breaking_schema_change": {"breaking_schema_change"},
     "no_incident": {"no_incident"},
 }
 
@@ -188,6 +189,32 @@ def validate_scenario_config(path: Path, scenario: dict[str, Any]) -> None:
         for key in ["table_name", "check_name", "severity"]:
             if key not in signal:
                 raise ValueError(f"Scenario signal {index} missing required field '{key}': {path}")
+
+    expected_evidence = ground_truth.get("expected_evidence") or []
+
+    if not isinstance(expected_evidence, list):
+        raise ValueError(f"Scenario expected_evidence must be a list: {path}")
+
+    for index, evidence in enumerate(expected_evidence):
+        if not isinstance(evidence, dict):
+            raise ValueError(f"Scenario expected_evidence[{index}] must be an object: {path}")
+
+        for key in ["evidence_type", "tool_name"]:
+            if not str(evidence.get(key) or "").strip():
+                raise ValueError(f"Scenario evidence {index} missing required field '{key}': {path}")
+
+        minimum_rows = evidence.get("minimum_rows", 0)
+
+        if isinstance(minimum_rows, bool) or not isinstance(minimum_rows, int) or minimum_rows < 0:
+            raise ValueError(f"Scenario evidence {index} minimum_rows must be a non-negative integer: {path}")
+
+        required_row_fields = evidence.get("required_row_fields") or []
+
+        if not isinstance(required_row_fields, list) or any(
+            not isinstance(field_name, str) or not field_name.strip()
+            for field_name in required_row_fields
+        ):
+            raise ValueError(f"Scenario evidence {index} required_row_fields must be a string list: {path}")
 
 
 def scenario_to_eval_spec(path: Path, scenario: dict[str, Any]) -> EvaluationScenario:

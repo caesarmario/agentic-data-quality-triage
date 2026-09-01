@@ -14,20 +14,30 @@ from typing import Sequence
 
 # --- Defining Constants
 VALIDATION_DAG_ID = "91_dag_dq_platform_validation"
+TRIAGE_DAG_ID     = "40_dag_dq_orders_triage_agent"
 LLM_SMOKE_DAG_ID  = "92_dag_dq_llm_provider_smoke"
 CHECKPOINT_SMOKE_DAG_ID = "93_dag_dq_agent_checkpoint_smoke"
 LIFE_EVALUATION_DAG_ID  = "94_dag_dq_agent_life_evaluation"
 METADATA_SYNC_DAG_ID    = "95_dag_dq_metadata_registry_sync"
+SCHEMA_DRIFT_DAG_ID     = "96_dag_dq_schema_drift_detection"
+METADATA_LINEAGE_DAG_ID = "97_dag_dq_metadata_lineage_agent_smoke"
+CONTROL_PLANE_SUPERVISOR_DAG_ID = "98_dag_dq_control_plane_supervisor_smoke"
+CONTROL_PLANE_RESILIENCE_DAG_ID = "99_dag_dq_control_plane_resilience_smoke"
 AIRFLOW_LOG_ROOT  = Path("/opt/airflow/logs")
 SAFE_IDENTIFIER   = re.compile(r"^[A-Za-z0-9_.-]+$")
 SAFE_RUN_ID       = SAFE_IDENTIFIER
 
 ADMINISTRATIVE_DAG_IDS = (
+    TRIAGE_DAG_ID,
     VALIDATION_DAG_ID,
     LLM_SMOKE_DAG_ID,
     CHECKPOINT_SMOKE_DAG_ID,
     LIFE_EVALUATION_DAG_ID,
     METADATA_SYNC_DAG_ID,
+    SCHEMA_DRIFT_DAG_ID,
+    METADATA_LINEAGE_DAG_ID,
+    CONTROL_PLANE_SUPERVISOR_DAG_ID,
+    CONTROL_PLANE_RESILIENCE_DAG_ID,
 )
 
 
@@ -59,10 +69,10 @@ def airflow_log_directory(
     log_root: Path = AIRFLOW_LOG_ROOT,
 ) -> Path:
     """
-    Resolve a bounded log directory for an allowlisted administrative DAG.
+    Resolve a bounded log directory for an allowlisted operator DAG.
 
     Args:
-        dag_id: Administrative Airflow DAG identifier.
+        dag_id: Allowlisted Airflow DAG identifier.
         run_id: Airflow run identifier.
         log_root: Airflow log root, overridable by tests.
 
@@ -73,7 +83,7 @@ def airflow_log_directory(
         ValueError: If the DAG is not allowlisted or identifiers are unsafe.
     """
     if dag_id not in ADMINISTRATIVE_DAG_IDS:
-        raise ValueError(f"Unsupported administrative DAG id: {dag_id}")
+        raise ValueError(f"Unsupported operator DAG id: {dag_id}")
 
     if not SAFE_IDENTIFIER.fullmatch(dag_id):
         raise ValueError("Airflow DAG id contains unsupported characters.")
@@ -108,10 +118,10 @@ def print_airflow_logs(
     log_root: Path = AIRFLOW_LOG_ROOT,
 ) -> int:
     """
-    Print retained task logs for one allowlisted administrative DagRun.
+    Print retained task logs for one allowlisted operator DagRun.
 
     Args:
-        dag_id: Administrative Airflow DAG identifier.
+        dag_id: Allowlisted Airflow DAG identifier.
         run_id: Airflow run identifier.
         log_root: Airflow log root, overridable by tests.
 
@@ -144,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     Returns:
         Configured ArgumentParser instance.
     """
-    parser = argparse.ArgumentParser(description="Read retained task logs for one administrative Airflow run.")
+    parser = argparse.ArgumentParser(description="Read retained task logs for one allowlisted Airflow run.")
     parser.add_argument("--dag-id", default=VALIDATION_DAG_ID, choices=ADMINISTRATIVE_DAG_IDS)
     parser.add_argument("--run-id", required=True)
 
