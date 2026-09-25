@@ -1,0 +1,30 @@
+{
+  "name": "agentic-dq-control-plane-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test components/__tests__/approval-action-policy.test.ts components/__tests__/persisted-report-contract.test.ts components/__tests__/shadcn-ui-contract.test.ts tests/proxy-policy.test.mjs"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "4.3.3",
+    "@base-ui/react": "1.8.0",
+    "@types/node": "26.5.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "class-variance-authority": "0.7.1",
+    "cn": "0.2.6",
+    "lucide-react": "1.42.0",
+    "next": "16.3.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "tailwindcss": "4.3.3",
+    "typescript": "7.0.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.13"
+  }
+}

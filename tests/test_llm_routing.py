@@ -1334,3 +1334,58 @@ def test_triage_report_retains_sanitized_llm_runtime_summary() -> None:
     assert "## LLM Runtime" in report.markdown_report
     assert "gemini-3.5-flash-lite" in report.markdown_report
     assert "prompt" not in payload["llm_runtime"]
+
+
+def test_report_counts_planning_framing_and_narrative_without_evidence_contamination(monkeypatch) -> None:
+    """
+    Reconcile all three model stages without double-counting narrative evidence.
+
+    Args:
+        monkeypatch: Pytest fixture replacing database audit dependencies.
+
+    Returns:
+        None. Telemetry survives serialization and remains outside DQ evidence.
+    """
+    from types import SimpleNamespace
+
+    from agent.nodes import reporting
+    from agent.llm.client import LlmResponse
+    from agent.tools.audit_log import build_llm_route_audit_payload
+
+    state = build_triage_state()
+    original_evidence = list(state.evidence)
+    audit_events = []
+    monkeypatch.setattr(reporting, "build_clickhouse_client", lambda **kwargs: None)
+    monkeypatch.setattr(
+        reporting, "write_llm_route_audit_event",
+        lambda **kwargs: audit_events.append(build_llm_route_audit_payload(kwargs["response"])),
+    )
+    nodes = reporting.ReportNodes()
+    nodes.config = SimpleNamespace(clickhouse_host=None, clickhouse_port=None)
+
+    for index, route in enumerate(("evidence_planning", "hypothesis_framing", "triage_reasoning"), 1):
+        response = LlmResponse(
+            agent_run_id=state.agent_run_id, route_name=route,
+            provider="gemini", model="gemini-3.5-flash-lite",
+            content="Narrative content must not become accounting metadata.",
+            input_tokens=index * 100, output_tokens=index * 10,
+            estimated_cost_usd=index * 0.001, used_heuristic=False,
+        )
+        nodes.write_llm_success_audit(state, response)
+
+    assert state.evidence == original_evidence
+    assert state.llm_route_events == audit_events
+    assert "Narrative content" not in str(state.llm_route_events)
+
+    # The legacy narrative evidence must not be counted a second time.
+    state.add_evidence(llm_response_to_evidence(response))
+    restored = TriageState.model_validate(state.model_dump(mode="json"))
+    report = build_report_from_state(restored)
+    assert report.llm_runtime.route_event_count == 3
+    assert report.llm_runtime.input_tokens == 600
+    assert report.llm_runtime.output_tokens == 60
+    assert report.llm_runtime.estimated_cost_usd == 0.006
+    assert report.llm_route_events == audit_events
+    assert report.llm_runtime.requested_routes == [
+        "evidence_planning", "hypothesis_framing", "triage_reasoning",
+    ]

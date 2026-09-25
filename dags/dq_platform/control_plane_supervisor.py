@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 CONTROL_PLANE_SUPERVISOR_INTENTS = (
     "auto",
     "triage_alert",
+    "interpret_incident_evidence",
     "asset_context",
     "blast_radius",
     "trusted_asset_search",

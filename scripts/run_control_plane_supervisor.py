@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.specialists.contracts import AgentTaskStatus
+from agent.llm.connectivity import require_gemini_connectivity
 from agent.supervisor.fanout import run_control_plane_fanout
 from agent.supervisor.models import (
     SupervisorExecutionMode,
@@ -365,6 +366,9 @@ def run_from_args(args: argparse.Namespace) -> dict[str, object]:
         request.max_concurrency,
         request.allow_external_llm,
     )
+
+    if request.intent == SupervisorIntent.INTERPRET_INCIDENT_EVIDENCE and request.allow_external_llm:
+        require_gemini_connectivity(args.run_id)
 
     runtime = (
         run_control_plane_fanout

@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -197,7 +197,7 @@ def json_default(value: Any) -> Any:
     Raises:
         TypeError: If the value type is not supported.
     """
-    if isinstance(value, (datetime,)):
+    if isinstance(value, (date, datetime)):
         return value.isoformat()
 
     if isinstance(value, UUID):

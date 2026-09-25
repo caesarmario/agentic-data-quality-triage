@@ -43,6 +43,7 @@ from agent.tools.alerts import list_alerts, load_alert
 from agent.tools.approval_queue import (
     ApprovalRequest,
     ApprovalRequestCreate,
+    cancel_approval_request,
     create_approval_request,
     decide_approval_request,
     get_approval_request,
@@ -58,6 +59,7 @@ from agent.tools.pipeline_runs import fetch_pipeline_runs
 from apps.api.schemas import (
     AlertListResponse,
     AlertResponse,
+    ApprovalCancellationBody,
     ApprovalDecisionBody,
     ApprovalRequestCreateBody,
     ApprovalRequestListResponse,
@@ -92,7 +94,7 @@ from pipelines.seeding.upload_to_s3 import build_s3_client
 
 # --- Defining Constants
 API_TITLE                     = "Agentic Data Quality Triage API"
-API_VERSION                   = "0.10.0"
+API_VERSION                   = "0.11.0"
 AUDIT_LOG_TABLE               = "dq.agent_audit_log"
 COPILOT_REPORT_MAX_BYTES      = 200_000
 COPILOT_HISTORY_LOOKBACK_DAYS = 90
@@ -1471,7 +1473,7 @@ def api_create_approval_request(request: ApprovalRequestCreateBody) -> ApprovalR
 def api_list_approval_requests(
     status: str | None = Query(
         default=None,
-        pattern="^(pending|approved|rejected)$",
+        pattern="^(pending|approved|rejected|cancelled)$",
         description="Optional latest-state approval status.",
     ),
     limit: int = Query(default=50, ge=1, le=100, description="Maximum requests to return."),
@@ -1480,7 +1482,7 @@ def api_list_approval_requests(
     List bounded latest-state approval requests.
 
     Args:
-        status: Optional pending, approved, or rejected lifecycle filter.
+        status: Optional pending, approved, rejected, or cancelled lifecycle filter.
         limit: Maximum latest-state requests to return.
 
     Returns:
@@ -1543,6 +1545,41 @@ def api_decide_approval_request(
             request_id=request_id,
             decision=request.decision,
             decided_by=request.decided_by,
+            comment=request.comment,
+        )
+
+        return approval_response(approval, state_changed=state_changed)
+
+    except Exception as exc:
+        raise_api_error(exc)
+
+
+@app.post(
+    "/api/v1/approvals/requests/{request_id}/cancel",
+    response_model=ApprovalRequestResponse,
+    dependencies=[Depends(require_approval_authorization)],
+)
+def api_cancel_approval_request(
+    request_id: str,
+    request: ApprovalCancellationBody,
+) -> ApprovalRequestResponse:
+    """
+    Cancel one pending or approved request before Airflow dispatch starts.
+
+    This endpoint revokes authorization only. It never stops an existing
+    dispatcher or child DagRun.
+
+    Args:
+        request_id: Human-facing approval request reference.
+        request: Explicit cancellation actor and rationale.
+
+    Returns:
+        Latest durable approval state and whether state changed.
+    """
+    try:
+        approval, state_changed = cancel_approval_request(
+            request_id=request_id,
+            cancelled_by=request.cancelled_by,
             comment=request.comment,
         )
 

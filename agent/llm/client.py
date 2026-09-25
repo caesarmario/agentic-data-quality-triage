@@ -28,6 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from agent.llm.config import ResolvedRoute, load_model_routing_config, resolve_executable_route
 from agent.llm.costing import estimate_cost_usd, estimate_tokens
 from agent.llm.fallback import build_heuristic_response
+from agent.llm.provider_errors import summarize_provider_error
 from agent.llm.sanitization import sanitize_llm_content
 from agent.llm.structured_output import (
     build_json_schema_response_format,
@@ -787,6 +788,7 @@ def run_llm_task(
             error_type      = type(exc).__name__
             fallback_reason = f"provider_error:{resolved_route.provider_name}:{error_type}"
             fallback_route  = resolved_route.route.fallback_route
+            diagnostics     = summarize_provider_error(exc)
 
             provider_failures.append(
                 {
@@ -795,17 +797,19 @@ def run_llm_task(
                     "model": resolved_route.model,
                     "error_type": error_type,
                     "fallback_reason": fallback_reason,
+                    **diagnostics,
                 }
             )
 
             logger.warning(
-                "LLM provider route failed; applying configured fallback | agent_run_id=%s route=%s provider=%s model=%s error_type=%s fallback_route=%s",
+                "LLM provider route failed; applying configured fallback | agent_run_id=%s route=%s provider=%s model=%s error_type=%s fallback_route=%s diagnostics=%s",
                 request.agent_run_id,
                 resolved_route.route_name,
                 resolved_route.provider_name,
                 resolved_route.model,
                 error_type,
                 fallback_route or "none",
+                json.dumps(diagnostics, sort_keys=True),
             )
 
             if not fallback_route or fallback_route == resolved_route.route_name:

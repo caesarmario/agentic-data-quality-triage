@@ -81,11 +81,13 @@ class ApprovalRequestStatus(str, Enum):
         PENDING: Request is waiting for an explicit human decision.
         APPROVED: Request is authorized for the exact stored action scope.
         REJECTED: Request was explicitly denied.
+        CANCELLED: Request was withdrawn before dispatcher execution started.
     """
 
-    PENDING  = "pending"
-    APPROVED = "approved"
-    REJECTED = "rejected"
+    PENDING   = "pending"
+    APPROVED  = "approved"
+    REJECTED  = "rejected"
+    CANCELLED = "cancelled"
 
 
 class ApprovalDecision(str, Enum):
@@ -838,6 +840,120 @@ def decide_approval_request(
         updated.request_id,
         updated.status,
         updated.decided_by,
+    )
+
+    return updated, True
+
+
+def cancel_approval_request(
+    request_id: str,
+    cancelled_by: str,
+    comment: str = "",
+    client: Any | None = None,
+) -> tuple[ApprovalRequest, bool]:
+    """
+    Withdraw one request before a dispatcher DagRun claims its execution.
+
+    Cancellation revokes a pending or approved request only while execution is
+    still `not_started`. It never attempts to stop an already-triggered Airflow
+    DagRun or child DagRun.
+
+    Args:
+        request_id: Human-facing approval request ID.
+        cancelled_by: Human identity withdrawing the request.
+        comment: Optional bounded cancellation reason.
+        client: Optional ClickHouse client override for tests or shared callers.
+
+    Returns:
+        Tuple containing latest state and a changed-state flag.
+
+    Raises:
+        LookupError: If the request does not exist.
+        ValueError: If identity is blank or dispatch has already started.
+    """
+    resolved_client    = client or build_clickhouse_client()
+    normalized_id      = request_id.strip()
+    normalized_actor   = cancelled_by.strip()
+    normalized_comment = comment.strip()[:2000]
+
+    if not normalized_actor:
+        raise ValueError("cancelled_by cannot be blank.")
+
+    current = get_approval_request(resolved_client, normalized_id)
+
+    if current is None:
+        raise LookupError(f"Approval request was not found: {normalized_id}")
+
+    if current.status == ApprovalRequestStatus.CANCELLED.value:
+        logger.info(
+            "Approval cancellation already applied | request_id=%s",
+            current.request_id,
+        )
+
+        return current, False
+
+    current_execution_status = enum_value(current.execution_status)
+
+    # Cancellation and Airflow execution are separate boundaries. Once a
+    # dispatcher owns the request, child DagRuns must be handled in Airflow.
+    if (
+        current_execution_status != ApprovalExecutionStatus.NOT_STARTED.value
+        or current.execution_dag_run_id
+    ):
+        raise ValueError(
+            f"Approval request {current.request_id} cannot be cancelled after dispatch has started. "
+            "Already-triggered Airflow DagRuns are not cancelled by this endpoint."
+        )
+
+    if current.status not in {
+        ApprovalRequestStatus.PENDING.value,
+        ApprovalRequestStatus.APPROVED.value,
+    }:
+        raise ValueError(
+            f"Approval request {current.request_id} is already {current.status}; "
+            "only pending or approved pre-dispatch requests can be cancelled."
+        )
+
+    cancelled_at = datetime.now(timezone.utc)
+    updated      = current.model_copy(
+        update={
+            "updated_at": cancelled_at,
+            "status": ApprovalRequestStatus.CANCELLED.value,
+            "decided_by": normalized_actor,
+            "decided_at": cancelled_at,
+            "decision_comment": normalized_comment,
+        }
+    )
+
+    insert_approval_request(resolved_client, updated)
+    write_agent_audit_event(
+        client=resolved_client,
+        action="approval_cancelled",
+        status=ApprovalRequestStatus.CANCELLED.value,
+        agent_run_id=updated.agent_run_id,
+        alert_id=updated.alert_id,
+        alert_key=updated.alert_key,
+        actor=normalized_actor,
+        tool_name="approval_queue",
+        input_payload={
+            "request_id": updated.request_id,
+            "previous_status": current.status,
+            "execution_status": current_execution_status,
+            "comment": normalized_comment,
+        },
+        output_payload={
+            "request_id": updated.request_id,
+            "status": updated.status,
+            "execution_status": updated.execution_status,
+            "airflow_runs_cancelled": 0,
+        },
+    )
+
+    logger.info(
+        "Cancelled pre-dispatch approval request | request_id=%s previous_status=%s cancelled_by=%s",
+        updated.request_id,
+        current.status,
+        normalized_actor,
     )
 
     return updated, True

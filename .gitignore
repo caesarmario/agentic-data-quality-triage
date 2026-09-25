@@ -28,3 +28,10 @@ warehouse/dbt/dbt_packages/
 *.log
 *.py.log
 logs/
+
+# --- Ignoring Premium UI Dependencies, Build Output, And Local Secrets
+apps/web/node_modules/
+apps/web/.next/
+apps/web/*.tsbuildinfo
+apps/web/.env*
+!apps/web/.env.example

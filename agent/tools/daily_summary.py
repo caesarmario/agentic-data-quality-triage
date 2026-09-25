@@ -30,7 +30,7 @@ MAX_SUMMARY_GROUPS       = 100
 # --- Defining Query Helpers
 def build_daily_summary_sql(dt: str) -> str:
     """
-    Build one date-filtered aggregation query for checks and open alerts.
+    Build one date-filtered aggregation query for checks and current open alerts.
 
     Args:
         dt: Business date in YYYY-MM-DD format.
@@ -61,7 +61,7 @@ def build_daily_summary_sql(dt: str) -> str:
                 'alert' AS category,
                 toString(severity) AS label,
                 count() AS count
-            FROM {ALERTS_TABLE}
+            FROM {ALERTS_TABLE} FINAL
             WHERE dt = {format_date_literal(run_dt)}
               AND status = {quote_sql_literal(OPEN_ALERT_STATUS)}
             GROUP BY severity

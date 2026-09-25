@@ -19,7 +19,7 @@ The core data reliability platform is already established.
 - Streamlit, Discord, FastAPI, MCP, metadata and lineage tools, schema drift handling, SQL review, checkpointing, and bounded supervisor pilots are substantially implemented.
 - The current focused slice is bounded multi-agent execution: deterministic plan validation, isolated worker execution, fan-in aggregation, checkpoint reuse, and Airflow-first resilience evidence.
 - Gemini prepaid provider acceptance is complete. Routine development remains deterministic, while external model use stays manual, budgeted, and disabled by default.
-- The remaining work is mainly multi-agent quality comparison, operator UX polish, portfolio documentation, screenshots, and optional late-stage upgrades such as Next.js.
+- The optional Next.js UI is now implemented. Remaining work includes comparative multi-agent quality evaluation, browser approval/triage interaction acceptance, clean-install validation, and publication review. On September 24, three Gemini evidence workers passed strict Airflow acceptance for an estimated USD 0.0052441; this is integration evidence, not proof of diagnostic superiority.
 
 ## OpenAI Billing Decision
 
@@ -192,3 +192,72 @@ This evidence proves provider connectivity, route selection, usage capture, cost
 estimation, audit persistence, and kill-switch restoration. It does not prove
 that Gemini billing warnings are resolved permanently; provider billing status
 and the provider dashboard remain external operational dependencies.
+
+## Gemini Revalidation On 2026-09-07
+
+The latest provider acceptance is unsuccessful. Historical successful runs above
+remain valid historical evidence, but do not establish current provider access.
+
+| Run ID | External attempt | Result |
+| --- | ---: | --- |
+| `manual__gemini_paid_acceptance_20260907T134300` | 1 | `PermissionDeniedError` |
+| `manual__gemini_card_setup_20260907T134950` | 1 | `RateLimitError` after the owner reported adding a payment card |
+
+Both runs used `92_dag_dq_llm_provider_smoke` and requested
+`gemini / gemini-3.5-flash-lite`. The start and heuristic-baseline tasks succeeded;
+`t20_smoke_selected_route` failed; summary and finish were `upstream_failed`.
+Both DagRuns terminated as `failed`, with one pre-call reservation per run and
+no automatic external retry. Strict acceptance correctly rejected the local
+heuristic fallback.
+
+The latest run started at `2026-09-07T20:50:10+07:00` and ended at
+`2026-09-07T20:50:24+07:00`. Its failed ClickHouse audit was verified using
+agent run ID `866ac2b6-2eb9-4056-82f4-ac225c3250b9`. Task logs remain under
+`/opt/airflow/logs/dag_id=92_dag_dq_llm_provider_smoke/` for each run ID.
+
+The latest pre-call ledger reserved 842 tokens and USD 0.00179260, within the
+4,000-token and USD 0.01 smoke limits. No Gemini completion or provider usage
+was returned. The fallback's 112 input tokens, 137 output tokens, and USD 0.00
+estimate describe local heuristic output only; they are not Gemini billing
+evidence. The provider dashboard remains authoritative for actual charges.
+
+The recorded exception category changed after the billing update, but the
+sanitized logs do not identify the exact quota or prove that billing activation
+is complete. Inspect the API key's project, billing status, and model rate limits
+before another manual external attempt. `EXTERNAL_LLM_ENABLED=false` was restored
+and verified in both local configuration and the recreated runner.
+
+### Latest-Key Acceptance
+
+The owner's latest replacement key succeeded on 2026-09-07 through the existing
+OpenAI-compatible application route, not the native `generateContent` curl or
+its `gemini-flash-latest` alias. The key is stored only in the ignored local
+`infra/.env`; no credential is included in this evidence.
+
+- DAG: `92_dag_dq_llm_provider_smoke`.
+- Run: `manual__gemini_latest_key_20260907T141100`.
+- Start: `2026-09-07T21:11:02+07:00`; end: `2026-09-07T21:11:13+07:00`.
+- DagRun and all five tasks: `success`.
+- Requested and executed provider/model: `gemini / gemini-3.5-flash-lite`.
+- Exactly one external reservation/request; no retry, fallback, or heuristic response.
+- Provider-reported usage: 127 input tokens and 37 output tokens, 164 total.
+- Estimated cost using configured rates: USD 0.00013060; the provider dashboard
+  remains authoritative for billed cost.
+- Verified agent run: `b2a4f51c-d082-4c19-af14-c1f5e5edf401`.
+- Verified ClickHouse audit: `187c8fbb-6db0-4eb9-90d9-60a76d1e66f0`.
+- `EXTERNAL_LLM_ENABLED=false` restored and verified in disk and runner settings.
+
+This proves current provider connectivity, not full triage quality or multi-agent
+acceptance. Key replacement and elapsed billing-activation time are not isolated
+experiments, so success does not establish the exact cause of the earlier errors.
+
+Provider diagnostics now retain bounded HTTP status, provider status/reason,
+quota identifiers/values, retry delay, and fixed message-derived hints. Raw error
+bodies, request headers, credential-shaped identifiers, and known environment
+secrets are excluded. The native curl endpoint and alias remain untested here.
+
+The diagnostic change passed Airflow acceptance in
+`91_dag_dq_platform_validation`, run
+`manual__provider_diagnostics_20260907T141300`: all five tasks and the DagRun
+succeeded; retained task logs show 365 agent-suite tests passed and 20/20
+platform readiness checks passed. External LLM was disabled during regression.

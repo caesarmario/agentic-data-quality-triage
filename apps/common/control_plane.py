@@ -26,7 +26,7 @@ MAX_ERROR_DETAIL_CHARS                = 500
 MAX_REPORT_BYTES                      = 200_000
 APPROVAL_TOKEN_ENV_NAME               = "CONTROL_PLANE_APPROVAL_TOKEN"
 APPROVAL_TOKEN_HEADER                 = "X-Control-Plane-Token"
-APPROVAL_STATUSES                     = {"pending", "approved", "rejected"}
+APPROVAL_STATUSES                     = {"pending", "approved", "rejected", "cancelled"}
 APPROVAL_EXECUTION_STATUSES           = {"not_started", "dispatching", "dispatched", "succeeded", "failed"}
 LIFE_EVALUATION_STATUSES              = {"pass", "review", "fail", "unknown"}
 INCIDENT_OUTCOME_STATUSES             = {"success", "partial", "failed", "blocked"}
@@ -553,6 +553,47 @@ class ControlPlaneClient:
             json_body={
                 "decision": normalized_decision,
                 "decided_by": decided_by.strip(),
+                "comment": comment.strip(),
+            },
+        )
+
+        return self.validate_approval_payload(payload)
+
+    def cancel_approval_request(
+        self,
+        request_id: str,
+        cancelled_by: str,
+        comment: str = "",
+    ) -> dict[str, Any]:
+        """
+        Withdraw one approval request before Airflow dispatch starts.
+
+        Args:
+            request_id: Human-facing APR identifier.
+            cancelled_by: Human identity withdrawing the request.
+            comment: Optional bounded cancellation rationale.
+
+        Returns:
+            Validated latest approval state.
+
+        Raises:
+            ValueError: If the request ID or actor is invalid.
+        """
+        normalized_id    = request_id.strip()
+        normalized_actor = cancelled_by.strip()
+
+        if not normalized_id.startswith("APR-"):
+            raise ValueError("Approval request_id must use the APR- reference format.")
+
+        if not normalized_actor:
+            raise ValueError("cancelled_by cannot be blank.")
+
+        payload = self.request_json(
+            "POST",
+            f"/api/v1/approvals/requests/{normalized_id}/cancel",
+            headers=self.approval_headers(),
+            json_body={
+                "cancelled_by": normalized_actor,
                 "comment": comment.strip(),
             },
         )

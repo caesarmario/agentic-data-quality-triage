@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.supervisor.models import SupervisorExecutionMode, SupervisorIntent
+from agent.specialists.registry import EVIDENCE_INTERPRETATION_TASKS
 from agent.supervisor.runtime import derive_supervisor_parent_run_id
 from pipelines.common.clickhouse import build_clickhouse_client
 from pipelines.common.logging import logger
@@ -62,6 +63,76 @@ SAFE_PLAN_HASH = re.compile(r"^[a-f0-9]{64}$")
 
 
 # --- Defining JSON Helpers
+def verify_evidence_interpretation_workers(
+    rows: list[dict[str, Any]],
+    terminals: list[dict[str, Any]],
+    allow_external_llm: bool,
+) -> dict[str, Any]:
+    """
+    Verify exact evidence-worker success and reconcile actual provider audit events.
+
+    Args:
+        rows: Parent-correlated retained audit rows, including worker model events.
+        terminals: Parsed terminal handoff payloads for the same parent run.
+        allow_external_llm: Explicit permission retained by the parent start event.
+
+    Returns:
+        Sanitized acceptance counts; disabled mode never qualifies as a paid test.
+
+    Raises:
+        RuntimeError: If a worker, evidence category, or provider accounting record is missing.
+    """
+    if len(terminals) != 3 or {item.get("task_type") for item in terminals} != set(EVIDENCE_INTERPRETATION_TASKS):
+        raise RuntimeError("Interpretation acceptance requires all three evidence categories.")
+
+    provider_rows = [row for row in rows if row.get("action") == "llm_route_completed"]
+    expected_calls = 3 if allow_external_llm else 0
+    if len(provider_rows) != expected_calls:
+        raise RuntimeError("Interpretation provider audit count does not match explicit acceptance mode.")
+
+    seen_tasks: set[str] = set()
+    for terminal in terminals:
+        if terminal.get("result_status") != "success" or int(terminal.get("evidence_reference_count", 0)) < 1:
+            raise RuntimeError("Every interpretation worker must succeed with retained deterministic evidence.")
+
+        if terminal.get("selected_specialist") != EVIDENCE_INTERPRETATION_TASKS[terminal["task_type"]]:
+            raise RuntimeError("Interpretation task was executed by an unexpected specialist.")
+
+        task_id = terminal["task_id"]
+        matches = [row for row in provider_rows if row_payload(row, "input_json").get("task_id") == task_id]
+        if len(matches) != (1 if allow_external_llm else 0):
+            raise RuntimeError("Each interpretation worker requires exactly its own provider audit record.")
+
+        if task_id in seen_tasks:
+            raise RuntimeError("Interpretation task identities must be unique.")
+        seen_tasks.add(task_id)
+
+        if not allow_external_llm:
+            if any(terminal.get(field, 0) for field in ("model_call_count", "token_usage", "estimated_cost_usd")):
+                raise RuntimeError("Disabled interpretation must have zero external usage.")
+            continue
+
+        event = row_payload(matches[0], "output_json")
+        if (
+            matches[0].get("status") != "success"
+            or event.get("provider", "").lower() != "gemini"
+            or not event.get("model")
+            or event.get("used_heuristic") is not False
+            or event.get("fallback_reason")
+            or event.get("structured_output_status") != "validated"
+            or event.get("attempted_routes") != ["cheap_summary"]
+        ):
+            raise RuntimeError("Interpretation requires direct structured Gemini output without fallback or retry.")
+
+        tokens = int(event.get("input_tokens", 0)) + int(event.get("output_tokens", 0))
+        if tokens <= 0 or terminal.get("token_usage") != tokens or terminal.get("model_call_count") != 1:
+            raise RuntimeError("Interpretation worker tokens and calls do not reconcile with provider evidence.")
+        if abs(float(terminal.get("estimated_cost_usd", 0)) - float(event.get("estimated_cost_usd", 0))) > 1e-12:
+            raise RuntimeError("Interpretation worker cost does not reconcile with provider evidence.")
+
+    return {"evidence_worker_count": 3, "strict_external_acceptance": allow_external_llm, "provider_calls": expected_calls}
+
+
 def row_payload(row: dict[str, Any], field_name: str) -> dict[str, Any]:
     """
     Parse one audit JSON object without accepting arrays or scalar values.
@@ -285,6 +356,12 @@ def verify_control_plane_fanout(
     if str(final_row.get("status", "")) not in {"success", "partial"}:
         raise RuntimeError("Fan-out final decision is not an accepted terminal status.")
 
+    interpretation_evidence = {}
+    if normalized_intent == SupervisorIntent.INTERPRET_INCIDENT_EVIDENCE.value:
+        interpretation_evidence = verify_evidence_interpretation_workers(
+            rows, terminal_payloads, bool(started_in.get("allow_external_llm", False)),
+        )
+
     summary = {
         "result": "success",
         "execution_mode": "fanout",
@@ -300,6 +377,7 @@ def verify_control_plane_fanout(
         "estimated_cost_usd": cost,
         "audit_row_count": len(rows),
         "action_counts": dict(sorted(action_counts.items())),
+        "interpretation_acceptance": interpretation_evidence,
     }
 
     logger.info(

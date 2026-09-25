@@ -1107,6 +1107,19 @@ class ApprovalDecisionBody(BaseModel):
     comment: str                      = Field(default="", max_length=2000)
 
 
+class ApprovalCancellationBody(BaseModel):
+    """
+    API request body for withdrawing a pre-dispatch approval request.
+
+    Attributes:
+        cancelled_by: Human identity withdrawing the request.
+        comment: Optional bounded cancellation reason.
+    """
+
+    cancelled_by: str                 = Field(min_length=1, max_length=200)
+    comment: str                      = Field(default="", max_length=2000)
+
+
 class ApprovalRequestResponse(BaseModel):
     """
     Latest state returned for one durable approval request.
@@ -1120,7 +1133,7 @@ class ApprovalRequestResponse(BaseModel):
         agent_run_id: Optional source triage run UUID string.
         action_type: Bounded action type.
         risk_level: Operator-facing risk classification.
-        status: Pending, approved, or rejected lifecycle state.
+        status: Pending, approved, rejected, or cancelled lifecycle state.
         requested_by: Requesting identity.
         reason: Human-readable approval reason.
         dispatcher_dag_id: Airflow dispatcher authorized for the action.

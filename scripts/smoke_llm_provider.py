@@ -27,8 +27,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.llm.client import LlmResponse, run_llm_task
+from agent.llm.connectivity import GeminiConnectivityError, require_gemini_connectivity
 from agent.llm.config import load_model_routing_config, resolve_route
 from agent.llm.costing import estimate_cost_usd, estimate_tokens
+from agent.llm.provider_errors import DIAGNOSTIC_FIELDS
 from agent.supervisor.budgets import supervisor_llm_budget_scope
 from agent.tools.audit_log import build_llm_route_audit_payload, write_agent_audit_event
 from pipelines.common.clickhouse import build_clickhouse_client
@@ -258,6 +260,7 @@ def build_smoke_result(
             "model": str(item.get("model") or ""),
             "error_type": str(item.get("error_type") or ""),
             "fallback_reason": str(item.get("fallback_reason") or ""),
+            **{key: item[key] for key in DIAGNOSTIC_FIELDS if isinstance(item.get(key), str)},
         }
         for item in metadata.get("provider_failures", [])
         if isinstance(item, dict)
@@ -358,6 +361,7 @@ def write_failed_execution_audit_event(
     force_heuristic: bool,
     error_type: str,
     external_provider_smoke: bool = False,
+    preflight_reason: str | None = None,
 ) -> None:
     """
     Persist a sanitized audit event when routing cannot return a usable response.
@@ -371,6 +375,7 @@ def write_failed_execution_audit_event(
         force_heuristic: Whether heuristic execution was forced.
         error_type: Exception class name only, without raw provider text.
         external_provider_smoke: Whether this run explicitly permitted one provider call.
+        preflight_reason: Fixed Gemini transport reason when no model call began.
 
     Returns:
         None.
@@ -391,7 +396,10 @@ def write_failed_execution_audit_event(
             "external_provider_smoke": external_provider_smoke,
             "context_classification": SMOKE_CONTEXT["data_classification"],
         },
-        output_payload={"error_type": error_type},
+        output_payload=(
+            {"error_type": error_type, "preflight_reason": preflight_reason, "model_calls": 0}
+            if preflight_reason is not None else {"error_type": error_type}
+        ),
         error_message=error_type,
     )
 
@@ -514,6 +522,7 @@ def run_provider_smoke(
     config_path: str | Path | None = None,
     client: Any | None = None,
     llm_runner: Callable[..., LlmResponse] = run_llm_task,
+    connectivity_check: Callable[..., None] = require_gemini_connectivity,
 ) -> ProviderSmokeResult:
     """
     Run one routed provider smoke test and persist sanitized audit evidence.
@@ -526,6 +535,7 @@ def run_provider_smoke(
         config_path: Optional routing config path.
         client: Optional ClickHouse client override used by tests.
         llm_runner: Optional routed LLM callable override used by tests.
+        connectivity_check: Bounded Gemini preflight; injectable for network-free tests.
 
     Returns:
         Sanitized successful provider smoke result.
@@ -586,6 +596,9 @@ def run_provider_smoke(
 
     try:
         if external_provider_smoke:
+            if requested_provider == "gemini":
+                connectivity_check(str(agent_run_id), route=requested_route)
+
             deadline_monotonic = time.monotonic() + (
                 MAX_EXTERNAL_SMOKE_LATENCY_MS / 1_000
             )
@@ -624,13 +637,15 @@ def run_provider_smoke(
 
     except Exception as exc:
         error_type = type(exc).__name__
+        preflight_reason = exc.reason if isinstance(exc, GeminiConnectivityError) else None
 
         logger.error(
-            "LLM provider smoke failed before a usable response | agent_run_id=%s route=%s provider=%s error_type=%s",
+            "LLM provider smoke failed before a usable response | agent_run_id=%s route=%s provider=%s error_type=%s preflight_reason=%s",
             agent_run_id,
             route_name,
             requested_provider,
             error_type,
+            preflight_reason or "none",
         )
 
         write_failed_execution_audit_event(
@@ -642,6 +657,7 @@ def run_provider_smoke(
             force_heuristic=force_heuristic,
             error_type=error_type,
             external_provider_smoke=external_provider_smoke,
+            preflight_reason=preflight_reason,
         )
 
         raise ProviderSmokeExecutionError(

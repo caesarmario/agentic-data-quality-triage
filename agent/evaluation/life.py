@@ -311,6 +311,12 @@ def optional_uuid(value: Any) -> UUID | None:
     if value in (None, ""):
         return None
 
+    try:
+        return UUID(str(value))
+
+    except (TypeError, ValueError):
+        return None
+
 
 def stable_payload_hash(payload: dict[str, Any]) -> str:
     """
@@ -331,12 +337,6 @@ def stable_payload_hash(payload: dict[str, Any]) -> str:
     )
 
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-    try:
-        return UUID(str(value))
-
-    except (TypeError, ValueError):
-        return None
 
 
 # --- Defining Check Helpers

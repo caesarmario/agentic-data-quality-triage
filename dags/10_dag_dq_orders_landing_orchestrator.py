@@ -84,9 +84,9 @@ with DAG(
     t10_trigger_seed_to_s3 = TriggerDagRunOperator(
         task_id="t10_trigger_seed_to_s3",
         trigger_dag_id=SEED_DAG_ID,
-        trigger_run_id="landing_seed__{{ ts_nodash }}",
+        trigger_run_id="landing_seed__{{ trigger_run_suffix(dag_run) }}",
         conf=single_date_conf(),
-        logical_date="{{ dag_run.logical_date.isoformat() }}",
+        logical_date="{{ trigger_logical_date(dag_run) }}",
         wait_for_completion=True,
         deferrable=True,
         poke_interval=15,
@@ -98,9 +98,9 @@ with DAG(
     t20_trigger_load_raw_clickhouse = TriggerDagRunOperator(
         task_id="t20_trigger_load_raw_clickhouse",
         trigger_dag_id=LOAD_DAG_ID,
-        trigger_run_id="landing_load__{{ ts_nodash }}",
+        trigger_run_id="landing_load__{{ trigger_run_suffix(dag_run) }}",
         conf=single_date_conf(),
-        logical_date="{{ dag_run.logical_date.isoformat() }}",
+        logical_date="{{ trigger_logical_date(dag_run) }}",
         wait_for_completion=True,
         deferrable=True,
         poke_interval=15,

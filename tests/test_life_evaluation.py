@@ -46,6 +46,14 @@ ALERT_ID          = "22222222-2222-4222-8222-222222222222"
 
 
 # --- Defining Test Helpers
+def test_optional_uuid_preserves_valid_audit_identity_and_rejects_invalid_values() -> None:
+    """LIFE audit correlation must retain valid UUIDs without accepting malformed input."""
+    assert life.optional_uuid(AGENT_RUN_ID) == UUID(AGENT_RUN_ID)
+    assert life.optional_uuid(ALERT_ID) == UUID(ALERT_ID)
+    assert life.optional_uuid("not-a-uuid") is None
+    assert life.optional_uuid("") is None
+
+
 def load_scenario(scenario_id: str) -> dict:
     """
     Load one repository incident scenario for LIFE tests.

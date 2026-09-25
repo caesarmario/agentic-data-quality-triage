@@ -33,6 +33,7 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
     "all": (),
     "airflow": (
         "tests/test_airflow_dag_design.py",
+        "tests/test_airflow_run_identity.py",
         "tests/test_backfill_approval_gate.py",
         "tests/test_validation_suite.py",
     ),
@@ -48,10 +49,16 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_control_plane_supervisor.py",
         "tests/test_dbt_lineage.py",
         "tests/test_evidence_planning.py",
+        "tests/test_evidence_interpretation.py",
+        "tests/test_evidence_worker.py",
+        "tests/test_evidence_worker_integration.py",
+        "tests/test_provider_connectivity.py",
         "tests/test_hypothesis_framing.py",
         "tests/test_human_display_helpers.py",
         "tests/test_incident_history_tool.py",
         "tests/test_llm_routing.py",
+        "tests/test_llm_provider_errors.py",
+        "tests/test_llm_provider_smoke.py",
         "tests/test_metadata_lineage_agent.py",
         "tests/test_schema_drift_evidence.py",
         "tests/test_schema_drift_agent.py",
@@ -91,6 +98,7 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
     "llm": (
         "tests/test_airflow_dag_design.py",
         "tests/test_llm_routing.py",
+        "tests/test_llm_provider_errors.py",
         "tests/test_llm_provider_smoke.py",
         "tests/test_validation_suite.py",
     ),
@@ -98,6 +106,7 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_life_evaluation.py",
         "tests/test_life_history.py",
         "tests/test_life_replay.py",
+        "tests/test_supervisor_comparison.py",
         "tests/test_airflow_dag_design.py",
         "tests/test_validation_suite.py",
     ),
@@ -130,7 +139,12 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_validation_suite.py",
     ),
     "ui": (
+        "tests/test_web_theme.py",
         "tests/test_streamlit_helpers.py",
+        "tests/test_web_deployment.py",
+        "tests/test_web_readiness.py",
+        "tests/test_web_report_readiness.py",
+        "tests/test_web_operator_readiness.py",
     ),
 }
 

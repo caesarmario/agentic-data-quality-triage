@@ -134,6 +134,7 @@ def test_llm_suite_uses_provider_router_and_smoke_contract_tests() -> None:
     assert command[4:] == [
         "tests/test_airflow_dag_design.py",
         "tests/test_llm_routing.py",
+        "tests/test_llm_provider_errors.py",
         "tests/test_llm_provider_smoke.py",
         "tests/test_validation_suite.py",
     ]
@@ -189,6 +190,7 @@ def test_life_suite_uses_evaluator_and_airflow_contract_tests() -> None:
         "tests/test_life_evaluation.py",
         "tests/test_life_history.py",
         "tests/test_life_replay.py",
+        "tests/test_supervisor_comparison.py",
         "tests/test_airflow_dag_design.py",
         "tests/test_validation_suite.py",
     ]
@@ -320,6 +322,47 @@ def test_trigger_command_can_require_optional_api_readiness() -> None:
     assert json.loads(command[conf_index]) == {
         "validation_suite": "all",
         "require_api": True,
+    }
+
+
+def test_trigger_command_can_require_optional_web_readiness() -> None:
+    """Serialize the web acceptance flag through structured DagRun configuration."""
+    command = trigger_airflow_validation.build_trigger_command(
+        suite="ui",
+        run_id="manual__validation_web_required",
+        require_web=True,
+    )
+    conf_index = command.index("-c") + 1
+
+    assert json.loads(command[conf_index]) == {
+        "validation_suite": "ui",
+        "require_web": True,
+    }
+
+
+def test_validation_cli_serializes_api_and_web_flags_end_to_end(monkeypatch) -> None:
+    """Carry both optional profile flags from CLI parsing into trigger JSON."""
+    commands: list[list[str]] = []
+    monkeypatch.setattr(trigger_airflow_validation, "run_command", commands.append)
+
+    result = trigger_airflow_validation.main(
+        [
+            "--suite",
+            "ui",
+            "--run-id",
+            "manual__validation_web_e2e",
+            "--require-api",
+            "--require-web",
+        ]
+    )
+
+    trigger_command = commands[1]
+    conf = json.loads(trigger_command[trigger_command.index("-c") + 1])
+    assert result == 0
+    assert conf == {
+        "validation_suite": "ui",
+        "require_api": True,
+        "require_web": True,
     }
 
 
@@ -573,6 +616,11 @@ def test_control_plane_trigger_uses_safe_json_and_unpauses_first(monkeypatch) ->
         "data_layer": "raw",
         "certification_status": "candidate",
         "lifecycle_status": "active",
+        "execution_mode": "single",
+        "max_workers": 1,
+        "max_concurrency": 1,
+        "expected_worker_count": 0,
+        "allow_external_llm": False,
         "max_handoffs": 1,
         "max_retries": 0,
         "max_model_calls": 3,

@@ -21,6 +21,7 @@ from dq_platform.life_evaluation import (
     SAFE_ARTIFACT_PREFIX,
     SAFE_EVALUATION_RUN_ID,
     SAFE_REPORT_S3_URI,
+    SAFE_SUPERVISOR_PARENT_RUN_ID,
     emit_life_evaluation_summary,
 )
 from dq_platform.helpers import (
@@ -42,9 +43,9 @@ DAG_ID = "94_dag_dq_agent_life_evaluation"
 DOC_MD = """
 # 94 - LIFE Agent Reliability Evaluation
 
-Manual administrative DAG that evaluates one stored triage report against an
-allowlisted incident ground-truth scenario. Evaluation-only replays are marked
-explicitly and never mutate the physical ClickHouse schema.
+Manual administrative DAG that evaluates one stored triage report or compares
+single-handoff and fan-out reports against the same allowlisted incident ground
+truth. Evaluation-only replays are explicit and never mutate warehouse data.
 
 The evaluator classifies report reliability failures, writes JSON and Markdown
 artifacts to SeaweedFS, and records one ClickHouse audit event. It only proposes
@@ -58,7 +59,7 @@ guardrails, DQ rules, Airflow DAGs, model routing, or remediation behavior.
   "report_s3_uri": "s3://dq-artifacts/agent-reports/.../report.json",
   "evaluation_run_id": "life-eval-20260716T100000000000",
   "minimum_confidence": 0.70,
-  "enable_critic": true,
+    "enable_critic": true,
   "fail_on_eval_failure": false
 }
 ```
@@ -84,13 +85,25 @@ def life_evaluation_dag_params() -> dict[str, Param]:
             "stored_report",
             type="string",
             enum=list(LIFE_SOURCE_MODES),
-            description="Use a stored production-style report or an explicit deterministic replay.",
+            description="Use a stored report, deterministic replay, or same-incident supervisor comparison.",
         ),
         "report_s3_uri": Param(
             "",
             type="string",
             pattern=rf"^(?:|{SAFE_REPORT_S3_URI.pattern.removeprefix('^').removesuffix('$')})$",
             description="SeaweedFS URI ending in report.json. Trigger helper derives this for replay mode.",
+        ),
+        "single_supervisor_run_id": Param(
+            "",
+            type="string",
+            pattern=SAFE_SUPERVISOR_PARENT_RUN_ID.pattern,
+            description="Required single-handoff parent UUID for supervisor comparison mode.",
+        ),
+        "fanout_supervisor_run_id": Param(
+            "",
+            type="string",
+            pattern=SAFE_SUPERVISOR_PARENT_RUN_ID.pattern,
+            description="Required fan-out parent UUID for supervisor comparison mode.",
         ),
         "evaluation_run_id": Param(
             "",
@@ -149,12 +162,20 @@ with DAG(
     t05_prepare_source_report = runner_plain_bash_task(
         task_id="t05_prepare_source_report",
         project_command=(
+            "{% if dag_run.conf.get(\"source_mode\", \"stored_report\") == \"supervisor_comparison\" %}"
+            "python scripts/prepare_life_supervisor_comparison.py "
+            "--scenario '{{ dag_run.conf.get(\"scenario\", \"missing_latest_day\") }}' "
+            "--single-parent-run-id '{{ dag_run.conf.get(\"single_supervisor_run_id\", \"\") }}' "
+            "--fanout-parent-run-id '{{ dag_run.conf.get(\"fanout_supervisor_run_id\", \"\") }}' "
+            "--comparison-run-id '{{ dag_run.conf.get(\"evaluation_run_id\") or dag_run.run_id }}'"
+            "{% else %}"
             "python scripts/prepare_life_source_report.py "
             "--source-mode '{{ dag_run.conf.get(\"source_mode\", \"stored_report\") }}' "
             "--scenario '{{ dag_run.conf.get(\"scenario\", \"missing_latest_day\") }}' "
             "--report-s3-uri '{{ dag_run.conf.get(\"report_s3_uri\", \"\") }}' "
             "--evaluation-run-id '{{ dag_run.conf.get(\"evaluation_run_id\") or dag_run.run_id }}' "
             f"--replay-prefix '{DEFAULT_LIFE_REPLAY_PREFIX}'"
+            "{% endif %}"
         ),
         execution_timeout=timedelta(minutes=5),
     )
@@ -162,6 +183,14 @@ with DAG(
     t10_evaluate_life_report = runner_plain_bash_task(
         task_id="t10_evaluate_life_report",
         project_command=(
+            "{% if dag_run.conf.get(\"source_mode\", \"stored_report\") == \"supervisor_comparison\" %}"
+            "python scripts/run_life_supervisor_comparison.py "
+            "--scenario '{{ dag_run.conf.get(\"scenario\", \"missing_latest_day\") }}' "
+            "--single-parent-run-id '{{ dag_run.conf.get(\"single_supervisor_run_id\", \"\") }}' "
+            "--fanout-parent-run-id '{{ dag_run.conf.get(\"fanout_supervisor_run_id\", \"\") }}' "
+            "--comparison-run-id '{{ dag_run.conf.get(\"evaluation_run_id\") or dag_run.run_id }}' "
+            "--artifact-prefix '{{ dag_run.conf.get(\"artifact_prefix\", \"agent-life-comparisons\") }}'"
+            "{% else %}"
             "python scripts/run_life_evaluation.py "
             "--scenario '{{ dag_run.conf.get(\"scenario\", \"missing_latest_day\") }}' "
             "--report-s3-uri '{{ dag_run.conf.get(\"report_s3_uri\", \"\") }}' "
@@ -170,6 +199,7 @@ with DAG(
             "--artifact-prefix '{{ dag_run.conf.get(\"artifact_prefix\", \"agent-life\") }}' "
             "{% if dag_run.conf.get(\"enable_critic\", false) %}--enable-critic {% endif %}"
             "{% if dag_run.conf.get(\"fail_on_eval_failure\", false) %}--fail-on-eval-failure{% endif %}"
+            "{% endif %}"
         ),
         execution_timeout=timedelta(minutes=5),
     )
@@ -177,12 +207,21 @@ with DAG(
     t20_verify_life_artifacts = runner_plain_bash_task(
         task_id="t20_verify_life_artifacts",
         project_command=(
+            "{% if dag_run.conf.get(\"source_mode\", \"stored_report\") == \"supervisor_comparison\" %}"
+            "python scripts/verify_life_supervisor_comparison.py "
+            "--comparison-run-id '{{ dag_run.conf.get(\"evaluation_run_id\") or dag_run.run_id }}' "
+            "--scenario '{{ dag_run.conf.get(\"scenario\", \"missing_latest_day\") }}' "
+            "--single-parent-run-id '{{ dag_run.conf.get(\"single_supervisor_run_id\", \"\") }}' "
+            "--fanout-parent-run-id '{{ dag_run.conf.get(\"fanout_supervisor_run_id\", \"\") }}' "
+            "--artifact-prefix '{{ dag_run.conf.get(\"artifact_prefix\", \"agent-life-comparisons\") }}'"
+            "{% else %}"
             "python scripts/verify_life_evaluation.py "
             "--evaluation-run-id '{{ dag_run.conf.get(\"evaluation_run_id\") or dag_run.run_id }}' "
             "--scenario '{{ dag_run.conf.get(\"scenario\", \"missing_latest_day\") }}' "
             "--source-mode '{{ dag_run.conf.get(\"source_mode\", \"stored_report\") }}' "
             "--source-report-s3-uri '{{ dag_run.conf.get(\"report_s3_uri\", \"\") }}' "
             "--artifact-prefix '{{ dag_run.conf.get(\"artifact_prefix\", \"agent-life\") }}'"
+            "{% endif %}"
         ),
         execution_timeout=timedelta(minutes=5),
     )

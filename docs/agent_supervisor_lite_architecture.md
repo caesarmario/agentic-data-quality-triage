@@ -317,6 +317,32 @@ fan-out improves triage quality. That activation remains gated by Airflow
 resilience acceptance and LIFE comparison against the same incident ground
 truth.
 
+### Fan-Out Resilience Acceptance
+
+DAG `99_dag_dq_control_plane_resilience_smoke` acceptance completed for all ten
+bounded fan-out scenarios using the shared batch suffix `20260901T204507`.
+Every DagRun and all five tasks per run completed successfully. The ClickHouse
+summary and retained verifier logs proved the expected internal parent outcomes:
+
+| Scenario | Parent Outcome | Workers | Important Evidence |
+| --- | --- | ---: | --- |
+| `optional_worker_failure` | partial | 2 | valid sibling retained; one optional failure disclosed |
+| `required_worker_failure` | blocked | 2 | required failure prevented a high-confidence result |
+| `gemini_timeout_simulated` | partial | 2 | timeout contained; zero external requests |
+| `gemini_rate_limit_simulated` | partial | 2 | rate limit contained; zero external requests |
+| `pre_call_cost_rejection` | partial | 2 | one worker rejected before provider execution |
+| `invalid_worker_contract` | blocked | 0 | unauthorized plan rejected before spawning |
+| `resume_completed_parallel_wave` | success | 2 | executor calls remained 2 before and after resume |
+| `circuit_open_specialist_rejection` | partial | 2 | open-circuit worker rejected; sibling retained |
+| `aggregation_partial_evidence` | partial | 2 | missing evidence remained explicit in aggregation |
+| `concurrent_budget_reservation` | success | 10 | ten workers completed; peak concurrency was 3 |
+
+Across the batch, external requests, model calls, tokens, and estimated provider
+cost remained zero. The timeout and rate-limit cases are controlled simulations,
+not evidence of a real Gemini outage. This separation keeps resilience testing
+repeatable and free while DAG 92 remains the strict real-provider connectivity
+gate.
+
 ## Remediation Boundary
 
 The agent may recommend remediation, but it must not execute risky actions directly.
@@ -357,4 +383,18 @@ The bounded worker runtime is deliberately narrower than unrestricted delegation
 6. Keep SQL review separate from SQL execution and require a new approval-gated execution request if execution is added later.
 7. Keep mutation behind human approval and the Airflow or API execution boundary.
 8. Do not make fan-out the default until measured benefit exceeds its added latency, cost, and operational complexity.
+
+### Same-Incident Quality Gate Evidence
+
+Airflow DAG 94 compared one accepted single-handoff run and one accepted
+two-specialist fan-out run for alert `DQ-20260504-DEB2B0` against the same
+`missing_latest_day` ground truth. The single parent retained nine evidence
+references; fan-out retained twelve. Both report evaluations had the same LIFE
+quality result and confidence, with zero external model calls and zero provider
+cost. The deterministic decision was `keep_single` because additional branch
+evidence had not been synthesized into a measurably better triage report.
+
+This result is an intentional control-plane behavior, not a failed fan-out
+experiment. Runtime defaults may change only after a later comparison produces a
+real quality improvement and a human approves the separate policy change.
 

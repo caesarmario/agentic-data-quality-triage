@@ -37,6 +37,7 @@ LOCAL_TIMEZONE                  = ZoneInfo("Asia/Bangkok")
 SUPPORTED_INTENTS = (
     "auto",
     "triage_alert",
+    "interpret_incident_evidence",
     "asset_context",
     "blast_radius",
     "trusted_asset_search",
@@ -487,6 +488,13 @@ def validate_trigger_inputs(
 
     if normalized_intent == "triage_alert" and not normalized_alert:
         raise ValueError("triage_alert requires an alert key or Alert Ref.")
+
+    if normalized_intent == "interpret_incident_evidence":
+        if not normalized_alert or normalized_execution_mode != "fanout" or max_workers < 3:
+            raise ValueError("interpret_incident_evidence requires alert_key, fanout, and three workers.")
+
+        if max_model_calls < 3 or token_budget < 24_576 or estimated_cost_budget_usd < 0.048:
+            raise ValueError("Evidence workers require three calls, 24576 tokens, and USD 0.048 capacity.")
 
     if normalized_intent in {"asset_context", "blast_radius"} and not normalized_asset:
         raise ValueError(f"{normalized_intent} requires qualified_name.")

@@ -1030,9 +1030,90 @@ def test_decide_approval_request_endpoint_returns_transition_state(monkeypatch) 
     assert response.json()["decided_by"] == "reviewer"
 
 
+def test_cancel_approval_request_endpoint_returns_revoked_state(monkeypatch) -> None:
+    """
+    Validate pre-dispatch cancellation is authorized and exposes transition state.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    cancelled = build_api_approval(status="cancelled").model_copy(
+        update={
+            "decided_by": "reviewer",
+            "decided_at": datetime(2026, 6, 23, 10, 6, tzinfo=timezone.utc),
+        }
+    )
+    captured: dict[str, str] = {}
+
+    def fake_cancel(**kwargs):
+        """
+        Capture bounded cancellation input and return revoked state.
+
+        Args:
+            **kwargs: Cancellation service values.
+
+        Returns:
+            Cancelled approval and changed-state flag.
+        """
+        captured.update(kwargs)
+        return cancelled, True
+
+    monkeypatch.setenv("CONTROL_PLANE_APPROVAL_TOKEN", "test-approval-token")
+    monkeypatch.setattr(api_main, "cancel_approval_request", fake_cancel)
+
+    response = client.post(
+        f"/api/v1/approvals/requests/{cancelled.request_id}/cancel",
+        json={
+            "cancelled_by": "reviewer",
+            "comment": "Withdraw before dispatcher claim.",
+        },
+        headers={"X-Control-Plane-Token": "test-approval-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["state_changed"] is True
+    assert captured["cancelled_by"] == "reviewer"
+
+
+def test_cancel_approval_request_endpoint_rejects_post_dispatch_state(monkeypatch) -> None:
+    """
+    Ensure the API does not imply that it can stop already-triggered Airflow runs.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setenv("CONTROL_PLANE_APPROVAL_TOKEN", "test-approval-token")
+    monkeypatch.setattr(
+        api_main,
+        "cancel_approval_request",
+        lambda **kwargs: (_ for _ in ()).throw(
+            ValueError(
+                "Approval request cannot be cancelled after dispatch has started. "
+                "Already-triggered Airflow DagRuns are not cancelled by this endpoint."
+            )
+        ),
+    )
+
+    response = client.post(
+        "/api/v1/approvals/requests/APR-20260610-A1B2C3D4/cancel",
+        json={"cancelled_by": "reviewer"},
+        headers={"X-Control-Plane-Token": "test-approval-token"},
+    )
+
+    assert response.status_code == 400
+    assert "Already-triggered Airflow DagRuns are not cancelled" in response.json()["detail"]
+
+
 def test_approval_mutations_fail_closed_without_valid_token(monkeypatch) -> None:
     """
-    Ensure callers cannot create or decide approvals without server-side authorization.
+    Ensure callers cannot create, decide, or cancel approvals without authorization.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
@@ -1062,8 +1143,16 @@ def test_approval_mutations_fail_closed_without_valid_token(monkeypatch) -> None
         headers={"X-Control-Plane-Token": "wrong-token"},
     )
 
+    cancel_unauthorized = client.post(
+        f"/api/v1/approvals/requests/{approval.request_id}/cancel",
+        json={"cancelled_by": "mario"},
+        headers={"X-Control-Plane-Token": "wrong-token"},
+    )
+
     assert disabled.status_code == 503
     assert unauthorized.status_code == 401
+    assert cancel_unauthorized.status_code == 401
+
 
 def test_normalize_report_json_uri_converts_markdown_sibling() -> None:
     """

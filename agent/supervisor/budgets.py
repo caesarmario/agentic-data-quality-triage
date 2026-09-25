@@ -421,6 +421,23 @@ def active_supervisor_llm_budget() -> SupervisorLlmBudgetLedger | None:
 
 
 # --- Defining Budget Helpers
+def effective_handoff_model_budget(
+    task: AgentTaskEnvelope,
+    state: SupervisorState,
+) -> SupervisorBudgetVector:
+    """Return the enforceable model reservation for one parent/child handoff."""
+    if state.max_model_calls == 0:
+        # Keep the specialist's registry-validated task intact. The parent
+        # installs a zero-call ledger, so no token or cost capacity is usable.
+        return SupervisorBudgetVector()
+
+    return SupervisorBudgetVector(
+        model_calls=task.model_call_budget,
+        tokens=task.token_budget,
+        estimated_cost_usd=task.estimated_cost_budget_usd,
+    )
+
+
 def supervisor_budget_limits(state: SupervisorState) -> SupervisorBudgetVector:
     """
     Build the configured budget vector from supervisor state.
@@ -538,6 +555,7 @@ def evaluate_pre_handoff_budgets(
         SupervisorBudgetDecision based on projected worst-case usage.
     """
     current              = consumed_budget_usage(state=state, elapsed_ms=elapsed_ms)
+    reserved_model       = effective_handoff_model_budget(task=task, state=state)
     remaining_latency_ms = max(0, state.latency_budget_ms - current.latency_ms)
 
     # The runtime caps specialist execution at the parent deadline. Reserving the
@@ -555,10 +573,10 @@ def evaluate_pre_handoff_budgets(
     projected = SupervisorBudgetVector(
         handoffs=current.handoffs + 1,
         retries=current.retries,
-        model_calls=current.model_calls + task.model_call_budget,
-        tokens=current.tokens + task.token_budget,
+        model_calls=current.model_calls + reserved_model.model_calls,
+        tokens=current.tokens + reserved_model.tokens,
         estimated_cost_usd=(
-            current.estimated_cost_usd + task.estimated_cost_budget_usd
+            current.estimated_cost_usd + reserved_model.estimated_cost_usd
         ),
         latency_ms=projected_latency_ms,
     )

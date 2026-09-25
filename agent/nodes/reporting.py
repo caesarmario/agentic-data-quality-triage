@@ -17,6 +17,7 @@ from agent.supervisor.policy import assess_incident_complexity, resolve_report_r
 from agent.tools.alert_lifecycle import mark_alert_triaged
 from agent.tools.audit_log import (
     build_audit_idempotency_key,
+    build_llm_route_audit_payload,
     write_agent_audit_event,
     write_llm_route_audit_event,
 )
@@ -46,6 +47,9 @@ class ReportNodes(TriageNodeMixin):
         if not state.alert:
             raise ValueError("Alert context is required for LLM route audit logging.")
 
+        # Preserve every route before report assembly, without mixing model usage
+        # into the deterministic evidence used to rank root-cause hypotheses.
+        state.llm_route_events.append(build_llm_route_audit_payload(response))
         client = build_clickhouse_client(host=self.config.clickhouse_host, port=self.config.clickhouse_port)
 
         write_llm_route_audit_event(

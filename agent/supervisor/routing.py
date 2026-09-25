@@ -11,11 +11,13 @@ from __future__ import annotations
 from uuid import UUID
 
 from agent.specialists.contracts import AgentTaskEnvelope
+from agent.specialists.evidence_worker import build_evidence_worker_task
 from agent.specialists.incident_triage import build_incident_triage_task
 from agent.specialists.metadata_lineage import build_metadata_lineage_task
 from agent.specialists.schema_drift import build_schema_drift_task
 from agent.specialists.sql_review import build_sql_review_task
 from agent.specialists.registry import (
+    EVIDENCE_INTERPRETATION_TASKS,
     INCIDENT_TRIAGE_SPECIALIST_NAME,
     METADATA_LINEAGE_SPECIALIST_NAME,
     SCHEMA_DRIFT_SPECIALIST_NAME,
@@ -62,6 +64,12 @@ SEARCH_KEYWORDS = (
 )
 
 ROUTE_BY_INTENT = {
+    SupervisorIntent.INTERPRET_INCIDENT_EVIDENCE: SupervisorRoute(
+        intent=SupervisorIntent.INTERPRET_INCIDENT_EVIDENCE,
+        specialist_name=INCIDENT_TRIAGE_SPECIALIST_NAME,
+        task_type="interpret_dq_history",
+        rationale="Interpret independent DQ, pipeline, and lineage evidence through three bounded tasks.",
+    ),
     SupervisorIntent.TRIAGE_ALERT: SupervisorRoute(
         intent=SupervisorIntent.TRIAGE_ALERT,
         specialist_name=INCIDENT_TRIAGE_SPECIALIST_NAME,
@@ -239,6 +247,15 @@ def build_supervisor_handoff(
     Returns:
         Policy-validated AgentTaskEnvelope.
     """
+    if EVIDENCE_INTERPRETATION_TASKS.get(route.task_type) == route.specialist_name:
+        return build_evidence_worker_task(
+            parent_run_id=parent_run_id,
+            task_type=route.task_type,
+            alert_key=request.alert_key,
+            manifest_s3_uri=request.manifest_s3_uri,
+            requester=request.requester,
+        )
+
     if route.specialist_name == INCIDENT_TRIAGE_SPECIALIST_NAME:
         return build_incident_triage_task(
             parent_run_id=parent_run_id,

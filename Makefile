@@ -74,6 +74,8 @@ LIFE_FAIL_ON_EVAL_FAILURE ?= false
 LIFE_ENABLE_CRITIC ?= false
 LIFE_AIRFLOW_RUN_ID ?=
 LIFE_EVALUATION_RUN_ID ?=
+LIFE_SINGLE_SUPERVISOR_RUN_ID ?=
+LIFE_FANOUT_SUPERVISOR_RUN_ID ?=
 METADATA_REGISTRY ?= orders
 METADATA_SYNC_RUN_ID ?=
 SCHEMA_CONTRACT ?= orders
@@ -126,6 +128,8 @@ CONTROL_PLANE_RESILIENCE_RUN_ID ?=
 VALIDATION_SUITE ?= all
 VALIDATION_RUN_ID ?=
 REQUIRE_API ?= false
+REQUIRE_WEB ?= false
+REQUIRE_WEB_REPORT ?= false
 TRIAGE_DAG_ID := 40_dag_dq_orders_triage_agent
 VALIDATION_DAG_ID := 91_dag_dq_platform_validation
 LLM_SMOKE_DAG_ID := 92_dag_dq_llm_provider_smoke
@@ -252,9 +256,13 @@ help:
 	echo "  make triage-eval-scenarios List incident configs available for triage eval"
 	echo "  make life-eval LIFE_REPORT_S3_URI=s3://... Trigger stored-report LIFE evaluation through Airflow"
 	echo "  make life-eval LIFE_SOURCE_MODE=scenario_replay LIFE_SCENARIO=schema_breaking_change Trigger safe replay"
+	echo "  make life-eval LIFE_SOURCE_MODE=supervisor_comparison LIFE_SINGLE_SUPERVISOR_RUN_ID=<uuid> LIFE_FANOUT_SUPERVISOR_RUN_ID=<uuid> Compare modes"
 	echo "  make life-eval-scenarios   List incident ground-truth scenarios"
 	echo "  make api-smoke              Inspect FastAPI app routes"
 	echo "  make api-up                 Start optional FastAPI profile service"
+	echo "  make web-up                 Build and start optional premium UI with FastAPI"
+	echo "  make web-down               Stop premium UI without stopping Streamlit"
+	echo "  make logs-web               Tail premium UI logs"
 	echo "  make api-down               Stop optional FastAPI service"
 	echo "  make mcp-tools              Inspect MCP tool registry"
 	echo "  make mcp-server             Start local MCP server over stdio"
@@ -384,6 +392,8 @@ airflow-validate:
 	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/trigger_airflow_validation.py \
 		--suite "$(VALIDATION_SUITE)" \
 		$(if $(filter true 1 yes,$(REQUIRE_API)),--require-api,) \
+		$(if $(filter true 1 yes,$(REQUIRE_WEB)),--require-web,) \
+		$(if $(filter true 1 yes,$(REQUIRE_WEB_REPORT)),--require-web-report,) \
 		$(if $(strip $(VALIDATION_RUN_ID)),--run-id "$(VALIDATION_RUN_ID)",)
 
 .PHONY: airflow-validation-runs
@@ -453,6 +463,8 @@ airflow-checkpoint-logs:
 .PHONY: airflow-life-eval
 airflow-life-eval:
 	$(if $(filter stored_report,$(LIFE_SOURCE_MODE)),$(if $(strip $(LIFE_REPORT_S3_URI)),,$(error LIFE_REPORT_S3_URI is required for stored_report mode)),)
+	$(if $(filter supervisor_comparison,$(LIFE_SOURCE_MODE)),$(if $(strip $(LIFE_SINGLE_SUPERVISOR_RUN_ID)),,$(error LIFE_SINGLE_SUPERVISOR_RUN_ID is required for supervisor_comparison mode)),)
+	$(if $(filter supervisor_comparison,$(LIFE_SOURCE_MODE)),$(if $(strip $(LIFE_FANOUT_SUPERVISOR_RUN_ID)),,$(error LIFE_FANOUT_SUPERVISOR_RUN_ID is required for supervisor_comparison mode)),)
 	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/trigger_airflow_life_evaluation.py \
 		--scenario "$(LIFE_SCENARIO)" \
 		--source-mode "$(LIFE_SOURCE_MODE)" \
@@ -462,7 +474,9 @@ airflow-life-eval:
 		$(if $(filter true 1 yes,$(LIFE_FAIL_ON_EVAL_FAILURE)),--fail-on-eval-failure,) \
 		$(if $(filter true 1 yes,$(LIFE_ENABLE_CRITIC)),--enable-critic,) \
 		$(if $(strip $(LIFE_AIRFLOW_RUN_ID)),--run-id "$(LIFE_AIRFLOW_RUN_ID)",) \
-		$(if $(strip $(LIFE_EVALUATION_RUN_ID)),--evaluation-run-id "$(LIFE_EVALUATION_RUN_ID)",)
+		$(if $(strip $(LIFE_EVALUATION_RUN_ID)),--evaluation-run-id "$(LIFE_EVALUATION_RUN_ID)",) \
+		$(if $(strip $(LIFE_SINGLE_SUPERVISOR_RUN_ID)),--single-supervisor-run-id "$(LIFE_SINGLE_SUPERVISOR_RUN_ID)",) \
+		$(if $(strip $(LIFE_FANOUT_SUPERVISOR_RUN_ID)),--fanout-supervisor-run-id "$(LIFE_FANOUT_SUPERVISOR_RUN_ID)",)
 
 .PHONY: airflow-life-runs
 airflow-life-runs:
@@ -885,6 +899,17 @@ api-up:
 .PHONY: api-down
 api-down:
 	$(DC) --profile api stop $(API_SERVICE)
+
+# --- Optional Premium Web UI
+.PHONY: web-up web-down logs-web
+web-up:
+	$(DC) --profile web up -d --build --wait web
+
+web-down:
+	$(DC) --profile web stop web
+
+logs-web:
+	$(DC) --profile web logs --tail=100 -f web
 
 # --- MCP
 .PHONY: mcp-tools

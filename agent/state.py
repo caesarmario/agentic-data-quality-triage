@@ -607,6 +607,7 @@ class TriageReport(BaseModel):
         evidence_plan: Bounded plan that selected deterministic evidence categories.
         hypothesis_framing: Audit metadata for model-assisted hypothesis wording.
         llm_runtime: Sanitized aggregate model-route usage retained by the report.
+        llm_route_events: Sanitized model telemetry, separate from root-cause evidence.
         complexity_assessment: Deterministic reasoning-complexity decision and facts.
         investigation_errors: Bounded non-fatal evidence or narrative gaps retained by the run.
         confidence: Final confidence score from 0.0 to 1.0.
@@ -630,6 +631,7 @@ class TriageReport(BaseModel):
     evidence_plan: EvidencePlan | None             = None
     hypothesis_framing: HypothesisFraming | None   = None
     llm_runtime: LlmRuntimeSummary                  = Field(default_factory=LlmRuntimeSummary)
+    llm_route_events: list[dict[str, Any]]           = Field(default_factory=list)
     complexity_assessment: IncidentComplexityAssessment | None = None
     investigation_errors: list[str]                = Field(default_factory=list, max_length=20)
     confidence: float                              = Field(ge=0.0, le=1.0)
@@ -653,6 +655,7 @@ class TriageState(BaseModel):
         alert_key: Optional stable alert key to load.
         alert: Loaded alert context.
         evidence: Evidence collected so far.
+        llm_route_events: Per-call usage retained for report totals, never DQ evidence.
         evidence_plan: Typed plan controlling allowlisted evidence collection.
         hypotheses: Candidate hypotheses generated so far.
         hypothesis_framing: Metadata for bounded model-assisted hypothesis wording.
@@ -670,6 +673,7 @@ class TriageState(BaseModel):
     alert_key: str                                  = ""
     alert: Alert | None                             = None
     evidence: list[EvidenceItem]                    = Field(default_factory=list)
+    llm_route_events: list[dict[str, Any]]           = Field(default_factory=list)
     evidence_plan: EvidencePlan | None              = None
     hypotheses: list[Hypothesis]                    = Field(default_factory=list)
     hypothesis_framing: HypothesisFraming | None    = None

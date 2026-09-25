@@ -237,6 +237,180 @@ def test_decision_is_terminal_and_idempotent(monkeypatch) -> None:
         )
 
 
+def test_pre_dispatch_cancellation_is_audited_and_idempotent(monkeypatch) -> None:
+    """
+    Ensure pending cancellation revokes authorization without touching Airflow runs.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    pending: ApprovalRequest            = build_approval(status="pending")
+    current: dict[str, ApprovalRequest] = {"approval": pending}
+    inserted: list[ApprovalRequest]     = []
+    audited: list[dict]                 = []
+
+    def fake_insert(client, request: ApprovalRequest) -> None:
+        """
+        Capture the appended state and expose it as the latest version.
+
+        Args:
+            client: Ignored ClickHouse client double.
+            request: New approval state.
+
+        Returns:
+            None.
+        """
+        inserted.append(request)
+        current["approval"] = request
+
+    monkeypatch.setattr(
+        approval_queue,
+        "get_approval_request",
+        lambda client, request_id: current["approval"],
+    )
+    monkeypatch.setattr(approval_queue, "insert_approval_request", fake_insert)
+    monkeypatch.setattr(
+        approval_queue,
+        "write_agent_audit_event",
+        lambda **kwargs: audited.append(kwargs),
+    )
+
+    cancelled, changed = approval_queue.cancel_approval_request(
+        request_id=pending.request_id,
+        cancelled_by="mario",
+        comment="The source partition arrived before dispatch.",
+        client=object(),
+    )
+
+    assert changed is True
+    assert cancelled.status == "cancelled"
+    assert cancelled.execution_status == "not_started"
+    assert cancelled.execution_dag_run_id == ""
+    assert cancelled.decided_by == "mario"
+    assert inserted == [cancelled]
+    assert audited[0]["action"] == "approval_cancelled"
+    assert audited[0]["input_payload"]["previous_status"] == "pending"
+    assert audited[0]["output_payload"]["airflow_runs_cancelled"] == 0
+
+    repeated, changed_again = approval_queue.cancel_approval_request(
+        request_id=pending.request_id,
+        cancelled_by="mario",
+        client=object(),
+    )
+
+    assert repeated == cancelled
+    assert changed_again is False
+    assert inserted == [cancelled]
+    assert len(audited) == 1
+
+
+def test_approved_request_can_be_cancelled_before_dispatch(monkeypatch) -> None:
+    """
+    Ensure an approved action can still be revoked before a dispatcher claims it.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    approved = build_approval(status="approved", decided_by="reviewer")
+    inserted: list[ApprovalRequest] = []
+
+    monkeypatch.setattr(approval_queue, "get_approval_request", lambda client, request_id: approved)
+    monkeypatch.setattr(approval_queue, "insert_approval_request", lambda client, request: inserted.append(request))
+    monkeypatch.setattr(approval_queue, "write_agent_audit_event", lambda **kwargs: None)
+
+    cancelled, changed = approval_queue.cancel_approval_request(
+        request_id=approved.request_id,
+        cancelled_by="reviewer",
+        comment="Approval withdrawn before execution.",
+        client=object(),
+    )
+
+    assert changed is True
+    assert cancelled.status == "cancelled"
+    assert cancelled.decided_by == "reviewer"
+    assert inserted == [cancelled]
+
+
+@pytest.mark.parametrize(
+    ("status", "execution_status", "execution_dag_run_id", "error_pattern"),
+    [
+        ("approved", "dispatching", "manual__dispatcher", "cannot be cancelled after dispatch"),
+        ("approved", "dispatched", "manual__dispatcher", "cannot be cancelled after dispatch"),
+        ("approved", "succeeded", "manual__dispatcher", "cannot be cancelled after dispatch"),
+        ("rejected", "not_started", "", "only pending or approved"),
+    ],
+)
+def test_cancellation_rejects_started_execution_and_terminal_denial(
+    monkeypatch,
+    status: str,
+    execution_status: str,
+    execution_dag_run_id: str,
+    error_pattern: str,
+) -> None:
+    """
+    Ensure cancellation cannot masquerade as Airflow run cancellation or rewrite denial.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        status: Approval lifecycle state under test.
+        execution_status: Execution lifecycle state under test.
+        execution_dag_run_id: Existing dispatcher correlation identifier.
+        error_pattern: Expected policy-rejection message fragment.
+
+    Returns:
+        None.
+    """
+    current = build_approval(
+        status=status,
+        execution_status=execution_status,
+        execution_dag_run_id=execution_dag_run_id,
+    )
+
+    monkeypatch.setattr(approval_queue, "get_approval_request", lambda client, request_id: current)
+    monkeypatch.setattr(
+        approval_queue,
+        "insert_approval_request",
+        lambda *args, **kwargs: pytest.fail("Rejected cancellation must not append state."),
+    )
+
+    with pytest.raises(ValueError, match=error_pattern):
+        approval_queue.cancel_approval_request(
+            request_id=current.request_id,
+            cancelled_by="mario",
+            client=object(),
+        )
+
+
+def test_cancellation_rejects_blank_actor_before_lookup(monkeypatch) -> None:
+    """
+    Ensure invalid cancellation identity fails before any database access.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setattr(
+        approval_queue,
+        "get_approval_request",
+        lambda *args, **kwargs: pytest.fail("Database lookup must not run for a blank actor."),
+    )
+
+    with pytest.raises(ValueError, match="cancelled_by cannot be blank"):
+        approval_queue.cancel_approval_request(
+            request_id="APR-20260610-A1B2C3D4",
+            cancelled_by="  ",
+            client=object(),
+        )
+
+
 def test_approved_request_must_exactly_match_execution_parameters(monkeypatch) -> None:
     """
     Ensure post-approval execution flag changes are rejected by the gate.

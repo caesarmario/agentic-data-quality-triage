@@ -90,7 +90,7 @@ def build_alert_lookup_sql(
     limit: int = 20,
 ) -> str:
     """
-    Build a ClickHouse SQL query for alert lookup.
+    Build a ClickHouse SQL query over current logical alert versions.
 
     Args:
         alert_id: Optional alert UUID string.
@@ -126,9 +126,9 @@ def build_alert_lookup_sql(
             source_check_run_id,
             details_json,
             report_s3_uri
-        FROM {ALERTS_TABLE}
+        FROM {ALERTS_TABLE} FINAL
         {where_sql}
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, alert_key ASC
         LIMIT {safe_limit}
     """
 

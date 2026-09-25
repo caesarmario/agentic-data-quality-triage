@@ -30,6 +30,7 @@ from agent.specialists.registry import (
     AGENT_CAPABILITY_REGISTRY,
     INCIDENT_TRIAGE_SPECIALIST_NAME,
     METADATA_LINEAGE_SPECIALIST_NAME,
+    TASK_MODEL_ROUTE_POLICY,
     enforce_result_contract,
     enforce_task_capability,
     get_agent_capability,
@@ -64,7 +65,10 @@ def build_registered_task(
         Policy-compatible AgentTaskEnvelope with explicit context references.
     """
     capability = get_agent_capability(specialist_name)
-    llm_routed = capability.default_model_route != AgentModelRoute.NO_LLM_FALLBACK
+    model_route = TASK_MODEL_ROUTE_POLICY.get(
+        (specialist_name, task_type), capability.default_model_route,
+    )
+    llm_routed = model_route != AgentModelRoute.NO_LLM_FALLBACK
 
     task = AgentTaskEnvelope(
         parent_run_id=uuid4(),
@@ -79,7 +83,7 @@ def build_registered_task(
                 description="Explicit warehouse asset selected by the operator.",
             )
         ],
-        model_route=capability.default_model_route,
+        model_route=model_route,
         model_call_budget=2 if llm_routed else 0,
         token_budget=2_048 if llm_routed else 0,
         estimated_cost_budget_usd=0.02 if llm_routed else 0.0,
@@ -412,7 +416,7 @@ def test_registry_enforces_exact_task_permission_matrix(
 
     alternate_route = (
         AgentModelRoute.QUICKTHINK_LLM
-        if capability.default_model_route == AgentModelRoute.NO_LLM_FALLBACK
+        if task.model_route == AgentModelRoute.NO_LLM_FALLBACK
         else AgentModelRoute.NO_LLM_FALLBACK
     )
     wrong_route_task = task.model_copy(update={"model_route": alternate_route})

@@ -78,8 +78,10 @@ def test_daily_summary_sql_is_date_filtered_open_only_and_bounded() -> None:
 
     assert sql.count("toDate('2026-06-10')") == 2
     assert "FROM dq.dq_check_results" in sql
-    assert "FROM dq.alerts" in sql
+    assert "FROM dq.alerts FINAL" in sql
+    assert sql.index("FROM dq.alerts FINAL") < sql.index("AND status = 'open'")
     assert "AND status = 'open'" in sql
+    assert "GROUP BY severity" in sql
     assert "LIMIT 100" in sql
 
 
@@ -140,6 +142,7 @@ def test_fetch_daily_quality_summary_aggregates_and_audits(monkeypatch) -> None:
     ]
     assert payload["total_checks"] == 12
     assert payload["total_open_alerts"] == 3
+    assert payload["total_open_alerts"] == sum(item["count"] for item in payload["alert_counts"])
     assert len(client.queries) == 1
     assert captured_audit["action"] == "fetch_daily_quality_summary"
     assert captured_audit["tool_name"] == "daily_summary"

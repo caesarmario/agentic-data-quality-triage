@@ -9,13 +9,16 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 from uuid import UUID
 
 import pytest
 
+from agent.llm import connectivity
 from agent.llm import client as llm_client
 from agent.llm.client import LlmResponse
+from agent.llm.connectivity import GeminiConnectivityError
 from agent.llm.config import load_model_routing_config
 from agent.supervisor.budgets import active_supervisor_llm_budget
 from agent.tools.audit_log import AGENT_AUDIT_LOG_COLUMNS
@@ -171,6 +174,10 @@ def build_audit_row(client: FakeAuditClient) -> dict[str, Any]:
     return dict(zip(AGENT_AUDIT_LOG_COLUMNS, insert_call["data"][0], strict=True))
 
 
+def no_network_preflight(*args: Any, **kwargs: Any) -> None:
+    """Allow synthetic strict responses without opening transport connections."""
+
+
 # --- Defining Tests
 def test_smoke_route_allowlist_is_static_and_compatible_with_routing_config() -> None:
     """
@@ -256,6 +263,7 @@ def test_external_provider_routes_satisfy_strict_smoke_contract(
         require_provider=True,
         external_provider_smoke=True,
         client=client,
+        connectivity_check=no_network_preflight,
         llm_runner=build_response_runner(response),
     )
 
@@ -287,6 +295,7 @@ def test_smoke_audit_uses_environment_model_override(monkeypatch) -> None:
         require_provider=True,
         external_provider_smoke=True,
         client=client,
+        connectivity_check=no_network_preflight,
         llm_runner=build_response_runner(
             build_response(
                 provider="gemini",
@@ -332,6 +341,123 @@ def test_default_selected_route_stays_zero_cost_heuristic_execution() -> None:
     assert audit_output["external_provider_smoke"] is False
 
 
+def test_strict_gemini_preflight_failure_audits_zero_calls_before_budget(caplog) -> None:
+    """Reject transport failure before reserving budget or invoking the runner."""
+    client = FakeAuditClient()
+    checked_routes: list[Any] = []
+
+    def fail_preflight(run_id: str, *, route: Any) -> None:
+        """Simulate a fixed DNS failure without making a network request."""
+        assert UUID(run_id)
+        checked_routes.append(route)
+        assert active_supervisor_llm_budget() is None
+        raise GeminiConnectivityError("dns_resolution_failed")
+
+    def forbidden_runner(**kwargs: Any) -> LlmResponse:
+        """Fail if model execution begins after rejected transport."""
+        pytest.fail("The model runner must not start")
+
+    with pytest.raises(ProviderSmokeExecutionError, match="GeminiConnectivityError") as caught:
+        run_provider_smoke(
+            route_name="cheap_summary",
+            require_provider=True,
+            external_provider_smoke=True,
+            client=client,
+            llm_runner=forbidden_runner,
+            connectivity_check=fail_preflight,
+        )
+
+    audit_row = build_audit_row(client)
+    output = json.loads(audit_row["output_json"])
+    assert len(checked_routes) == 1
+    assert checked_routes[0].route_name == "cheap_summary"
+    assert audit_row["status"] == "failed"
+    assert output == {
+        "error_type": "GeminiConnectivityError",
+        "preflight_reason": "dns_resolution_failed",
+        "model_calls": 0,
+    }
+    assert "dns_resolution_failed" in caplog.text
+    assert "dns_resolution_failed" not in str(caught.value)
+
+
+def test_real_preflight_rejects_custom_config_route_before_model(monkeypatch, tmp_path) -> None:
+    """The default smoke gate checks the selected custom config, not default YAML."""
+    client = FakeAuditClient()
+    config = load_model_routing_config().model_copy(deep=True)
+    config.providers["gemini"].enabled = False
+    config_path = tmp_path / "custom_model_routing.json"
+    config_path.write_text(config.model_dump_json(), encoding="utf-8")
+
+    def forbidden_probe(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        """Disabled routes must fail before transport or model work."""
+        pytest.fail("A disabled Gemini route must not probe transport")
+
+    def forbidden_runner(**kwargs: Any) -> LlmResponse:
+        """Reject any provider invocation after the configured route fails."""
+        pytest.fail("The model runner must not start")
+
+    monkeypatch.setattr(connectivity.subprocess, "run", forbidden_probe)
+    with pytest.raises(ProviderSmokeExecutionError, match="GeminiConnectivityError"):
+        run_provider_smoke(
+            route_name="cheap_summary",
+            require_provider=True,
+            external_provider_smoke=True,
+            config_path=config_path,
+            client=client,
+            llm_runner=forbidden_runner,
+        )
+
+    assert json.loads(build_audit_row(client)["output_json"]) == {
+        "error_type": "GeminiConnectivityError",
+        "preflight_reason": "invalid_gemini_route",
+        "model_calls": 0,
+    }
+
+
+def test_non_strict_gemini_skips_preflight() -> None:
+    """The default heuristic path remains network-free even for a Gemini route."""
+    def forbidden_preflight(*args: Any, **kwargs: Any) -> None:
+        """Fail if no-LLM smoke tries to probe transport."""
+        pytest.fail("Heuristic execution must not probe Gemini")
+
+    result = run_provider_smoke(
+        route_name="cheap_summary",
+        client=FakeAuditClient(),
+        connectivity_check=forbidden_preflight,
+        llm_runner=build_response_runner(build_response(
+            provider="heuristic", route_name="evidence_summary",
+            model="heuristic-v1", used_heuristic=True,
+        )),
+    )
+    assert result.used_heuristic
+
+
+def test_strict_non_gemini_route_skips_gemini_preflight(monkeypatch) -> None:
+    """A configured non-Gemini provider keeps its existing strict routing."""
+    from scripts import smoke_llm_provider as smoke
+
+    config = load_model_routing_config().model_copy(deep=True)
+    config.routes["cheap_summary"].provider = "openai"
+    monkeypatch.setattr(smoke, "load_model_routing_config", lambda config_path=None: config)
+
+    def forbidden_preflight(*args: Any, **kwargs: Any) -> None:
+        """Fail if another provider is sent through the Gemini probe."""
+        pytest.fail("Non-Gemini route must not probe Gemini")
+
+    result = run_provider_smoke(
+        route_name="cheap_summary",
+        require_provider=True,
+        external_provider_smoke=True,
+        client=FakeAuditClient(),
+        connectivity_check=forbidden_preflight,
+        llm_runner=build_response_runner(build_response(
+            provider="openai", route_name="cheap_summary", model="gpt-5.6-luna",
+        )),
+    )
+    assert result.executed_provider == "openai"
+
+
 def test_external_provider_smoke_requires_explicit_strict_opt_in() -> None:
     """
     Ensure direct smoke execution remains zero-cost unless strict mode is selected.
@@ -369,6 +495,7 @@ def test_external_provider_smoke_rejects_actual_usage_above_budget() -> None:
             require_provider=True,
             external_provider_smoke=True,
             client=client,
+            connectivity_check=no_network_preflight,
             llm_runner=build_response_runner(response),
         )
 
@@ -400,6 +527,7 @@ def test_strict_external_smoke_uses_temporary_heuristic_fallback_config() -> Non
         require_provider=True,
         external_provider_smoke=True,
         client=client,
+        connectivity_check=no_network_preflight,
         llm_runner=capture_runner,
     )
 
@@ -444,6 +572,7 @@ def test_strict_external_smoke_installs_one_call_budget_scope() -> None:
         require_provider=True,
         external_provider_smoke=True,
         client=client,
+        connectivity_check=no_network_preflight,
         llm_runner=inspect_budget_runner,
     )
 
@@ -473,6 +602,7 @@ def test_strict_smoke_fails_and_audits_provider_fallback() -> None:
             require_provider=True,
             external_provider_smoke=True,
             client=client,
+            connectivity_check=no_network_preflight,
             llm_runner=build_response_runner(response),
         )
 
@@ -509,6 +639,7 @@ def test_provider_execution_failure_does_not_persist_raw_error_text() -> None:
             require_provider=True,
             external_provider_smoke=True,
             client=client,
+            connectivity_check=no_network_preflight,
             llm_runner=fail_provider,
         )
 

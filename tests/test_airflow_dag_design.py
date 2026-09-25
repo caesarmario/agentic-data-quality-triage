@@ -167,6 +167,8 @@ def test_validation_dag_is_manual_bounded_and_auditable() -> None:
     assert "python scripts/smoke_readiness.py" in content
     assert '"require_api": Param(' in content
     assert "--require-api" in content
+    assert '"require_web": Param(' in content
+    assert "--require-web" in content
     assert "arbitrary" not in content.lower()
 
 
@@ -342,6 +344,12 @@ def test_life_evaluation_dag_is_manual_bounded_and_non_mutating() -> None:
     assert "run_life_evaluation.py" in content
     assert "prepare_life_source_report.py" in content
     assert "verify_life_evaluation.py" in content
+    assert "run_life_supervisor_comparison.py" in content
+    assert "prepare_life_supervisor_comparison.py" in content
+    assert "verify_life_supervisor_comparison.py" in content
+    assert "supervisor_comparison" in content
+    assert "single_supervisor_run_id" in content
+    assert "fanout_supervisor_run_id" in content
     assert "fail_on_eval_failure" in content
     assert "enable_critic" in content
     assert "subprocess" not in content
@@ -362,6 +370,9 @@ def test_makefile_routes_life_evaluation_through_airflow() -> None:
     assert "airflow-life-logs:" in content
     assert "life-eval: airflow-life-eval" in content
     assert "scripts/trigger_airflow_life_evaluation.py" in content
+    assert "LIFE_SOURCE_MODE" in content
+    assert "LIFE_SINGLE_SUPERVISOR_RUN_ID" in content
+    assert "LIFE_FANOUT_SUPERVISOR_RUN_ID" in content
 
 
 def test_metadata_registry_sync_dag_is_manual_bounded_and_auditable() -> None:
@@ -597,10 +608,6 @@ def test_control_plane_resilience_dag_is_manual_bounded_and_non_mutating() -> No
     helper  = (DAGS_ROOT / "dq_platform" / "control_plane_resilience.py").read_text(
         encoding="utf-8"
     )
-    registry = (
-        PROJECT_ROOT / "agent" / "supervisor" / "scenario_registry.py"
-    ).read_text(encoding="utf-8")
-
     assert 'DAG_ID = "99_dag_dq_control_plane_resilience_smoke"' in content
     assert "schedule=None" in content
     assert "max_active_runs=1" in content
@@ -610,9 +617,8 @@ def test_control_plane_resilience_dag_is_manual_bounded_and_non_mutating() -> No
     assert 'task_id="t30_emit_resilience_summary"' in content
     assert '"scenario": Param(' in content
     assert "enum=list(CONTROL_PLANE_RESILIENCE_SCENARIOS)" in content
-    assert "from agent.supervisor.scenario_registry import" in helper
-    assert '"terminal_failure"' in registry
-    assert '"concurrent_budget_reservation"' in registry
+    assert '"terminal_failure"' in helper
+    assert '"concurrent_budget_reservation"' in helper
     assert "run_control_plane_resilience_smoke.py" in content
     assert "verify_control_plane_resilience.py" in content
     assert "ALTER TABLE" not in content

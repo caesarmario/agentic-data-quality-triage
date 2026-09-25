@@ -12,14 +12,30 @@ import json
 import logging
 from typing import Any
 
-from agent.supervisor.scenario_registry import CONTROL_PLANE_RESILIENCE_SCENARIOS
-
 
 # --- Getting Logger
 logger = logging.getLogger(__name__)
 
 
 # --- Defining Constants
+CONTROL_PLANE_RESILIENCE_SCENARIOS = (
+    "transient_once",
+    "hard_timeout",
+    "circuit_open",
+    "partial_result",
+    "terminal_failure",
+    "optional_worker_failure",
+    "required_worker_failure",
+    "gemini_timeout_simulated",
+    "gemini_rate_limit_simulated",
+    "pre_call_cost_rejection",
+    "invalid_worker_contract",
+    "resume_completed_parallel_wave",
+    "circuit_open_specialist_rejection",
+    "aggregation_partial_evidence",
+    "concurrent_budget_reservation",
+)
+
 CONTROL_PLANE_RESILIENCE_TASK_IDS = (
     "t10_run_resilience_scenario",
     "t20_verify_resilience_audit",

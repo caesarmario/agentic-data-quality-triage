@@ -15,6 +15,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
+from uuid import UUID
 
 
 # --- Configuring Project Path
@@ -37,11 +38,13 @@ from agent.evaluation.replay import (
     LIFE_SOURCE_MODES,
     build_replay_report_s3_uri,
 )
+from agent.evaluation.supervisor_comparison import DEFAULT_COMPARISON_ARTIFACT_PREFIX
 from pipelines.common.logging import logger
 
 
 # --- Defining Constants
 LIFE_EVALUATION_DAG_ID = "94_dag_dq_agent_life_evaluation"
+SUPPORTED_LIFE_SOURCE_MODES = (*LIFE_SOURCE_MODES, "supervisor_comparison")
 
 
 # --- Defining Functions
@@ -71,6 +74,8 @@ def build_trigger_command(
     artifact_prefix: str = DEFAULT_LIFE_ARTIFACT_PREFIX,
     fail_on_eval_failure: bool = False,
     enable_critic: bool = False,
+    single_supervisor_run_id: str = "",
+    fanout_supervisor_run_id: str = "",
 ) -> list[str]:
     """
     Build an Airflow trigger command without shell interpolation.
@@ -85,6 +90,8 @@ def build_trigger_command(
         artifact_prefix: Path-safe target artifact prefix.
         fail_on_eval_failure: Whether hard reliability failure should fail the DAG.
         enable_critic: Whether the DAG should add a bounded critic review.
+        single_supervisor_run_id: Single-handoff parent UUID for comparison mode.
+        fanout_supervisor_run_id: Fan-out parent UUID for comparison mode.
 
     Returns:
         Subprocess argument list containing compact valid JSON configuration.
@@ -97,7 +104,7 @@ def build_trigger_command(
 
     normalized_source_mode = source_mode.strip().lower()
 
-    if normalized_source_mode not in LIFE_SOURCE_MODES:
+    if normalized_source_mode not in SUPPORTED_LIFE_SOURCE_MODES:
         raise ValueError(f"Unknown LIFE source mode: {source_mode}")
 
     if not 0.0 <= minimum_confidence <= 1.0:
@@ -106,7 +113,29 @@ def build_trigger_command(
     normalized_airflow_run = normalize_evaluation_run_id(run_id)
     normalized_evaluation  = normalize_evaluation_run_id(evaluation_run_id)
 
-    if normalized_source_mode == "scenario_replay":
+    normalized_single_parent = ""
+    normalized_fanout_parent = ""
+
+    if normalized_source_mode == "supervisor_comparison":
+        if report_s3_uri:
+            raise ValueError("Supervisor comparison loads source reports from audited parent runs.")
+
+        try:
+            normalized_single_parent = str(UUID(single_supervisor_run_id))
+            normalized_fanout_parent = str(UUID(fanout_supervisor_run_id))
+
+        except ValueError as exc:
+            raise ValueError("Supervisor comparison requires two valid parent UUIDs.") from exc
+
+        if normalized_single_parent == normalized_fanout_parent:
+            raise ValueError("Single and fan-out parent UUIDs must be different.")
+
+        normalized_report_uri = ""
+
+        if artifact_prefix == DEFAULT_LIFE_ARTIFACT_PREFIX:
+            artifact_prefix = DEFAULT_COMPARISON_ARTIFACT_PREFIX
+
+    elif normalized_source_mode == "scenario_replay":
         if scenario_id not in LIFE_REPLAY_SCENARIO_NAMES:
             raise ValueError(f"Scenario does not support LIFE replay: {scenario_id}")
 
@@ -137,6 +166,8 @@ def build_trigger_command(
             "artifact_prefix": artifact_prefix,
             "fail_on_eval_failure": fail_on_eval_failure,
             "enable_critic": enable_critic,
+            "single_supervisor_run_id": normalized_single_parent,
+            "fanout_supervisor_run_id": normalized_fanout_parent,
         },
         separators=(",", ":"),
     )
@@ -182,6 +213,8 @@ def trigger_life_evaluation(
     enable_critic: bool = False,
     run_id: str = "",
     evaluation_run_id: str = "",
+    single_supervisor_run_id: str = "",
+    fanout_supervisor_run_id: str = "",
 ) -> tuple[str, str]:
     """
     Unpause and trigger one manual LIFE evaluation DagRun.
@@ -196,6 +229,8 @@ def trigger_life_evaluation(
         enable_critic: Whether to run a deterministic critic before the proposal.
         run_id: Optional explicit Airflow run id.
         evaluation_run_id: Optional explicit LIFE artifact correlation id.
+        single_supervisor_run_id: Single-handoff parent UUID for comparison mode.
+        fanout_supervisor_run_id: Fan-out parent UUID for comparison mode.
 
     Returns:
         Resolved Airflow run id and evaluation run id.
@@ -213,6 +248,8 @@ def trigger_life_evaluation(
         artifact_prefix=artifact_prefix,
         fail_on_eval_failure=fail_on_eval_failure,
         enable_critic=enable_critic,
+        single_supervisor_run_id=single_supervisor_run_id,
+        fanout_supervisor_run_id=fanout_supervisor_run_id,
     )
 
     run_command(["airflow", "dags", "unpause", LIFE_EVALUATION_DAG_ID])
@@ -237,7 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Trigger the manual Airflow LIFE evaluation DAG.")
 
     parser.add_argument("--scenario", required=True, choices=LIFE_SCENARIO_NAMES)
-    parser.add_argument("--source-mode", choices=LIFE_SOURCE_MODES, default="stored_report")
+    parser.add_argument("--source-mode", choices=SUPPORTED_LIFE_SOURCE_MODES, default="stored_report")
     parser.add_argument("--report-s3-uri", default="")
     parser.add_argument("--minimum-confidence", type=float, default=DEFAULT_MIN_CONFIDENCE)
     parser.add_argument("--artifact-prefix", default=DEFAULT_LIFE_ARTIFACT_PREFIX)
@@ -245,6 +282,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-critic", action="store_true")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--evaluation-run-id", default="")
+    parser.add_argument("--single-supervisor-run-id", default="")
+    parser.add_argument("--fanout-supervisor-run-id", default="")
 
     return parser
 
@@ -270,6 +309,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         enable_critic=args.enable_critic,
         run_id=args.run_id,
         evaluation_run_id=args.evaluation_run_id,
+        single_supervisor_run_id=args.single_supervisor_run_id,
+        fanout_supervisor_run_id=args.fanout_supervisor_run_id,
     )
 
     return 0

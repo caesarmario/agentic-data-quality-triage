@@ -18,6 +18,8 @@ from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.sdk import Param
 
+from dq_platform.run_identity import trigger_logical_date, trigger_run_suffix
+
 
 # --- Getting Logger
 logger = logging.getLogger(__name__)
@@ -81,6 +83,8 @@ def default_user_defined_macros() -> dict[str, Any]:
     return {
         "bangkok_ds": bangkok_ds,
         "default_incident_scenario": default_incident_scenario,
+        "trigger_run_suffix": trigger_run_suffix,
+        "trigger_logical_date": trigger_logical_date,
     }
 
 

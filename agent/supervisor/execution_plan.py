@@ -25,8 +25,10 @@ from agent.specialists.contracts import (
     EvidenceReference,
 )
 from agent.specialists.incident_triage import build_incident_triage_task
+from agent.specialists.evidence_worker import build_evidence_worker_task
 from agent.specialists.metadata_lineage import build_metadata_lineage_task
 from agent.specialists.registry import (
+    EVIDENCE_INTERPRETATION_TASKS,
     INCIDENT_TRIAGE_SPECIALIST_NAME,
     METADATA_LINEAGE_SPECIALIST_NAME,
     SCHEMA_DRIFT_SPECIALIST_NAME,
@@ -513,7 +515,19 @@ def build_task_for_proposal(
     specialist = proposal.specialist_name.strip().lower()
     task_type   = proposal.task_type.strip().lower()
 
-    if specialist == INCIDENT_TRIAGE_SPECIALIST_NAME and task_type == "triage_alert":
+    if EVIDENCE_INTERPRETATION_TASKS.get(task_type) == specialist:
+        if request.intent != SupervisorIntent.INTERPRET_INCIDENT_EVIDENCE:
+            raise ValueError("Evidence interpretation requires an explicit interpretation intent.")
+
+        task = build_evidence_worker_task(
+            parent_run_id=parent_run_id,
+            task_type=task_type,
+            alert_key=request.alert_key,
+            manifest_s3_uri=request.manifest_s3_uri,
+            requester=request.requester,
+        )
+
+    elif specialist == INCIDENT_TRIAGE_SPECIALIST_NAME and task_type == "triage_alert":
         if not request.alert_id and not request.alert_key:
             raise ValueError("Incident triage proposal requires parent alert context.")
 
@@ -609,6 +623,10 @@ def intent_for_task(task: AgentTaskEnvelope) -> SupervisorIntent:
         SupervisorIntent represented by the task.
     """
     mapping = {
+        **{
+            (specialist, task_type): SupervisorIntent.INTERPRET_INCIDENT_EVIDENCE
+            for task_type, specialist in EVIDENCE_INTERPRETATION_TASKS.items()
+        },
         (INCIDENT_TRIAGE_SPECIALIST_NAME, "triage_alert"): SupervisorIntent.TRIAGE_ALERT,
         (METADATA_LINEAGE_SPECIALIST_NAME, "asset_context"): SupervisorIntent.ASSET_CONTEXT,
         (METADATA_LINEAGE_SPECIALIST_NAME, "blast_radius"): SupervisorIntent.BLAST_RADIUS,
@@ -640,6 +658,17 @@ def build_deterministic_proposal(request: SupervisorRequest) -> AgentPlanningPro
         ValueError: If the request lacks a second independent bounded use case.
     """
     route = resolve_supervisor_route(request)
+    if route.intent == SupervisorIntent.INTERPRET_INCIDENT_EVIDENCE:
+        return AgentPlanningProposal(tasks=[
+            ProposedAgentTask(
+                specialist_name=specialist,
+                task_type=task_type,
+                requirement=AgentTaskRequirement.REQUIRED,
+                rationale="Collect and interpret this independent evidence category for the same alert.",
+            )
+            for task_type, specialist in EVIDENCE_INTERPRETATION_TASKS.items()
+        ])
+
     tasks = [
         ProposedAgentTask(
             specialist_name=route.specialist_name,
@@ -721,6 +750,9 @@ def compile_execution_plan(
         raise ValueError("Execution plans can be compiled only for fanout mode.")
 
     selected_proposal = proposal or build_deterministic_proposal(request)
+    if request.intent == SupervisorIntent.INTERPRET_INCIDENT_EVIDENCE and proposal is not None:
+        # The three evidence categories are mandatory policy, not model suggestions.
+        raise ValueError("Evidence interpretation uses a deterministic three-task plan only.")
     plan_source       = (
         AgentPlanSource.LLM_PROPOSAL
         if proposal is not None

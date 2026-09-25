@@ -1,0 +1,6 @@
+# Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+node_modules
+.next
+.env*
+!.env.example
+npm-debug.log*

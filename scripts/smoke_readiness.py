@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from pipelines.common.clickhouse import build_clickhouse_client, quote_sql_literal, split_table_name
 from pipelines.common.logging import logger
 from pipelines.seeding.upload_to_s3 import build_s3_client
+from scripts.smoke_web import run_web_acceptance
 
 
 # --- Defining Constants
@@ -466,9 +467,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Require the optional control-plane API profile to pass its health check.",
     )
+    parser.add_argument(
+        "--require-web",
+        action="store_true",
+        help="Require the optional web profile and its HTTP/proxy policy acceptance checks.",
+    )
     parser.add_argument("--table", action="append", default=None, help="Optional ClickHouse table override. Repeatable.")
     parser.add_argument("--bucket", action="append", default=None, help="Optional S3 bucket override. Repeatable.")
 
+    parser.add_argument("--require-web-report", action="store_true", help="Require stored report identity and server HTML content acceptance.")
+    parser.add_argument("--web-operator-request-id", default="", help="Verify one synthetic browser approval by exact request ID (implies web readiness).")
     return parser
 
 
@@ -515,6 +523,17 @@ def main() -> None:
 
     if args.require_api:
         checks.extend(check_control_plane_api())
+
+    if args.require_web or args.require_web_report or args.web_operator_request_id:
+        checks.extend(run_web_acceptance())
+    if args.require_web_report:
+        from scripts.web_report_readiness import check_persisted_web_report
+
+        checks.append(check_persisted_web_report())
+    if args.web_operator_request_id:
+        from scripts.web_operator_readiness import check_web_operator_approval
+
+        checks.append(check_web_operator_approval(args.web_operator_request_id))
 
     summary = summarize_checks(checks)
 

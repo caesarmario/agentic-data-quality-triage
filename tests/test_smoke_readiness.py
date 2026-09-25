@@ -8,10 +8,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import Any
 
+from scripts import smoke_readiness
 from scripts.smoke_readiness import (
     DEFAULT_CLICKHOUSE_TABLES,
+    ReadinessCheck,
     build_parser,
     build_table_count_query,
     build_table_exists_query,
@@ -293,6 +296,54 @@ def test_api_readiness_is_explicitly_opt_in() -> None:
 
     assert parser.parse_args([]).require_api is False
     assert parser.parse_args(["--require-api"]).require_api is True
+
+
+def test_web_readiness_is_explicitly_opt_in() -> None:
+    """
+    Ensure the premium web profile does not alter default platform readiness.
+
+    Returns:
+        None.
+    """
+    parser = build_parser()
+
+    assert parser.parse_args([]).require_web is False
+    assert parser.parse_args(["--require-web"]).require_web is True
+    assert parser.parse_args(["--require-web"]).require_api is False
+
+
+def test_require_web_executes_optional_web_acceptance(monkeypatch, capsys) -> None:
+    """Wire the opt-in CLI flag to web acceptance without other service calls."""
+    calls = 0
+
+    def fake_web_acceptance() -> list[ReadinessCheck]:
+        """Return one passing web check and record execution."""
+        nonlocal calls
+        calls += 1
+        return [ReadinessCheck(name="web:test", status="pass", details={})]
+
+    monkeypatch.setattr(smoke_readiness, "run_web_acceptance", fake_web_acceptance)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "smoke_readiness.py",
+            "--skip-clickhouse",
+            "--skip-s3",
+            "--skip-ch-ui",
+            "--skip-streamlit",
+            "--require-web",
+            "--format",
+            "json",
+        ],
+    )
+
+    smoke_readiness.main()
+    payload = capsys.readouterr().out
+
+    assert calls == 1
+    assert '"status": "pass"' in payload
+    assert '"name": "web:test"' in payload
 
 
 def test_streamlit_readiness_is_required_by_default_and_can_be_skipped() -> None:

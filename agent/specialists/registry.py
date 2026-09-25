@@ -26,6 +26,8 @@ INCIDENT_TRIAGE_SPECIALIST_NAME = "incident_triage_agent"
 
 INCIDENT_TRIAGE_TASK_TYPES = (
     "triage_alert",
+    "interpret_dq_history",
+    "interpret_pipeline_run",
 )
 
 INCIDENT_TRIAGE_ALLOWED_TOOLS = (
@@ -44,6 +46,8 @@ INCIDENT_TRIAGE_ALLOWED_TOOLS = (
 
 INCIDENT_TRIAGE_REQUIRED_TOOLS = {
     "triage_alert": INCIDENT_TRIAGE_ALLOWED_TOOLS,
+    "interpret_dq_history": ("alerts", "dq_history", "llm_router", "agent_audit_log"),
+    "interpret_pipeline_run": ("alerts", "pipeline_runs", "llm_router", "agent_audit_log"),
 }
 
 METADATA_LINEAGE_SPECIALIST_NAME = "metadata_lineage_agent"
@@ -52,9 +56,12 @@ METADATA_LINEAGE_TASK_TYPES = (
     "asset_context",
     "blast_radius",
     "trusted_asset_search",
+    "interpret_metadata_lineage",
 )
 
 METADATA_LINEAGE_ALLOWED_TOOLS = (
+    "alerts",
+    "llm_router",
     "metadata_catalog",
     "dbt_lineage",
     "dbt_blast_radius",
@@ -62,6 +69,9 @@ METADATA_LINEAGE_ALLOWED_TOOLS = (
 )
 
 METADATA_LINEAGE_REQUIRED_TOOLS = {
+    "interpret_metadata_lineage": (
+        "alerts", "metadata_catalog", "dbt_blast_radius", "llm_router", "agent_audit_log",
+    ),
     "asset_context": (
         "metadata_catalog",
         "dbt_lineage",
@@ -118,6 +128,18 @@ REQUIRED_TOOLS_BY_SPECIALIST = {
     METADATA_LINEAGE_SPECIALIST_NAME: METADATA_LINEAGE_REQUIRED_TOOLS,
     SQL_REVIEW_SPECIALIST_NAME: SQL_REVIEW_REQUIRED_TOOLS,
     SCHEMA_DRIFT_SPECIALIST_NAME: SCHEMA_DRIFT_REQUIRED_TOOLS,
+}
+
+# Interpretation permissions belong to exact tasks, never the whole specialist.
+EVIDENCE_INTERPRETATION_TASKS = {
+    "interpret_dq_history": INCIDENT_TRIAGE_SPECIALIST_NAME,
+    "interpret_pipeline_run": INCIDENT_TRIAGE_SPECIALIST_NAME,
+    "interpret_metadata_lineage": METADATA_LINEAGE_SPECIALIST_NAME,
+}
+
+TASK_MODEL_ROUTE_POLICY = {
+    (specialist, task_type): AgentModelRoute.QUICKTHINK_LLM
+    for task_type, specialist in EVIDENCE_INTERPRETATION_TASKS.items()
 }
 
 RISK_TIER_ORDER = {
@@ -364,7 +386,11 @@ def enforce_task_capability(task: AgentTaskEnvelope) -> AgentCapabilitySpec:
             f"Risk tier {task.risk_tier.value} exceeds {task.specialist_name} capability."
         )
 
-    if task.model_route != capability.default_model_route:
+    expected_model_route = TASK_MODEL_ROUTE_POLICY.get(
+        (task.specialist_name, task.task_type), capability.default_model_route,
+    )
+
+    if task.model_route != expected_model_route:
         raise PermissionError(
             f"Model route {task.model_route.value} is not allowed for {task.specialist_name}."
         )
@@ -384,6 +410,9 @@ def enforce_task_capability(task: AgentTaskEnvelope) -> AgentCapabilitySpec:
         raise PermissionError(
             "Task omitted required specialist tools: " + ", ".join(sorted(missing))
         )
+
+    if task.task_type in EVIDENCE_INTERPRETATION_TASKS and requested_tools != required_tools:
+        raise PermissionError("Evidence interpretation requires its exact read-only tool allowlist.")
 
     logger.info(
         "Authorized specialist task | specialist=%s task_type=%s risk=%s tools=%s",

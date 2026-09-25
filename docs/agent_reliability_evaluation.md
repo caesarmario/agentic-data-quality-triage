@@ -90,3 +90,27 @@ coverage, investigation quality, or fault-isolation benefit without unacceptable
 cost or latency. A tie keeps single-handoff as the default because it is simpler
 to operate. Evaluation output may propose a routing change, but cannot enable
 fan-out or modify policy automatically.
+
+DAG 99 proves fan-out failure containment, checkpoint reuse, and the ten-worker
+concurrency boundary. The separate DAG 94 comparison prevents operational
+resilience from being mistaken for better investigation quality.
+
+### Accepted Comparison Baseline
+
+The first same-alert comparison completed through Airflow on 2026-09-02:
+
+- single DAG 98 run: `manual__life_compare_single_20260902T121000`
+- fan-out DAG 98 run: `manual__life_compare_fanout_20260902T121500`
+- comparison DAG 94 run: `manual__life_compare_eval_20260902T122000`
+- scenario: `missing_latest_day`
+- single workers and evidence references: `1` and `9`
+- fan-out workers and evidence references: `2` and `12`
+- external model calls, tokens, and provider cost: `0`
+- report quality delta: `0.000`
+- comparison decision: `keep_single`
+
+All DAG 94 tasks succeeded. Its verifier confirmed exactly one replay-safe audit
+event and immutable JSON/Markdown artifacts under
+`s3://dq-artifacts/agent-life-comparisons/run_id=life-compare-20260902T122000/`.
+Fan-out retained three additional references, but those references did not
+improve the evaluated triage report. The default therefore remains single mode.

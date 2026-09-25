@@ -21,12 +21,14 @@ logger = logging.getLogger(__name__)
 
 # --- Defining Constants
 DEFAULT_LIFE_ARTIFACT_PREFIX = "agent-life"
+DEFAULT_COMPARISON_ARTIFACT_PREFIX = "agent-life-comparisons"
 DEFAULT_LIFE_REPLAY_PREFIX   = "agent-replays"
 DEFAULT_MIN_CONFIDENCE       = 0.70
 
 LIFE_SOURCE_MODES = (
     "stored_report",
     "scenario_replay",
+    "supervisor_comparison",
 )
 
 LIFE_SCENARIO_NAMES = (
@@ -45,6 +47,10 @@ SAFE_EVALUATION_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
 SAFE_ARTIFACT_PREFIX   = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./=-]{0,199}$")
 SAFE_REPORT_S3_URI     = re.compile(
     r"^s3://[A-Za-z0-9][A-Za-z0-9.-]{1,62}/[A-Za-z0-9][A-Za-z0-9._/=-]{1,1000}/report\.json$"
+)
+SAFE_SUPERVISOR_PARENT_RUN_ID = re.compile(
+    r"^(?:|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
 )
 
 LIFE_EVALUATION_TASK_IDS = (
@@ -109,6 +115,26 @@ def build_life_artifact_keys(
     return f"{base_key}/life_report.json", f"{base_key}/life_report.md"
 
 
+def build_comparison_artifact_keys(
+    comparison_run_id: str,
+    prefix: str = DEFAULT_COMPARISON_ARTIFACT_PREFIX,
+) -> tuple[str, str]:
+    """
+    Build deterministic supervisor comparison artifact keys inside the DAG bundle.
+
+    Args:
+        comparison_run_id: Stable comparison correlation identifier.
+        prefix: Path-safe comparison artifact prefix.
+
+    Returns:
+        Tuple containing JSON and Markdown object keys.
+    """
+    life_json_key, _ = build_life_artifact_keys(comparison_run_id, prefix=prefix)
+    base_key         = life_json_key.removesuffix("/life_report.json")
+
+    return f"{base_key}/comparison.json", f"{base_key}/comparison.md"
+
+
 # --- Defining Summary Functions
 def emit_life_evaluation_summary(**context: Any) -> dict[str, Any]:
     """
@@ -132,16 +158,29 @@ def emit_life_evaluation_summary(**context: Any) -> dict[str, Any]:
     evaluation_run_id = normalize_evaluation_run_id(
         str(conf.get("evaluation_run_id") or dag_run.run_id)
     )
-    artifact_prefix       = str(conf.get("artifact_prefix") or DEFAULT_LIFE_ARTIFACT_PREFIX)
-    json_key, markdown_key = build_life_artifact_keys(evaluation_run_id, prefix=artifact_prefix)
+    source_mode           = str(conf.get("source_mode", "stored_report"))
+    default_prefix        = (
+        DEFAULT_COMPARISON_ARTIFACT_PREFIX
+        if source_mode == "supervisor_comparison"
+        else DEFAULT_LIFE_ARTIFACT_PREFIX
+    )
+    artifact_prefix       = str(conf.get("artifact_prefix") or default_prefix)
+    artifact_builder      = (
+        build_comparison_artifact_keys
+        if source_mode == "supervisor_comparison"
+        else build_life_artifact_keys
+    )
+    json_key, markdown_key = artifact_builder(evaluation_run_id, prefix=artifact_prefix)
     bucket                = os.getenv("ARTIFACTS_BUCKET", "dq-artifacts")
     summary               = {
         "dag_id": dag_run.dag_id,
         "run_id": dag_run.run_id,
         "evaluation_run_id": evaluation_run_id,
         "scenario_id": str(conf.get("scenario", "")),
-        "source_mode": str(conf.get("source_mode", "stored_report")),
+        "source_mode": source_mode,
         "source_report_s3_uri": str(conf.get("report_s3_uri", "")),
+        "single_supervisor_run_id": str(conf.get("single_supervisor_run_id", "")),
+        "fanout_supervisor_run_id": str(conf.get("fanout_supervisor_run_id", "")),
         "critic_enabled": bool(conf.get("enable_critic", False)),
         "json_report_s3_uri": f"s3://{bucket}/{json_key}",
         "markdown_report_s3_uri": f"s3://{bucket}/{markdown_key}",

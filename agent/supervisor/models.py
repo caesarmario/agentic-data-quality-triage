@@ -36,6 +36,7 @@ class SupervisorIntent(str, Enum):
 
     AUTO                 = "auto"
     TRIAGE_ALERT         = "triage_alert"
+    INTERPRET_INCIDENT_EVIDENCE = "interpret_incident_evidence"
     ASSET_CONTEXT        = "asset_context"
     BLAST_RADIUS         = "blast_radius"
     TRUSTED_ASSET_SEARCH = "trusted_asset_search"
@@ -218,6 +219,16 @@ class SupervisorRequest(BaseModel):
         if self.intent == SupervisorIntent.TRIAGE_ALERT:
             if not self.alert_id and not self.alert_key:
                 raise ValueError("triage_alert requires alert_id or alert_key.")
+
+        if self.intent == SupervisorIntent.INTERPRET_INCIDENT_EVIDENCE:
+            if not self.alert_key:
+                raise ValueError("interpret_incident_evidence requires alert_key.")
+
+            if self.execution_mode != SupervisorExecutionMode.FANOUT or self.max_workers < 3:
+                raise ValueError("interpret_incident_evidence requires fanout and at least three workers.")
+
+            if self.max_model_calls < 3 or self.token_budget < 24_576 or self.estimated_cost_budget_usd < 0.048:
+                raise ValueError("Evidence workers require capacity for three calls, 24576 tokens, and USD 0.048.")
 
         if self.intent in {SupervisorIntent.ASSET_CONTEXT, SupervisorIntent.BLAST_RADIUS}:
             if not self.qualified_name:

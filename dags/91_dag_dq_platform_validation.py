@@ -42,7 +42,7 @@ This DAG does not mutate analytical data, execute remediation, or clean platform
 Manual `dag_run.conf` example:
 
 ```json
-{"validation_suite": "all", "require_api": true}
+{"validation_suite": "all", "require_api": true, "require_web": true}
 ```
 
 Allowed suites: `all`, `airflow`, `agent`, `api`, `checkpoint`, `discord`, `dq`, `life`, `llm`, `mcp`, `metadata`, `pipelines`, `schema`, and `ui`.
@@ -68,6 +68,22 @@ def validation_dag_params() -> dict[str, Param]:
             False,
             type="boolean",
             description="Require the optional FastAPI control-plane profile during readiness validation.",
+        ),
+        "require_web": Param(
+            False,
+            type="boolean",
+            description="Require the optional premium web profile and browser-proxy policy acceptance.",
+        ),
+        "require_web_report": Param(
+            False,
+            type="boolean",
+            description="Require a real stored triage report to match the selected server HTML; no LLM calls.",
+        ),
+        "web_operator_request_id": Param(
+            "",
+            type="string",
+            pattern="^$|^APR-[0-9]{8}-[A-F0-9]{8}$",
+            description="Optional exact synthetic approval ID; implies web readiness and verifies cancelled non-dispatch audit.",
         ),
     }
 
@@ -107,7 +123,10 @@ with DAG(
         task_id="t20_run_platform_readiness",
         project_command=(
             "python scripts/smoke_readiness.py "
-            "{% if dag_run.conf.get(\"require_api\", false) %}--require-api{% endif %}"
+            "{% if dag_run.conf.get(\"require_api\", false) %}--require-api {% endif %}"
+            "{% if dag_run.conf.get(\"require_web\", false) %}--require-web {% endif %}"
+            "{% if dag_run.conf.get(\"require_web_report\", false) %}--require-web-report{% endif %}"
+            "{% if params.web_operator_request_id %} --web-operator-request-id '{{ params.web_operator_request_id }}'{% endif %}"
         ),
         execution_timeout=timedelta(minutes=10),
     )

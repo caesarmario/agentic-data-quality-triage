@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -18,8 +19,23 @@ from agent.tools.audit_log import (
     AGENT_AUDIT_LOG_COLUMNS,
     build_audit_event_id,
     build_audit_idempotency_key,
+    json_dumps_safe,
     write_agent_audit_event,
 )
+
+
+# --- Testing Date Serialization
+def test_audit_serializes_business_dates_without_changing_timestamp_semantics() -> None:
+    """Backfill approval dates must reach the audit log without an HTTP 500."""
+    payload = {
+        "start_date": date(2026, 9, 22),
+        "end_date": date(2026, 9, 23),
+        "created_at": datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc),
+    }
+    assert json.loads(json_dumps_safe(payload)) == {
+        "start_date": "2026-09-22", "end_date": "2026-09-23",
+        "created_at": "2026-09-25T00:00:00+00:00",
+    }
 
 
 # --- Defining Test Doubles
@@ -104,6 +120,21 @@ class FakeAuditClient:
 
 
 # --- Defining Tests
+def test_audit_writer_persists_backfill_date_payloads() -> None:
+    """Exercise the real writer, not just a mocked approval audit callback."""
+    client = FakeAuditClient()
+    write_agent_audit_event(
+        client=client,
+        action="approval_requested",
+        status="success",
+        input_payload={"start_date": date(2026, 9, 23)},
+        output_payload={"request": {"end_date": date(2026, 9, 23)}},
+    )
+    row = next(iter(client.rows_by_id.values()))
+    assert json.loads(row["input_json"])["start_date"] == "2026-09-23"
+    assert json.loads(row["output_json"])["request"]["end_date"] == "2026-09-23"
+
+
 def test_audit_idempotency_key_and_event_id_are_stable() -> None:
     """
     Ensure stable logical values produce the same audit key and UUID.

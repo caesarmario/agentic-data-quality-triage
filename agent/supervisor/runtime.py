@@ -42,6 +42,7 @@ from agent.specialists.incident_triage import (
     IncidentTriageRuntimeConfig,
     run_incident_triage_agent,
 )
+from agent.specialists.evidence_worker import EvidenceWorkerRuntimeConfig, run_evidence_worker
 from agent.specialists.metadata_lineage import (
     MetadataLineageRuntimeConfig,
     run_metadata_lineage_agent,
@@ -55,6 +56,7 @@ from agent.specialists.sql_review import (
     run_sql_review_agent,
 )
 from agent.specialists.registry import (
+    EVIDENCE_INTERPRETATION_TASKS,
     AgentCapabilitySpec,
     INCIDENT_TRIAGE_SPECIALIST_NAME,
     METADATA_LINEAGE_SPECIALIST_NAME,
@@ -72,6 +74,7 @@ from agent.supervisor.budgets import (
     SupervisorBudgetDecision,
     SupervisorBudgetExceeded,
     SupervisorBudgetVector,
+    effective_handoff_model_budget,
     evaluate_post_handoff_budgets,
     evaluate_pre_handoff_budgets,
     require_budget_decision,
@@ -124,6 +127,8 @@ class SupervisorRuntimeConfig:
         metadata_lineage_runner: Metadata and Lineage specialist callable.
         sql_review_runner: SQL Safety and Review specialist callable.
         schema_drift_runner: Schema Drift specialist callable.
+        evidence_worker_runner: Bounded evidence interpretation callable.
+        evidence_worker_config: Evidence collector and interpreter dependencies.
         incident_config: Incident specialist runtime configuration.
         metadata_lineage_config: Metadata specialist runtime configuration.
         sql_review_config: SQL review specialist runtime configuration.
@@ -147,6 +152,8 @@ class SupervisorRuntimeConfig:
     metadata_lineage_runner: Callable[..., AgentResultEnvelope] = run_metadata_lineage_agent
     sql_review_runner: Callable[..., AgentResultEnvelope] = run_sql_review_agent
     schema_drift_runner: Callable[..., AgentResultEnvelope] = run_schema_drift_agent
+    evidence_worker_runner: Callable[..., AgentResultEnvelope] = run_evidence_worker
+    evidence_worker_config: EvidenceWorkerRuntimeConfig = field(default_factory=EvidenceWorkerRuntimeConfig)
     incident_config: IncidentTriageRuntimeConfig = field(
         default_factory=IncidentTriageRuntimeConfig
     )
@@ -1226,6 +1233,9 @@ def invoke_selected_specialist(
     Raises:
         SupervisorRoutingError: If no runtime runner exists for the specialist.
     """
+    if EVIDENCE_INTERPRETATION_TASKS.get(task.task_type) == task.specialist_name:
+        return config.evidence_worker_runner(task=task, config=config.evidence_worker_config)
+
     if task.specialist_name == INCIDENT_TRIAGE_SPECIALIST_NAME:
         return config.incident_runner(task=task, config=config.incident_config)
 
@@ -1509,11 +1519,14 @@ def run_control_plane_supervisor(
 
         # The context-local ledger is visible to every nested provider attempt,
         # including configured provider fallback and schema-compatibility retry.
-        with external_llm_permission_scope(request.allow_external_llm):
+        model_budget = effective_handoff_model_budget(task=task, state=state)
+        with external_llm_permission_scope(
+            request.allow_external_llm and model_budget.model_calls > 0
+        ):
             with supervisor_llm_budget_scope(
-                max_model_calls=task.model_call_budget,
-                token_budget=task.token_budget,
-                estimated_cost_budget_usd=task.estimated_cost_budget_usd,
+                max_model_calls=model_budget.model_calls,
+                token_budget=model_budget.tokens,
+                estimated_cost_budget_usd=model_budget.estimated_cost_usd,
                 deadline_monotonic=deadline,
             ) as llm_ledger:
                 invocation = invoke_specialist_with_resilience(

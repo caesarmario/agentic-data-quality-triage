@@ -1080,12 +1080,17 @@ def append_unique_runtime_value(values: list[str], raw_value: Any) -> None:
         values.append(normalized)
 
 
-def build_llm_runtime_summary(evidence_items: list[EvidenceItem]) -> LlmRuntimeSummary:
+def build_llm_runtime_summary(
+    evidence_items: list[EvidenceItem],
+    route_events: list[dict[str, Any]] | None = None,
+) -> LlmRuntimeSummary:
     """
     Aggregate sanitized LLM route evidence for report and audit observability.
 
     Args:
         evidence_items: Evidence retained by the current triage state.
+        route_events: Complete per-call telemetry for new reports. Legacy reports
+            without this collection continue to use their retained LLM evidence.
 
     Returns:
         LlmRuntimeSummary with bounded route, provider, token, cost, and fallback facts.
@@ -1104,30 +1109,29 @@ def build_llm_runtime_summary(evidence_items: list[EvidenceItem]) -> LlmRuntimeS
     external_model_used     = False
     heuristic_fallback_used = False
 
-    for evidence in evidence_items:
-        if evidence.tool_name != "llm_router":
+    # Use one source, not both: narrative usage also appears in legacy evidence.
+    rows = route_events or [
+        row for evidence in evidence_items if evidence.tool_name == "llm_router"
+        for row in evidence.rows
+    ]
+    for row in rows:
+        if not isinstance(row, dict):
             continue
 
-        for row in evidence.rows:
-            if not isinstance(row, dict):
-                continue
+        route_event_count += 1
+        append_unique_runtime_value(requested_routes, row.get("requested_route"))
+        append_unique_runtime_value(executed_routes, row.get("executed_route"))
+        append_unique_runtime_value(providers, row.get("provider"))
+        append_unique_runtime_value(models, row.get("model"))
+        append_unique_runtime_value(fallback_reasons, row.get("fallback_reason"))
 
-            route_event_count += 1
-
-            append_unique_runtime_value(requested_routes, row.get("requested_route"))
-            append_unique_runtime_value(executed_routes, row.get("executed_route"))
-            append_unique_runtime_value(providers, row.get("provider"))
-            append_unique_runtime_value(models, row.get("model"))
-            append_unique_runtime_value(fallback_reasons, row.get("fallback_reason"))
-
-            provider = str(row.get("provider", "") or "").strip().lower()
-
-            external_model_used     = external_model_used or provider not in {"", "heuristic"}
-            heuristic_fallback_used = heuristic_fallback_used or bool(row.get("used_heuristic"))
-            input_tokens           += max(0, int(row.get("input_tokens", 0) or 0))
-            output_tokens          += max(0, int(row.get("output_tokens", 0) or 0))
-            estimated_cost_usd     += max(0.0, float(row.get("estimated_cost_usd", 0.0) or 0.0))
-            duration_ms            += max(0, int(row.get("duration_ms", 0) or 0))
+        provider = str(row.get("provider", "") or "").strip().lower()
+        external_model_used     = external_model_used or provider not in {"", "heuristic"}
+        heuristic_fallback_used = heuristic_fallback_used or bool(row.get("used_heuristic"))
+        input_tokens           += max(0, int(row.get("input_tokens", 0) or 0))
+        output_tokens          += max(0, int(row.get("output_tokens", 0) or 0))
+        estimated_cost_usd     += max(0.0, float(row.get("estimated_cost_usd", 0.0) or 0.0))
+        duration_ms            += max(0, int(row.get("duration_ms", 0) or 0))
 
     return LlmRuntimeSummary(
         route_event_count=route_event_count,
@@ -1189,7 +1193,7 @@ def build_report_from_state(state: TriageState, llm_narrative: LlmResponse | Non
 
     recommended_actions.append("Review the stored evidence before approving any mutating remediation action.")
     investigation_errors = normalize_investigation_errors(state.errors)
-    llm_runtime          = build_llm_runtime_summary(state.evidence)
+    llm_runtime          = build_llm_runtime_summary(state.evidence, state.llm_route_events)
 
     report = TriageReport(
         agent_run_id=state.agent_run_id,
@@ -1202,6 +1206,7 @@ def build_report_from_state(state: TriageState, llm_narrative: LlmResponse | Non
         evidence_plan=state.evidence_plan,
         hypothesis_framing=state.hypothesis_framing,
         llm_runtime=llm_runtime,
+        llm_route_events=state.llm_route_events,
         complexity_assessment=complexity_assessment,
         investigation_errors=investigation_errors,
         confidence=confidence,

@@ -1952,12 +1952,14 @@ def test_summarize_approval_queue_rows_reports_decision_and_execution_counts() -
             {"status": "approved", "execution_status": "dispatched"},
             {"status": "approved", "execution_status": "failed"},
             {"status": "rejected", "execution_status": "not_started"},
+            {"status": "cancelled", "execution_status": "not_started"},
         ]
     )
 
     assert summary == {
         "pending": 1,
         "approved": 3,
+        "cancelled": 1,
         "active_executions": 2,
         "failed_executions": 1,
     }

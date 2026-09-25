@@ -1565,7 +1565,7 @@ def load_approval_queue_rows(
     Load latest durable approval states through the read-only API boundary.
 
     Args:
-        status: Optional pending, approved, or rejected approval filter.
+        status: Optional pending, approved, rejected, or cancelled approval filter.
         limit: Maximum latest-state rows returned.
         api_base_url: Control-plane API URL.
 
@@ -2012,13 +2012,14 @@ def summarize_approval_queue_rows(rows: list[dict[str, Any]]) -> dict[str, int]:
         rows: Latest approval request states.
 
     Returns:
-        Counts for pending decisions, approved requests, active executions, and failures.
+        Counts for pending, approved, cancelled, active execution, and failure states.
     """
     active_execution_states = {"dispatching", "dispatched"}
 
     return {
         "pending": sum(str(row.get("status") or "") == "pending" for row in rows),
         "approved": sum(str(row.get("status") or "") == "approved" for row in rows),
+        "cancelled": sum(str(row.get("status") or "") == "cancelled" for row in rows),
         "active_executions": sum(
             str(row.get("execution_status") or "") in active_execution_states
             for row in rows
@@ -2260,10 +2261,11 @@ def render_approval_queue_panel() -> None:
         return
 
     summary = summarize_approval_queue_rows(rows)
-    col_pending, col_approved, col_active, col_failed = st.columns(4)
+    col_pending, col_approved, col_cancelled, col_active, col_failed = st.columns(5)
 
     col_pending.metric("Pending Decisions", summary["pending"])
     col_approved.metric("Approved", summary["approved"])
+    col_cancelled.metric("Cancelled", summary["cancelled"])
     col_active.metric("Active Execution", summary["active_executions"])
     col_failed.metric("Execution Failed", summary["failed_executions"])
 

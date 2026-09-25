@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from agent.context.models import IncidentMemoryRecord, RunContextEvent, RunContextPhase
+from agent.llm.config import external_llm_runtime_allowed
 from agent.specialists.contracts import (
     AgentApprovalState,
     AgentModelRoute,
@@ -49,6 +50,8 @@ from agent.state import (
 )
 from agent.supervisor.models import SupervisorIntent, SupervisorRequest
 from agent.supervisor.budgets import (
+    SupervisorLlmBudgetExceeded,
+    active_supervisor_llm_budget,
     evaluate_post_handoff_budgets,
     evaluate_pre_handoff_budgets,
 )
@@ -921,6 +924,94 @@ def test_supervisor_blocks_declared_triage_budget_before_specialist_execution() 
         RunContextPhase.BLOCKED,
     ]
     assert context_recorder.memories == []
+
+
+@pytest.mark.parametrize("allow_external_llm", [False, True])
+def test_zero_model_budget_allows_deterministic_triage_without_provider_capacity(
+    allow_external_llm: bool,
+) -> None:
+    """Zero calls permits the deterministic child but never a provider attempt."""
+    recorder = AuditRecorder()
+    context_recorder = ContextPersistenceRecorder()
+    calls: list[str] = []
+
+    def incident_runner(task: Any, **_: Any) -> AgentResultEnvelope:
+        calls.append(task.task_type)
+        assert task.model_call_budget == 3
+        assert external_llm_runtime_allowed() is False
+        ledger = active_supervisor_llm_budget()
+        assert ledger is not None
+        assert ledger.max_model_calls == 0
+        assert ledger.token_budget == 0
+        assert ledger.estimated_cost_budget_usd == 0.0
+        with pytest.raises(
+            SupervisorLlmBudgetExceeded,
+            match="model_calls_budget_exceeded",
+        ):
+            ledger.reserve_model_call(projected_tokens=1, projected_cost_usd=0.0)
+        assert ledger.model_calls == 0
+        return successful_incident_result(task)
+
+    runtime = SupervisorRuntimeConfig(
+        incident_runner=incident_runner,
+        audit_client_factory=lambda **_: object(),
+        audit_writer=recorder,
+        context_schema_ensurer=context_recorder.ensure,
+        context_event_writer=context_recorder.write_event,
+        incident_memory_writer=context_recorder.write_memory,
+    )
+    result = run_control_plane_supervisor(
+        request=SupervisorRequest(
+            intent="triage_alert",
+            alert_key="DQ-20260808-A1B2C3",
+            allow_external_llm=allow_external_llm,
+            max_model_calls=0,
+        ),
+        external_run_id=f"manual__zero_model_triage_{allow_external_llm}",
+        config=runtime,
+    )
+
+    assert result.status == AgentTaskStatus.SUCCESS
+    assert calls == ["triage_alert"]
+    assert len(result.supervisor_state.specialist_results) == 1
+    assert result.supervisor_state.specialist_results[0].model_call_count == 0
+    assert result.audit_summary["budget"]["allowed"] is True
+    assert result.audit_summary["budget"]["usage"]["model_calls"] == 0
+    assert external_llm_runtime_allowed() is True
+    assert active_supervisor_llm_budget() is None
+
+
+@pytest.mark.parametrize(
+    ("limit_override", "violation"),
+    [
+        ({"max_model_calls": 2}, "model_calls_budget_exceeded"),
+        ({"token_budget": 1_000}, "tokens_budget_exceeded"),
+        ({"estimated_cost_budget_usd": 0.01}, "estimated_cost_usd_budget_exceeded"),
+    ],
+)
+def test_positive_insufficient_model_budgets_still_reject_handoff(
+    limit_override: dict[str, int | float],
+    violation: str,
+) -> None:
+    """The zero-call exception must not relax positive parent reservations."""
+    parent_run_id = uuid4()
+    task = build_incident_triage_task(
+        parent_run_id=parent_run_id,
+        alert_key="DQ-20260808-A1B2C3",
+    )
+    state = SupervisorState.model_validate({
+        "parent_run_id": parent_run_id,
+        "max_handoffs": 1,
+        "max_model_calls": 3,
+        "token_budget": 16_384,
+        "estimated_cost_budget_usd": 0.05,
+        "latency_budget_ms": 300_000,
+        **limit_override,
+    })
+    decision = evaluate_pre_handoff_budgets(task=task, state=state)
+
+    assert decision.allowed is False
+    assert decision.violations == (violation,)
 
 
 def test_supervisor_rejects_model_call_overrun_without_accepting_child_result() -> None:

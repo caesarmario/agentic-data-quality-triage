@@ -846,6 +846,55 @@ def test_decide_and_list_approval_requests_validate_contracts(monkeypatch) -> No
         client.validate_approval_payload(sample_approval_payload(status="executed"))
 
 
+def test_cancel_approval_request_sends_token_and_validates_cancelled_state(monkeypatch) -> None:
+    """
+    Ensure cancellation uses the protected endpoint and accepts the cancelled contract.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    captured: dict[str, Any] = {}
+    client = ControlPlaneClient(
+        "http://api:8000",
+        approval_token="local-approval-token",
+    )
+
+    def fake_request_json(method: str, path: str, **kwargs) -> dict[str, Any]:
+        """
+        Capture one cancellation API call and return the revoked state.
+
+        Args:
+            method: HTTP method.
+            path: API route.
+            **kwargs: Request options.
+
+        Returns:
+            Valid cancelled approval response.
+        """
+        captured.update({"method": method, "path": path, **kwargs})
+        return sample_approval_payload(status="cancelled")
+
+    monkeypatch.setattr(client, "request_json", fake_request_json)
+
+    cancelled = client.cancel_approval_request(
+        request_id="APR-20260610-A1B2C3D4",
+        cancelled_by="mario",
+        comment="Withdraw before dispatch.",
+    )
+
+    assert cancelled["status"] == "cancelled"
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/api/v1/approvals/requests/APR-20260610-A1B2C3D4/cancel"
+    assert captured["headers"] == {"X-Control-Plane-Token": "local-approval-token"}
+    assert captured["json_body"] == {
+        "cancelled_by": "mario",
+        "comment": "Withdraw before dispatch.",
+    }
+
+
 # --- Defining Triage Tests
 def test_run_triage_report_reconstructs_persisted_report(monkeypatch) -> None:
     """
