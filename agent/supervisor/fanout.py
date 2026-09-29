@@ -44,7 +44,11 @@ from agent.specialists.contracts import (
     SupervisorState,
 )
 from agent.specialists.registry import enforce_result_contract
-from agent.supervisor.budgets import SupervisorFanoutBudgetAllocator
+from agent.supervisor.budgets import (
+    SupervisorBudgetVector,
+    SupervisorFanoutBudgetAllocator,
+    effective_fanout_worker_budget,
+)
 from agent.supervisor.execution_plan import (
     AgentAggregationResult,
     AgentExecutionPlan,
@@ -204,7 +208,15 @@ def invoke_isolated_agent_worker(
         )
 
     validated = enforce_result_contract(task=task, result=result)
-    validate_worker_usage(worker=worker, result=validated)
+    validate_worker_usage(
+        worker=worker,
+        result=validated,
+        effective_budget=effective_fanout_worker_budget(
+            task=task,
+            allow_external_llm=request.allow_external_llm,
+            max_model_calls=request.max_model_calls,
+        ),
+    )
 
     return validated
 
@@ -212,6 +224,7 @@ def invoke_isolated_agent_worker(
 def validate_worker_usage(
     worker: PlannedAgentTask,
     result: AgentResultEnvelope,
+    effective_budget: SupervisorBudgetVector | None = None,
 ) -> None:
     """
     Reject a worker result that exceeds its immutable resource allocation.
@@ -219,6 +232,8 @@ def validate_worker_usage(
     Args:
         worker: Source planned task.
         result: Terminal specialist result.
+        effective_budget: Parent-authorized model budget. When omitted, the
+            immutable task capability budget is enforced for compatibility.
 
     Returns:
         None when actual usage remains within worker limits.
@@ -226,15 +241,20 @@ def validate_worker_usage(
     Raises:
         PermissionError: If calls, tokens, cost, or duration exceeds policy.
     """
-    task = worker.task
+    task   = worker.task
+    budget = effective_budget or SupervisorBudgetVector(
+        model_calls=task.model_call_budget,
+        tokens=task.token_budget,
+        estimated_cost_usd=task.estimated_cost_budget_usd,
+    )
 
-    if result.model_call_count > task.model_call_budget:
+    if result.model_call_count > budget.model_calls:
         raise PermissionError("Worker result exceeded its model-call budget.")
 
-    if result.token_usage > task.token_budget:
+    if result.token_usage > budget.tokens:
         raise PermissionError("Worker result exceeded its token budget.")
 
-    if result.estimated_cost_usd > task.estimated_cost_budget_usd:
+    if result.estimated_cost_usd > budget.estimated_cost_usd:
         raise PermissionError("Worker result exceeded its estimated-cost budget.")
 
     if result.duration_ms > task.timeout_seconds * 1_000:
@@ -306,7 +326,14 @@ def execute_planned_worker(
     )
 
     try:
-        allocation = allocator.reserve_worker(task)
+        allocation = allocator.reserve_worker(
+            task,
+            effective_budget=effective_fanout_worker_budget(
+                task=task,
+                allow_external_llm=request.allow_external_llm,
+                max_model_calls=request.max_model_calls,
+            ),
+        )
         write_supervisor_audit(
             config=supervisor_config,
             client=client,
@@ -369,7 +396,11 @@ def execute_planned_worker(
                 result = executor(request, worker)
 
             result = enforce_result_contract(task=task, result=result)
-            validate_worker_usage(worker=worker, result=result)
+            validate_worker_usage(
+                worker=worker,
+                result=result,
+                effective_budget=allocation,
+            )
 
         duration_ms = int((time.monotonic() - started) * 1_000)
         write_supervisor_audit(
@@ -588,7 +619,14 @@ def execute_agent_wave(
     # makes admission deterministic and also reconstructs conservative parent
     # reservations when a completed checkpoint is reused after process restart.
     for worker in wave_workers:
-        allocator.reserve_worker(worker.task)
+        allocator.reserve_worker(
+            worker.task,
+            effective_budget=effective_fanout_worker_budget(
+                task=worker.task,
+                allow_external_llm=request.allow_external_llm,
+                max_model_calls=request.max_model_calls,
+            ),
+        )
 
     def prepare_wave(_state: FanoutWaveState) -> FanoutWaveState:
         """Anchor the dynamic Send routing step for checkpoint visibility."""

@@ -85,6 +85,9 @@ def test_mcp_tool_registry_exposes_expected_tools() -> None:
         "get_dbt_blast_radius",
         "get_dq_history",
         "get_pipeline_runs",
+        "get_weekly_quality_summary",
+        "get_table_quality_summary",
+        "get_database_quality_summary",
         "run_triage",
         "get_triage_skills",
         "read_report_artifact",
@@ -122,8 +125,54 @@ def test_register_mcp_tools_uses_registry_names() -> None:
     assert callable(fake_server.tools["search_metadata_assets"])
     assert callable(fake_server.tools["get_metadata_asset"])
     assert callable(fake_server.tools["get_dbt_blast_radius"])
+    assert callable(fake_server.tools["get_weekly_quality_summary"])
+    assert callable(fake_server.tools["get_table_quality_summary"])
+    assert callable(fake_server.tools["get_database_quality_summary"])
     assert callable(fake_server.tools["get_triage_skills"])
     assert callable(fake_server.tools["read_report_artifact"])
+
+
+def test_mcp_quality_summary_tools_delegate_and_strip_internal_sql(monkeypatch) -> None:
+    """Ensure MCP summary tools reuse audited implementations without exposing SQL."""
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    def build_fake(name: str):
+        """Create one delegated summary fake with argument capture."""
+        def fake(**kwargs) -> dict[str, object]:
+            """Return a minimal internal tool payload."""
+            captured.append((name, kwargs))
+
+            return {"scope": name, "sql": "SELECT internal"}
+
+        return fake
+
+    monkeypatch.setattr(mcp_server, "fetch_weekly_quality_summary", build_fake("weekly"))
+    monkeypatch.setattr(mcp_server, "fetch_table_quality_summary", build_fake("table"))
+    monkeypatch.setattr(mcp_server, "fetch_database_quality_summary", build_fake("database"))
+
+    weekly = mcp_server.mcp_get_weekly_quality_summary("2026-06-10")
+    table = mcp_server.mcp_get_table_quality_summary(
+        "dq.fct_orders_daily",
+        "2026-06-04",
+        "2026-06-10",
+    )
+    database = mcp_server.mcp_get_database_quality_summary("2026-06-04", "2026-06-10")
+
+    assert weekly == {"scope": "weekly"}
+    assert table == {"scope": "table"}
+    assert database == {"scope": "database"}
+    assert captured == [
+        ("weekly", {"end_date": "2026-06-10"}),
+        (
+            "table",
+            {
+                "table_name": "dq.fct_orders_daily",
+                "start_date": "2026-06-04",
+                "end_date": "2026-06-10",
+            },
+        ),
+        ("database", {"start_date": "2026-06-04", "end_date": "2026-06-10"}),
+    ]
 
 
 def test_mcp_metadata_tools_delegate_to_audited_catalog(monkeypatch) -> None:

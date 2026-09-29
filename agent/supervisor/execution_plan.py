@@ -37,6 +37,7 @@ from agent.specialists.registry import (
 )
 from agent.specialists.schema_drift import build_schema_drift_task
 from agent.specialists.sql_review import build_sql_review_task
+from agent.supervisor.budgets import effective_fanout_worker_budget
 from agent.supervisor.models import (
     SupervisorExecutionMode,
     SupervisorIntent,
@@ -886,9 +887,17 @@ def validate_execution_plan(plan: AgentExecutionPlan) -> AgentExecutionPlan:
     if plan.waves != expected_waves:
         raise ValueError("Execution plan waves do not match deterministic dependency topology.")
 
-    total_model_calls = sum(worker.task.model_call_budget for worker in plan.workers)
-    total_tokens      = sum(worker.task.token_budget for worker in plan.workers)
-    total_cost        = sum(worker.task.estimated_cost_budget_usd for worker in plan.workers)
+    effective_budgets = [
+        effective_fanout_worker_budget(
+            task=worker.task,
+            allow_external_llm=plan.fanout_policy.allow_external_llm,
+            max_model_calls=plan.fanout_policy.max_model_calls,
+        )
+        for worker in plan.workers
+    ]
+    total_model_calls = sum(item.model_calls for item in effective_budgets)
+    total_tokens      = sum(item.tokens for item in effective_budgets)
+    total_cost        = sum(item.estimated_cost_usd for item in effective_budgets)
     total_retries     = sum(worker.retry_budget for worker in plan.workers)
 
     if total_model_calls > plan.fanout_policy.max_model_calls:

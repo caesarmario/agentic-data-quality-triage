@@ -51,17 +51,13 @@ COMPARISON_DECISIONS = (
     "insufficient_evidence",
 )
 
-EVALUATION_STATUS_RANK = {
-    "fail": 0,
-    "review": 1,
-    "pass": 2,
-}
-
 CHECK_STATUS_RANK = {
     "fail": 0,
     "review": 1,
     "pass": 2,
 }
+
+NON_QUALITY_PROMOTION_CHECKS = frozenset({"confidence", "llm_fallback"})
 
 
 # --- Defining Models
@@ -515,6 +511,12 @@ def decide_comparison(
             ["Both modes must retain a triage report before report quality can be compared."],
         )
 
+    if single_snapshot.terminal_status in {"blocked", "failed"}:
+        return "insufficient_evidence", False, ["Single-handoff baseline did not complete."]
+
+    if not single_score.check_statuses or set(single_score.check_statuses) != set(fanout_score.check_statuses):
+        return "insufficient_evidence", False, ["Both reports must be evaluated with the same non-empty check set."]
+
     if fanout_snapshot.terminal_status in {"blocked", "failed"}:
         return (
             "keep_single",
@@ -538,29 +540,23 @@ def decide_comparison(
             [f"Fan-out introduced non-passing checks: {', '.join(regressions)}."],
         )
 
-    single_rank = EVALUATION_STATUS_RANK[single_score.eval_status]
-    fanout_rank = EVALUATION_STATUS_RANK[fanout_score.eval_status]
+    # Confidence and provider availability are telemetry, not independent
+    # evidence that the investigation became more correct or complete.
+    improved_checks = sorted(
+        name for name, status in fanout_score.check_statuses.items()
+        if name not in NON_QUALITY_PROMOTION_CHECKS
+        and CHECK_STATUS_RANK[status] > CHECK_STATUS_RANK[single_score.check_statuses[name]]
+    )
 
-    if fanout_rank > single_rank:
-        reasons.append(
-            f"LIFE status improved from {single_score.eval_status} to {fanout_score.eval_status}."
-        )
-
-    if len(fanout_score.failed_checks) < len(single_score.failed_checks):
-        reasons.append("Fan-out reduced the number of non-passing LIFE checks.")
-
-    single_evidence_rank = CHECK_STATUS_RANK.get(single_score.expected_evidence_status, -1)
-    fanout_evidence_rank = CHECK_STATUS_RANK.get(fanout_score.expected_evidence_status, -1)
-
-    if fanout_evidence_rank > single_evidence_rank:
-        reasons.append("The triage report evidence-coverage check improved under fan-out.")
+    if improved_checks:
+        reasons.append(f"Independent report checks improved: {', '.join(improved_checks)}.")
 
     confidence_delta = fanout_score.confidence - single_score.confidence
 
     if confidence_delta >= 0.05:
-        reasons.append(f"Report confidence improved by {confidence_delta:.2f}.")
+        reasons.append(f"Report confidence increased by {confidence_delta:.2f}; this alone is not quality evidence.")
 
-    report_quality_benefit = bool(reasons)
+    report_quality_benefit = bool(improved_checks)
 
     if report_quality_benefit:
         return "fanout_candidate", True, reasons
@@ -573,6 +569,24 @@ def decide_comparison(
     reasons.append("No measurable triage-report quality improvement was proven; ties keep single mode.")
 
     return "keep_single", False, reasons
+
+
+def validate_source_report_identity(
+    snapshot: SupervisorModeSnapshot,
+    source_report: dict[str, Any],
+) -> None:
+    """Bind a loaded report to its audited alert, asset, and run-specific URI."""
+    alert = source_report.get("alert")
+    if not isinstance(alert, dict):
+        raise ValueError("Comparison source report must contain alert identity.")
+    identities = {value for value in (alert.get("alert_key"), alert.get("alert_display_id")) if isinstance(value, str) and value}
+    if snapshot.alert_key not in identities:
+        raise ValueError("Comparison source report belongs to a different alert.")
+    if snapshot.qualified_name and snapshot.qualified_name != alert.get("table_name"):
+        raise ValueError("Comparison source report belongs to a different warehouse asset.")
+    expected_run = next((part.split("=", 1)[1] for part in snapshot.report_s3_uri.split("/") if part.startswith("agent_run_id=")), "")
+    if expected_run and expected_run != source_report.get("agent_run_id"):
+        raise ValueError("Comparison source report does not match its run-specific artifact URI.")
 
 
 def validate_comparison_identity(
@@ -658,6 +672,7 @@ def build_supervisor_mode_comparison(
             continue
 
         source_report = load_json_report(report_s3_uri=snapshot.report_s3_uri)
+        validate_source_report_identity(snapshot, source_report)
         evaluation = evaluate_life_report(
             scenario=scenario,
             report=source_report,

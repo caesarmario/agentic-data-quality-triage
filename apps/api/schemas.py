@@ -217,6 +217,140 @@ class DailySummaryResponse(BaseModel):
         return self
 
 
+class QualityHealthCountResponse(BaseModel):
+    """Bounded daily or table health rollup."""
+
+    dt: date | None       = None
+    table_name: str       = Field(default="", max_length=255)
+    total_checks: int     = Field(ge=0)
+    failed_checks: int    = Field(ge=0)
+    warning_checks: int   = Field(ge=0)
+    open_alerts: int      = Field(ge=0)
+    critical_alerts: int  = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_identity_and_subtotals(self) -> "QualityHealthCountResponse":
+        """Require exactly one identity and internally consistent subtotals."""
+        if bool(self.dt) == bool(self.table_name):
+            raise ValueError("Quality health rollup requires exactly one date or table identity.")
+
+        if self.failed_checks + self.warning_checks > self.total_checks:
+            raise ValueError("Quality health rollup check subtotals exceed total_checks.")
+
+        if self.critical_alerts > self.open_alerts:
+            raise ValueError("Quality health rollup critical alerts exceed open_alerts.")
+
+        return self
+
+
+class MetadataCertificationCountResponse(BaseModel):
+    """Registered metadata asset count grouped by certification status."""
+
+    certification_status: str = Field(min_length=1, max_length=80)
+    count: int                 = Field(ge=0)
+
+
+class ManualRerunSuggestionResponse(BaseModel):
+    """Advisory-only rerun suggestion derived from observed quality signals."""
+
+    target_dag_id: str          = Field(min_length=1, max_length=255)
+    affected_tables: list[str]  = Field(default_factory=list, min_length=1, max_length=20)
+    start_date: date
+    end_date: date
+    mode: str                   = Field(default="advisory_only", max_length=40)
+    requires_approval: bool     = True
+    reason: str                 = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_advisory_boundary(self) -> "ManualRerunSuggestionResponse":
+        """Prevent summary suggestions from becoming an execution contract."""
+        if self.mode != "advisory_only" or not self.requires_approval:
+            raise ValueError("Manual rerun suggestions must remain advisory and approval-gated.")
+
+        if self.start_date > self.end_date:
+            raise ValueError("Manual rerun suggestion start_date cannot be after end_date.")
+
+        if len(self.affected_tables) != len(set(self.affected_tables)):
+            raise ValueError("Manual rerun suggestion contains duplicate tables.")
+
+        return self
+
+
+class QualitySummaryResponse(BaseModel):
+    """Public weekly, per-table, or warehouse-wide quality summary."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str                                         = "success"
+    scope: str                                          = Field(max_length=40)
+    start_date: date
+    end_date: date
+    table_name: str                                     = Field(default="", max_length=255)
+    check_counts: list[DailyCheckCountResponse]          = Field(default_factory=list, max_length=100)
+    alert_counts: list[DailyAlertCountResponse]          = Field(default_factory=list, max_length=100)
+    daily_counts: list[QualityHealthCountResponse]       = Field(default_factory=list, max_length=31)
+    table_counts: list[QualityHealthCountResponse]       = Field(default_factory=list, max_length=100)
+    metadata_counts: list[MetadataCertificationCountResponse] = Field(default_factory=list, max_length=100)
+    total_checks: int                                    = Field(ge=0)
+    total_open_alerts: int                               = Field(ge=0)
+    registered_asset_count: int                          = Field(ge=0)
+    rerun_suggestions: list[ManualRerunSuggestionResponse] = Field(default_factory=list, max_length=20)
+    duration_ms: int                                     = Field(default=0, ge=0)
+    summary: str                                         = Field(max_length=700)
+
+    @model_validator(mode="after")
+    def validate_quality_summary(self) -> "QualitySummaryResponse":
+        """Enforce identity, bounds, aggregate consistency, and advisory safety."""
+        if self.scope not in {"weekly", "table", "database"}:
+            raise ValueError("Quality summary scope is not supported.")
+
+        if self.start_date > self.end_date or (self.end_date - self.start_date).days >= 31:
+            raise ValueError("Quality summary date range is invalid or exceeds 31 days.")
+
+        if self.scope == "weekly" and (self.end_date - self.start_date).days != 6:
+            raise ValueError("Weekly quality summary must cover exactly seven days.")
+
+        if self.scope == "table" and not self.table_name:
+            raise ValueError("Table quality summary requires table_name.")
+
+        if self.scope != "table" and self.table_name:
+            raise ValueError("Only table quality summaries may expose table_name.")
+
+        if self.total_checks != sum(item.count for item in self.check_counts):
+            raise ValueError("Quality summary total_checks is inconsistent.")
+
+        if self.total_open_alerts != sum(item.count for item in self.alert_counts):
+            raise ValueError("Quality summary total_open_alerts is inconsistent.")
+
+        if self.registered_asset_count != sum(item.count for item in self.metadata_counts):
+            raise ValueError("Quality summary registered_asset_count is inconsistent.")
+
+        if sum(item.total_checks for item in self.daily_counts) != self.total_checks:
+            raise ValueError("Quality summary daily check rollups are inconsistent.")
+
+        if sum(item.open_alerts for item in self.daily_counts) != self.total_open_alerts:
+            raise ValueError("Quality summary daily alert rollups are inconsistent.")
+
+        if sum(item.total_checks for item in self.table_counts) != self.total_checks:
+            raise ValueError("Quality summary table check rollups are inconsistent.")
+
+        if sum(item.open_alerts for item in self.table_counts) != self.total_open_alerts:
+            raise ValueError("Quality summary table alert rollups are inconsistent.")
+
+        identity_groups = (
+            [item.status for item in self.check_counts],
+            [item.severity for item in self.alert_counts],
+            [item.certification_status for item in self.metadata_counts],
+            [str(item.dt) for item in self.daily_counts],
+            [item.table_name for item in self.table_counts],
+        )
+
+        if any(len(identities) != len(set(identities)) for identities in identity_groups):
+            raise ValueError("Quality summary contains duplicate aggregate identities.")
+
+        return self
+
+
 class LlmRouteResponse(BaseModel):
     """
     Sanitized LLM routing observation attached to public audit events.

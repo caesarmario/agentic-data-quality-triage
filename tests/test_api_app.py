@@ -163,6 +163,160 @@ def test_daily_summary_endpoint_rejects_inconsistent_tool_totals(monkeypatch) ->
     assert "total_checks" in response.json()["detail"]
 
 
+# --- Defining Extended Quality Summary API Tests
+def quality_summary_payload(scope: str, table_name: str = "") -> dict:
+    """Build one valid public quality-summary fixture."""
+    return {
+        "status": "success",
+        "scope": scope,
+        "start_date": "2026-06-04",
+        "end_date": "2026-06-10",
+        "table_name": table_name,
+        "check_counts": [{"status": "fail", "count": 2}, {"status": "pass", "count": 8}],
+        "alert_counts": [{"severity": "critical", "count": 1}],
+        "daily_counts": [
+            {
+                "dt": "2026-06-10",
+                "total_checks": 10,
+                "failed_checks": 2,
+                "warning_checks": 0,
+                "open_alerts": 1,
+                "critical_alerts": 1,
+            }
+        ],
+        "table_counts": [
+            {
+                "table_name": table_name or "dq.fct_orders_daily",
+                "total_checks": 10,
+                "failed_checks": 2,
+                "warning_checks": 0,
+                "open_alerts": 1,
+                "critical_alerts": 1,
+            }
+        ],
+        "metadata_counts": [{"certification_status": "certified", "count": 3}],
+        "total_checks": 10,
+        "total_open_alerts": 1,
+        "registered_asset_count": 3,
+        "rerun_suggestions": [
+            {
+                "target_dag_id": "20_dag_dq_orders_dbt_transform",
+                "affected_tables": [table_name or "dq.fct_orders_daily"],
+                "start_date": "2026-06-04",
+                "end_date": "2026-06-10",
+                "mode": "advisory_only",
+                "requires_approval": True,
+                "reason": "Review evidence before a bounded rerun.",
+            }
+        ],
+        "duration_ms": 8,
+        "summary": "Bounded quality summary.",
+        "sql": "SELECT internal_query_metadata",
+    }
+
+
+@pytest.mark.parametrize(
+    ("path", "params", "function_name", "scope", "table_name"),
+    [
+        (
+            "/api/v1/summaries/weekly",
+            {"end_date": "2026-06-10"},
+            "fetch_weekly_quality_summary",
+            "weekly",
+            "",
+        ),
+        (
+            "/api/v1/summaries/table",
+            {
+                "table_name": "dq.fct_orders_daily",
+                "start_date": "2026-06-04",
+                "end_date": "2026-06-10",
+            },
+            "fetch_table_quality_summary",
+            "table",
+            "dq.fct_orders_daily",
+        ),
+        (
+            "/api/v1/summaries/database",
+            {"start_date": "2026-06-04", "end_date": "2026-06-10"},
+            "fetch_database_quality_summary",
+            "database",
+            "",
+        ),
+    ],
+)
+def test_extended_quality_summary_endpoints_are_typed_and_hide_sql(
+    monkeypatch,
+    path: str,
+    params: dict,
+    function_name: str,
+    scope: str,
+    table_name: str,
+) -> None:
+    """Ensure every summary endpoint delegates exact inputs and filters SQL."""
+    captured: dict = {}
+
+    def fake_fetch(**kwargs) -> dict:
+        """Capture route arguments and return one valid internal tool payload."""
+        captured.update(kwargs)
+
+        return quality_summary_payload(scope=scope, table_name=table_name)
+
+    monkeypatch.setattr(api_main, function_name, fake_fetch)
+
+    response = client.get(path, params=params)
+    payload  = response.json()
+
+    assert response.status_code == 200
+    assert captured == params
+    assert payload["scope"] == scope
+    assert payload["rerun_suggestions"][0]["mode"] == "advisory_only"
+    assert payload["rerun_suggestions"][0]["requires_approval"] is True
+    assert "sql" not in payload
+
+
+def test_extended_quality_summary_endpoint_rejects_execution_like_suggestion(monkeypatch) -> None:
+    """Ensure public validation rejects a rerun suggestion that bypasses approval."""
+    invalid_payload = quality_summary_payload(scope="database")
+    invalid_payload["rerun_suggestions"][0]["mode"] = "execute"
+    invalid_payload["rerun_suggestions"][0]["requires_approval"] = False
+    monkeypatch.setattr(
+        api_main,
+        "fetch_database_quality_summary",
+        lambda **kwargs: invalid_payload,
+    )
+
+    response = client.get(
+        "/api/v1/summaries/database",
+        params={"start_date": "2026-06-04", "end_date": "2026-06-10"},
+    )
+
+    assert response.status_code == 400
+    assert "advisory" in response.json()["detail"]
+
+
+def test_extended_quality_summary_allows_same_label_across_distinct_rollup_types(monkeypatch) -> None:
+    """Ensure label uniqueness is scoped to each aggregate collection."""
+    payload = quality_summary_payload(scope="database")
+    payload["metadata_counts"] = [{"certification_status": "pass", "count": 3}]
+
+    monkeypatch.setattr(
+        api_main,
+        "fetch_database_quality_summary",
+        lambda **kwargs: payload,
+    )
+
+    response = client.get(
+        "/api/v1/summaries/database",
+        params={"start_date": "2026-06-04", "end_date": "2026-06-10"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["metadata_counts"] == [
+        {"certification_status": "pass", "count": 3}
+    ]
+
+
 class DummyAction:
     """
     Minimal approval action object used by API tests.

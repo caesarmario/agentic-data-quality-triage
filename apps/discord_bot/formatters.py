@@ -719,6 +719,120 @@ def format_daily_summary(
     return join_lines(lines)
 
 
+def format_quality_summary(
+    payload: dict[str, Any],
+    assistant_note: str = "",
+    data_transport: str = "",
+) -> str:
+    """Format weekly, table, and warehouse summaries with safe rerun advice."""
+    scope          = compact_value(payload.get("scope"), "quality").lower()
+    start_date     = compact_value(payload.get("start_date"))
+    end_date       = compact_value(payload.get("end_date"))
+    table_name     = compact_value(payload.get("table_name"), "")
+    check_counts   = {
+        str(row.get("status") or ""): int(row.get("count") or 0)
+        for row in list(payload.get("check_counts") or [])
+    }
+    alert_counts = {
+        str(row.get("severity") or ""): int(row.get("count") or 0)
+        for row in list(payload.get("alert_counts") or [])
+    }
+    table_counts = sorted(
+        list(payload.get("table_counts") or []),
+        key=lambda row: (
+            -int(row.get("critical_alerts") or 0),
+            -int(row.get("failed_checks") or 0),
+            str(row.get("table_name") or ""),
+        ),
+    )
+    suggestions = list(payload.get("rerun_suggestions") or [])
+    failed      = check_counts.get("fail", 0)
+    critical    = alert_counts.get("critical", 0)
+    health      = "Needs Attention" if failed or critical else "Review Recommended" if check_counts.get("warn", 0) else "Healthy"
+    title       = {
+        "weekly": "DQ Weekly Summary",
+        "table": "DQ Table Summary",
+        "database": "DQ Warehouse Summary",
+    }.get(scope, "DQ Quality Summary")
+    subject = f"Table `{table_name}`" if scope == "table" else f"Window `{start_date}` to `{end_date}`"
+
+    lines = [
+        f"# \U0001F4CA {title}",
+        f"## {subject}",
+        "",
+        "### Quick Read",
+        f"**{health}**",
+        f"Observed `{failed}` failed check(s) and `{critical}` critical open alert(s) in the selected scope.",
+        "",
+    ]
+
+    if assistant_note:
+        lines.extend(["### Copilot Analysis", assistant_note, ""])
+
+    lines.extend(
+        [
+            "### Check Results",
+            f"\u2705 Passed `{check_counts.get('pass', 0)}`",
+            f"\u26A0\uFE0F Warning `{check_counts.get('warn', 0)}`",
+            f"\U0001F6A8 Failed `{failed}`",
+            f"\u23ED\uFE0F Skipped `{check_counts.get('skip', 0)}`",
+            "",
+            "### Open Alerts",
+            f"\U0001F6A8 Critical `{critical}`",
+            f"\u26A0\uFE0F Warning `{alert_counts.get('warning', 0)}`",
+            f"**Registered Metadata Assets** `{int(payload.get('registered_asset_count') or 0)}`",
+            "",
+        ]
+    )
+
+    if table_counts:
+        lines.extend(["### Most Affected Tables"])
+
+        for index, row in enumerate(table_counts[:5], start=1):
+            lines.append(
+                f"{index}. `{compact_value(row.get('table_name'))}` | "
+                f"failed `{int(row.get('failed_checks') or 0)}` | "
+                f"critical `{int(row.get('critical_alerts') or 0)}`"
+            )
+
+        lines.append("")
+
+    lines.extend(["### Manual Rerun Guidance"])
+
+    if suggestions:
+        lines.append("These are advisory candidates only. Nothing has been executed, and explicit approval is still required.")
+
+        for suggestion in suggestions:
+            affected         = ", ".join(f"`{item}`" for item in list(suggestion.get("affected_tables") or []))
+            affected_display = affected or "`N/A`"
+            lines.append(
+                f"- Review `{compact_value(suggestion.get('target_dag_id'))}` for {affected_display}."
+            )
+
+    else:
+        lines.append("No allowlisted rerun is supported by this aggregate alone. Triage an alert before proposing an action.")
+
+    lines.extend(
+        [
+            "",
+            "### Next Commands",
+            f"/dq alerts dt:{end_date} status:open limit:10",
+            "/dq triage alert_key:<Alert Ref>",
+        ]
+    )
+
+    if data_transport:
+        lines.extend(
+            [
+                "",
+                "### Technical Reference",
+                f"Scope `{scope}` | Data Transport `{compact_value(data_transport)}`",
+            ]
+        )
+
+    return join_lines(lines)
+
+
 def format_operator_answer(
     question: str,
     answer: str,

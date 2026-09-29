@@ -21,6 +21,9 @@ boto3>=1.34.162
 # --- ClickHouse Dependencies
 clickhouse-connect==0.11.0
 
+# --- Transactional Control Store Dependencies
+psycopg[binary]>=3.2.1,<4.0.0
+
 # --- dbt ClickHouse Dependencies
 dbt-core==1.10.19
 dbt-clickhouse==1.10.0

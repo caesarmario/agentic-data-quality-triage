@@ -401,6 +401,7 @@ def test_control_plane_readiness_checks_health_metadata_and_evidence_routes() ->
     assert [check.name for check in checks] == [
         "http_service:control-plane-api",
         "http_service:control-plane-daily-summary",
+        "http_service:control-plane-database-summary",
         "http_service:control-plane-life-history",
         "http_service:control-plane-incident-history",
         "http_service:control-plane-metadata-asset",
@@ -410,6 +411,7 @@ def test_control_plane_readiness_checks_health_metadata_and_evidence_routes() ->
     assert requested_urls == [
         "http://api:8000/health",
         "http://api:8000/api/v1/summaries/daily?dt=2026-06-10",
+        "http://api:8000/api/v1/summaries/database?start_date=2026-06-04&end_date=2026-06-10",
         "http://api:8000/api/v1/evaluations/life?lookback_days=30&limit=1",
         "http://api:8000/api/v1/incidents/history?"
         "alert_reference=DQ-READINESS-000000&lookback_days=30&limit=1",

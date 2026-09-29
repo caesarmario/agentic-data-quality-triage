@@ -293,7 +293,11 @@ class SupervisorFanoutBudgetAllocator:
     _allocations: dict[UUID, SupervisorBudgetVector] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock, repr=False)
 
-    def reserve_worker(self, task: AgentTaskEnvelope) -> SupervisorBudgetVector:
+    def reserve_worker(
+        self,
+        task: AgentTaskEnvelope,
+        effective_budget: SupervisorBudgetVector | None = None,
+    ) -> SupervisorBudgetVector:
         """
         Atomically reserve one worker's maximum model usage before execution.
 
@@ -302,6 +306,9 @@ class SupervisorFanoutBudgetAllocator:
 
         Args:
             task: Fully authorized worker task with explicit model ceilings.
+            effective_budget: Optional parent-policy reservation. This is zero
+                when external execution is not permitted, while the immutable
+                task retains its registry-selected capability route.
 
         Returns:
             Reserved worker budget vector.
@@ -309,10 +316,14 @@ class SupervisorFanoutBudgetAllocator:
         Raises:
             SupervisorLlmBudgetExceeded: If worker capacity or parent budget is exceeded.
         """
-        requested = SupervisorBudgetVector(
-            model_calls=task.model_call_budget,
-            tokens=task.token_budget,
-            estimated_cost_usd=task.estimated_cost_budget_usd,
+        requested = (
+            effective_budget
+            if effective_budget is not None
+            else SupervisorBudgetVector(
+                model_calls=task.model_call_budget,
+                tokens=task.token_budget,
+                estimated_cost_usd=task.estimated_cost_budget_usd,
+            )
         )
 
         with self._lock:
@@ -374,6 +385,22 @@ ACTIVE_SUPERVISOR_LLM_BUDGET: ContextVar[SupervisorLlmBudgetLedger | None] = Con
     "active_supervisor_llm_budget",
     default=None,
 )
+
+
+def effective_fanout_worker_budget(
+    task: AgentTaskEnvelope,
+    allow_external_llm: bool,
+    max_model_calls: int,
+) -> SupervisorBudgetVector:
+    """Resolve the budget a fan-out parent may reserve for one immutable task."""
+    if not allow_external_llm or max_model_calls == 0:
+        return SupervisorBudgetVector()
+
+    return SupervisorBudgetVector(
+        model_calls=task.model_call_budget,
+        tokens=task.token_budget,
+        estimated_cost_usd=task.estimated_cost_budget_usd,
+    )
 
 
 @contextmanager

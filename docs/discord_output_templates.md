@@ -45,6 +45,7 @@ Use these sections when they apply:
 - Report or artifact: `📄`
 - Backfill: `🔁`
 - Daily summary: `📊`
+- Weekly, table, and warehouse summary: `📊`
 - Copilot: `🤖`
 
 
@@ -55,6 +56,9 @@ Discord exposes typed slash command options:
 ```text
 /dq alerts dt:<YYYY-MM-DD> status:open limit:10
 /dq daily_summary dt:<YYYY-MM-DD>
+/dq weekly_summary end_date:<YYYY-MM-DD>
+/dq table_summary table_name:<schema.table> start_date:<YYYY-MM-DD> end_date:<YYYY-MM-DD>
+/dq db_summary start_date:<YYYY-MM-DD> end_date:<YYYY-MM-DD>
 /dq triage alert_key:<Alert Ref or system key>
 /dq ask question:<question> alert_key:<optional Alert Ref>
 /dq backfill_preview start_date:<YYYY-MM-DD> end_date:<YYYY-MM-DD> target_dag_id:<DAG ID> reason:<reason>
@@ -218,6 +222,50 @@ Needs Attention
 
 ### ----------------------------------------
 ```
+
+
+## Weekly, Table, And Warehouse Summary Template
+
+```text
+# 📊 DQ Weekly Summary
+## Window `2026-05-04` to `2026-05-10`
+
+### Quick Read
+**Needs Attention**
+Observed `2` failed checks and `1` critical open alert in the selected scope.
+
+### Copilot Analysis
+The failures are concentrated in the curated orders mart. Check the exact alert evidence before deciding whether a rerun is appropriate.
+
+### Check Results
+✅ Passed `40`
+⚠️ Warning `2`
+🚨 Failed `2`
+⏭️ Skipped `0`
+
+### Open Alerts
+🚨 Critical `1`
+⚠️ Warning `1`
+**Registered Metadata Assets** `3`
+
+### Most Affected Tables
+1. `dq.fct_orders_daily` | failed `2` | critical `1`
+
+### Manual Rerun Guidance
+These are advisory candidates only. Nothing has been executed, and explicit approval is still required.
+- Review `20_dag_dq_orders_dbt_transform` for `dq.fct_orders_daily`.
+
+### Next Commands
+/dq alerts dt:2026-05-10 status:open limit:10
+/dq triage alert_key:<Alert Ref>
+
+### Technical Reference
+Scope `weekly` | Data Transport `api`
+
+### ----------------------------------------
+```
+
+The same anatomy is used by `/dq table_summary` and `/dq db_summary`. A rerun suggestion is not an Airflow trigger, approval decision, or claim that a repair occurred.
 
 
 ## Copilot Answer Template

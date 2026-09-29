@@ -56,6 +56,21 @@ docker exec dq_airflow_scheduler python /opt/airflow/project/scripts/trigger_air
 
 ## Manual Operator Checks
 
+After a deliberate synthetic browser approval/decision/cancellation walkthrough,
+its stored evidence can be verified without replaying any mutation. Supply the
+exact request ID; the gate requires a `web-acceptance-` requester, cancelled state,
+execution not started, no execution DagRun, and all three lifecycle audit events.
+It rejects incomplete evidence or an execution transition. It does not prove
+browser behavior by itself; retain the separate browser observations as well.
+
+```powershell
+docker exec dq_airflow_api_server python /opt/airflow/project/scripts/trigger_airflow_validation.py --suite all --require-api --require-web-report --web-operator-request-id APR-20260923-50763ABF
+```
+
+The example ID refers to this checkout's retained synthetic fixture. A fresh
+installation must use its own deliberately created and cancelled fixture, or omit
+this optional gate. Never approve an unrelated operational request for a test.
+
 1. Open Reliability Overview and distinguish the selected data date from today's date.
 2. Open Incident Center and switch between open, triaged, and resolved alerts.
 3. Select one alert. Its human Alert Ref must match the incident and report shown.
@@ -196,6 +211,22 @@ intercepted synthetic HTTP 503 displayed an error, restored the trigger button,
 removed the previous success panel, and preserved the stored report. It did not
 contact the API for a second investigation. The image passed 42 frontend tests,
 TypeScript, and the production build.
+
+### Airflow Acceptance Of The Operator Slice
+
+After checkpoint `e2f3bdb` was confirmed by the owner, DAG
+`91_dag_dq_platform_validation` ran
+`manual__operator_acceptance_20260925T112000` on September 25, 11:13:16 to
+11:13:41 Asia/Bangkok. All five tasks succeeded on attempt one. The run ID is
+an operator-assigned identifier, not its actual start time.
+
+Retained task logs show **966 tests passed**, two dependency deprecation warnings,
+and **40 readiness checks passed**. The optional approval gate matched all three
+audit actions for `APR-20260923-50763ABF`, verified cancelled/not-started state and
+an empty execution run ID. The report gate matched `RPT-286D11F6` and seven public
+text fields. The summary task and final DagRun states were inspected, as were the
+pytest and readiness logs. DAG import errors were empty. External LLM was disabled;
+this acceptance consumed no paid inference.
 
 ## Local Security Boundary
 

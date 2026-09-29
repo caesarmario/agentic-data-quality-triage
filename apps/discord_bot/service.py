@@ -16,6 +16,11 @@ from agent.llm.copilot import build_operator_answer, build_triage_copilot_note
 from agent.state import TriageReport
 from agent.tools.alerts import list_alerts, load_alert
 from agent.tools.daily_summary import fetch_daily_quality_summary
+from agent.tools.quality_summary import (
+    fetch_database_quality_summary,
+    fetch_table_quality_summary,
+    fetch_weekly_quality_summary,
+)
 from apps.common.control_plane import (
     ControlPlaneClient,
     ControlPlaneClientError,
@@ -140,6 +145,98 @@ def fetch_discord_daily_summary(
         payload["total_checks"],
         payload["total_open_alerts"],
     )
+
+    return payload, "local"
+
+
+def fetch_discord_weekly_summary(
+    end_date: str,
+    api_base_url: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Fetch one seven-day quality summary through the shared API boundary."""
+    api_client = build_control_plane_client(api_base_url=api_base_url)
+
+    if api_client:
+        try:
+            return api_client.get_weekly_summary(end_date=end_date), "api"
+
+        except ControlPlaneTransportError as exc:
+            logger.warning(
+                "Discord weekly summary API unavailable; using local tool | error_type=%s",
+                type(exc).__name__,
+            )
+
+        except ControlPlaneResponseError:
+            raise
+
+    payload = fetch_weekly_quality_summary(end_date=end_date)
+    payload.pop("sql", None)
+
+    return payload, "local"
+
+
+def fetch_discord_table_summary(
+    table_name: str,
+    start_date: str,
+    end_date: str,
+    api_base_url: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Fetch one bounded per-table quality summary through the shared API."""
+    api_client = build_control_plane_client(api_base_url=api_base_url)
+
+    if api_client:
+        try:
+            return api_client.get_table_summary(
+                table_name=table_name,
+                start_date=start_date,
+                end_date=end_date,
+            ), "api"
+
+        except ControlPlaneTransportError as exc:
+            logger.warning(
+                "Discord table summary API unavailable; using local tool | error_type=%s",
+                type(exc).__name__,
+            )
+
+        except ControlPlaneResponseError:
+            raise
+
+    payload = fetch_table_quality_summary(
+        table_name=table_name,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    payload.pop("sql", None)
+
+    return payload, "local"
+
+
+def fetch_discord_database_summary(
+    start_date: str,
+    end_date: str,
+    api_base_url: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Fetch one bounded warehouse quality summary through the shared API."""
+    api_client = build_control_plane_client(api_base_url=api_base_url)
+
+    if api_client:
+        try:
+            return api_client.get_database_summary(
+                start_date=start_date,
+                end_date=end_date,
+            ), "api"
+
+        except ControlPlaneTransportError as exc:
+            logger.warning(
+                "Discord warehouse summary API unavailable; using local tool | error_type=%s",
+                type(exc).__name__,
+            )
+
+        except ControlPlaneResponseError:
+            raise
+
+    payload = fetch_database_quality_summary(start_date=start_date, end_date=end_date)
+    payload.pop("sql", None)
 
     return payload, "local"
 

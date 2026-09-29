@@ -26,7 +26,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from agent.llm.config import external_llm_permission_scope
 from agent.specialists.contracts import SupervisorState
 from agent.specialists.registry import enforce_task_capability
-from agent.supervisor.budgets import supervisor_llm_budget_scope
+from agent.supervisor.budgets import (
+    SupervisorBudgetVector,
+    effective_fanout_worker_budget,
+    supervisor_llm_budget_scope,
+)
 from agent.supervisor.execution_plan import PlannedAgentTask
 from agent.supervisor.models import SupervisorRequest, SupervisorRoute
 from agent.supervisor.runtime import (
@@ -129,6 +133,25 @@ def write_worker_result(output_path: Path, result_json: str) -> None:
 
 
 # --- Defining Worker Runtime
+def resolve_worker_execution_policy(
+    request: SupervisorRequest,
+    worker: PlannedAgentTask,
+) -> tuple[bool, SupervisorBudgetVector]:
+    """Resolve the child permission and budget enforced before provider IO."""
+    budget = effective_fanout_worker_budget(
+        task=worker.task,
+        allow_external_llm=request.allow_external_llm,
+        max_model_calls=request.max_model_calls,
+    )
+    allow_external_llm = (
+        request.allow_external_llm
+        and budget.model_calls > 0
+        and budget.tokens > 0
+    )
+
+    return allow_external_llm, budget
+
+
 def run_worker_contract(
     request: SupervisorRequest,
     worker: PlannedAgentTask,
@@ -143,9 +166,13 @@ def run_worker_contract(
     Returns:
         Validated AgentResultEnvelope JSON.
     """
-    task    = worker.task
-    runtime = SupervisorRuntimeConfig()
-    client  = runtime.audit_client_factory(
+    task                           = worker.task
+    allow_external_llm, llm_budget = resolve_worker_execution_policy(
+        request=request,
+        worker=worker,
+    )
+    runtime                        = SupervisorRuntimeConfig()
+    client                         = runtime.audit_client_factory(
         host=runtime.clickhouse_host,
         port=runtime.clickhouse_port,
     )
@@ -159,19 +186,19 @@ def run_worker_contract(
         parent_run_id=task.parent_run_id,
         max_handoffs=1,
         max_retries=worker.retry_budget,
-        max_model_calls=task.model_call_budget,
-        token_budget=task.token_budget,
-        estimated_cost_budget_usd=task.estimated_cost_budget_usd,
+        max_model_calls=llm_budget.model_calls,
+        token_budget=llm_budget.tokens,
+        estimated_cost_budget_usd=llm_budget.estimated_cost_usd,
         latency_budget_ms=max(1_000, task.timeout_seconds * 1_000),
     )
     deadline = time.monotonic() + task.timeout_seconds
 
     try:
-        with external_llm_permission_scope(request.allow_external_llm):
+        with external_llm_permission_scope(allow_external_llm):
             with supervisor_llm_budget_scope(
-                max_model_calls=task.model_call_budget,
-                token_budget=task.token_budget,
-                estimated_cost_budget_usd=task.estimated_cost_budget_usd,
+                max_model_calls=llm_budget.model_calls,
+                token_budget=llm_budget.tokens,
+                estimated_cost_budget_usd=llm_budget.estimated_cost_usd,
                 deadline_monotonic=deadline,
             ) as ledger:
                 invocation = invoke_specialist_with_resilience(

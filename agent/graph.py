@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -677,6 +678,46 @@ def build_hypotheses_for_state(state: TriageState) -> list[Hypothesis]:
     return sorted(hypotheses, key=lambda item: item.confidence, reverse=True)
 
 
+# --- Validating Partition Regeneration Evidence
+def has_corroborated_raw_partition_loss(state: TriageState) -> bool:
+    """Require a date-bound whole-partition SQL count, not narrative or mart gaps."""
+    if not state.alert or not state.alert.dt:
+        return False
+
+    # Only this guarded whole-partition count can prove that raw ingestion is absent.
+    count_query = re.compile(
+        r"SELECT\s+count\(\s*\*?\s*\)(?:\s+AS\s+row_count)?\s+"
+        r"FROM\s+dq\.raw_orders\s+WHERE\s+dt\s*=\s*"
+        + "(?:"
+        + re.escape(format_date_literal(state.alert.dt))
+        + "|'"
+        + re.escape(state.alert.dt.isoformat())
+        + "')"
+        + r"\s+LIMIT\s+1\s*;?",
+        re.IGNORECASE,
+    )
+    counts = []
+
+    for evidence in state.evidence:
+        if (
+            evidence.tool_name != "clickhouse_sql"
+            or evidence.evidence_type != EvidenceType.SQL_RESULT
+            or not count_query.fullmatch(evidence.query.strip())
+            or len(evidence.rows) != 1
+        ):
+            continue
+
+        count = evidence.rows[0].get("row_count")
+
+        if isinstance(count, bool) or not isinstance(count, (int, float)) or count < 0:
+            return False
+
+        counts.append(count)
+
+    return bool(counts) and all(count == 0 for count in counts)
+
+
+# --- Building Approval-Gated Actions
 def build_approval_actions(state: TriageState, top_hypothesis: Hypothesis | None) -> list[ApprovalGatedAction]:
     """
     Build approval-gated remediation actions for the final report.
@@ -691,13 +732,33 @@ def build_approval_actions(state: TriageState, top_hypothesis: Hypothesis | None
     if not state.alert or not state.alert.dt or not top_hypothesis:
         return []
 
-    if top_hypothesis.root_cause_category not in {"missing_partition", "freshness_gap", "late_arriving"}:
+    approval_backfill_categories = {
+        "missing_partition",
+        "freshness_gap",
+        "late_arriving",
+        "missing_segment",
+    }
+
+    if top_hypothesis.root_cause_category not in approval_backfill_categories:
         return []
+
+    if (
+        top_hypothesis.root_cause_category == "missing_segment"
+        and not has_corroborated_raw_partition_loss(state)
+    ):
+        return []
+
+    reason = (
+        "Backfill is recommended because guarded SQL evidence confirms that the raw "
+        "partition for the affected date is empty."
+        if top_hypothesis.root_cause_category == "missing_segment"
+        else "Backfill is recommended because the evidence points to an incomplete or missing date partition."
+    )
 
     return [
         ApprovalGatedAction(
             action_type=ApprovalActionType.BACKFILL,
-            reason="Backfill is recommended because the evidence points to an incomplete or missing date partition.",
+            reason=reason,
             target_dag_id="90_dag_dq_platform_backfill_dispatcher",
             start_date=state.alert.dt,
             end_date=state.alert.dt,

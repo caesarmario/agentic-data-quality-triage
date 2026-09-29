@@ -21,11 +21,18 @@ The core data reliability platform is already established.
 - Gemini prepaid provider acceptance is complete. Routine development remains deterministic, while external model use stays manual, budgeted, and disabled by default.
 - The optional Next.js UI is now implemented. Remaining work includes comparative multi-agent quality evaluation, browser approval/triage interaction acceptance, clean-install validation, and publication review. On September 24, three Gemini evidence workers passed strict Airflow acceptance for an estimated USD 0.0052441; this is integration evidence, not proof of diagnostic superiority.
 
-## OpenAI Billing Decision
+## Optional OpenAI Billing Reference
 
 ChatGPT subscriptions and OpenAI API usage are billed separately. A ChatGPT Plus or Pro subscription does not provide API credits.
 
-Use OpenAI prepaid API billing for the controlled portfolio demo.
+OpenAI remains a supported optional provider route, but the project no longer
+requires a separate paid OpenAI acceptance run. Gemini already provides the
+accepted external-provider, structured-routing, usage-accounting, and audit
+evidence needed for the portfolio demo. Do not purchase or consume OpenAI
+credit only to duplicate that proof.
+
+If an operator deliberately chooses to evaluate OpenAI later, use the following
+cost controls:
 
 1. Create a dedicated OpenAI API project for this repository.
 2. Add a payment method through the API billing settings.
@@ -104,15 +111,13 @@ Official references:
 - https://ai.google.dev/gemini-api/docs/billing
 - https://ai.google.dev/gemini-api/docs/pricing
 
-### Deliberate Portfolio Acceptance Demo
+### Optional OpenAI Route
 
-Use OpenAI GPT-5.6 Luna with prepaid credit and strict Airflow budgets.
-
-This route provides a recognizable provider for portfolio evidence while remaining suitable for cost-sensitive workloads. It supports function calling and structured output.
-
-Official reference:
-
-- https://developers.openai.com/api/docs/models/gpt-5.6-luna
+Keep OpenAI route support available through the same provider-agnostic client,
+but do not make an OpenAI paid run a release or portfolio prerequisite. A future
+OpenAI evaluation must first refresh the exact model ID, supported request
+features, and current official pricing, then use the same strict Airflow budget
+and no-fallback acceptance policy as any other paid provider.
 
 ### xAI/Grok
 
@@ -122,23 +127,19 @@ Official reference:
 
 - https://docs.x.ai/developers/models
 
-## Illustrative Request Cost
+## Cost Estimates
 
-For an illustrative request containing 10,000 input tokens and 2,000 output tokens:
-
-| Provider Route | Approximate Cost Per Request |
-| --- | ---: |
-| Gemini 3.5 Flash-Lite | USD 0.0080 |
-| OpenAI GPT-5.6 Luna | USD 0.0044 |
-| xAI Grok 4.6 | USD 0.0320 |
-
-These calculations are estimates based on published token prices at the time of this decision. Actual costs vary with prompt size, output length, reasoning tokens, caching, tools, provider pricing changes, and retries.
+Do not preserve a cross-provider price comparison as a permanent architecture
+fact. Model names, token accounting, free tiers, and prices change. Refresh the
+selected provider's official model and pricing documentation immediately before
+each paid acceptance run, then record the dated assumptions in that run's
+acceptance evidence. Provider billing dashboards remain authoritative.
 
 ## Final Working Direction
 
 - Use heuristic mode for routine development, Airflow DAG 91 validation, and regression testing.
 - Use Gemini 3.5 Flash-Lite only for explicit prepaid integration, full-triage, or bounded multi-agent acceptance through Airflow.
-- Use OpenAI GPT-5.6 Luna for deliberate portfolio/demo acceptance after purchasing USD 5 prepaid credit.
+- Keep OpenAI available as an optional route, but do not spend OpenAI credit only to duplicate the accepted Gemini provider evidence.
 - Keep Grok disabled unless a later evaluated use case justifies its higher cost.
 - Keep `EXTERNAL_LLM_ENABLED=false` before and after every explicit provider acceptance run.
 - Require every external model call to reserve model-call, token, estimated-cost, and latency budget before provider execution.
@@ -195,8 +196,9 @@ and the provider dashboard remain external operational dependencies.
 
 ## Gemini Revalidation On 2026-09-07
 
-The latest provider acceptance is unsuccessful. Historical successful runs above
-remain valid historical evidence, but do not establish current provider access.
+Two bounded attempts failed before the replacement-key acceptance documented
+below succeeded. Retain the failed runs as evidence that strict acceptance stops
+on provider errors without hidden retry or heuristic fallback.
 
 | Run ID | External attempt | Result |
 | --- | ---: | --- |

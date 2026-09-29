@@ -147,6 +147,40 @@ def test_daily_summary_copilot_uses_failure_context_when_llm_fails(monkeypatch) 
     assert "critical" in text
 
 
+def test_quality_summary_copilot_keeps_rerun_advisory_when_llm_fails(monkeypatch) -> None:
+    """Validate that extended summary fallback never presents rerun advice as execution."""
+    monkeypatch.setattr(
+        copilot,
+        "run_llm_task",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("provider unavailable")),
+    )
+
+    text = copilot.build_quality_summary_copilot_note(
+        {
+            "scope": "table",
+            "start_date": "2026-06-04",
+            "end_date": "2026-06-10",
+            "table_name": "dq.fct_orders_daily",
+            "check_counts": [{"status": "fail", "count": 2}],
+            "alert_counts": [{"severity": "critical", "count": 1}],
+            "table_counts": [],
+            "registered_asset_count": 1,
+            "rerun_suggestions": [
+                {
+                    "target_dag_id": "20_dag_dq_orders_dbt_transform",
+                    "mode": "advisory_only",
+                    "requires_approval": True,
+                }
+            ],
+        }
+    )
+
+    assert "dq.fct_orders_daily" in text
+    assert "needs attention" in text
+    assert "advisory only" in text
+    assert "require" in text
+
+
 def test_triage_copilot_fallback_explains_confidence_and_approval(monkeypatch) -> None:
     """
     Validate that no-LLM triage output remains readable, evidence-aware, and approval-bounded.

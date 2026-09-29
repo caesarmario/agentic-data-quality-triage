@@ -60,7 +60,7 @@ This project connects those problems to an operator workflow:
 3. Run profiling and deterministic quality checks; retain results and generate deduplicated alert identities.
 4. Investigate an alert using DQ history, pipeline runs, metadata, lineage, and guarded SQL evidence.
 5. Produce a readable report with hypotheses, evidence references, limitations, and a recommended action.
-6. Let a human review a bounded backfill request. Approval and execution are separate events.
+6. Let a human review a bounded backfill or exact-scope operational action. Approval and execution are separate events.
 7. Inspect the new pipeline and quality results before claiming the issue is resolved.
 
 The intended audience is data warehouse, analytics engineering, and data platform teams. The engineering focus is not just an AI answer: it is a repeatable path from a quality signal to an auditable decision.
@@ -74,13 +74,13 @@ The intended audience is data warehouse, analytics engineering, and data platfor
 | Agent triage | Evidence collection, hypothesis ranking, readable Markdown/JSON reports, audit trail | Evidence is authoritative; model prose is an interpretation |
 | Metadata and lineage | Registry sync, asset discovery, dbt dependencies, bounded blast-radius lookup | Coverage depends on registry entries and uploaded dbt artifacts |
 | Schema drift | Snapshots, comparison, severity, contract evidence | Detection is not permission to migrate a schema |
-| Approvals | Durable requests, approve/reject/cancel, approved backfill dispatcher | An approved request is not an executed repair; cancellation does not stop a dispatched DAG |
+| Approvals | Legacy ClickHouse backfill requests plus transactional PostgreSQL requests for exact-scope dbt reruns, tickets, and notifications | An approved request is not an executed repair; cancellation does not stop a dispatched DAG |
 | Interfaces | Streamlit, FastAPI, Discord, MCP, optional Next.js UI | Local operator surfaces, not enterprise SSO/RBAC |
 | LLM integration | Provider-agnostic routes, no-key fallback, explicit provider smoke | A heuristic success does not prove a provider worked |
 | Multi-agent | Typed specialist contracts, single handoff, opt-in bounded fan-out | No unrestricted recursive agents; paid parallel-worker acceptance remains separate |
 | Evaluation | Scenario ground truth, LIFE-inspired evaluations and resilience checks | Improvement proposals require human review; no autonomous code or policy rewriting |
 
-Historical acceptance records are linked under [Testing and acceptance](#testing-and-acceptance). They describe specific runs, not a guarantee that a different laptop, provider account, or fresh clone has already been tested. Browser layout, keyboard interaction, and hydration are not proven by HTTP smoke checks.
+Historical acceptance records are linked under [Testing and acceptance](#testing-and-acceptance). They describe specific runs, not a guarantee that every laptop, provider account, or operating system will behave identically. A repository-only fresh clone was accepted on Windows with Docker Desktop on September 29, 2026; browser layout, keyboard interaction, and hydration still require real browser checks rather than HTTP smoke checks alone.
 
 <!-- --- Explaining Architecture -->
 ## Architecture
@@ -142,7 +142,7 @@ The diagram shows available specialists, not four agents automatically running f
 ### Why these choices
 
 - **Airflow** owns scheduling, dependencies, task retries, and retained operational logs. Agent reasoning does not replace orchestration.
-- **ClickHouse** stores analytical orders, quality signals, and investigation evidence. PostgreSQL in this stack serves Airflow metadata, not the business warehouse.
+- **ClickHouse** stores analytical orders, quality signals, investigation evidence, and the legacy versioned backfill approval queue. PostgreSQL is not the business warehouse: it hosts Airflow metadata plus the isolated transactional `dq_control` schema used by exact-scope approved actions.
 - **SeaweedFS** provides a local S3-compatible landing and artifact store, including a filer UI for inspection. The application uses S3 APIs rather than requiring AWS or another specific object-storage product.
 - **dbt** makes transformation logic, tests, and dependency artifacts inspectable.
 - **LangGraph** coordinates workflow state and bounded investigations. Gemini, OpenAI, Groq, and xAI are provider backends, not replacements for that workflow layer.
@@ -155,7 +155,7 @@ The diagram shows available specialists, not four agents automatically running f
 | Component | Repository configuration | Responsibility |
 | --- | --- | --- |
 | Apache Airflow | 3.1.7, CeleryExecutor | Daily orchestration and manual acceptance DAGs |
-| PostgreSQL / Redis | 16-alpine / 7.2-alpine | Airflow metadata, result backend, task broker |
+| PostgreSQL / Redis | 16-alpine / 7.2-alpine | Airflow metadata, isolated `dq_control` approval state, result backend, task broker |
 | ClickHouse | 25.3-alpine | Warehouse and observability tables |
 | CH-UI | v2.5.1 default image | Local warehouse inspection |
 | SeaweedFS | 4.13 | S3 gateway, filer, volume and master services |
@@ -465,6 +465,7 @@ A complete demo can show the original alert, a report grounded in evidence, a pr
 | `30_dag_dq_orders_quality_alerts` | Profile, check, alert | Triggered/manual |
 | `40_dag_dq_orders_triage_agent` | Triage and supported checkpoint actions | Triggered/manual |
 | `90_dag_dq_platform_backfill_dispatcher` | Preview or dispatch approved daily backfills | Manual |
+| `90_02_dag_dq_platform_approved_actions` | Preview or execute one transactional exact-scope approved action | Manual |
 | `91_dag_dq_platform_validation` | Named pytest suite and readiness | Manual |
 | `92_dag_dq_llm_provider_smoke` | Bounded external provider acceptance | Manual |
 | `93_dag_dq_agent_checkpoint_smoke` | Checkpoint/resume validation | Manual |
@@ -508,6 +509,61 @@ For actual execution, create and approve the matching durable request, supply it
 
 Cancellation is only allowed before dispatch is claimed. It does not cancel already-running Airflow work. See [approval cancellation semantics](docs/approval_cancellation_semantics.md).
 
+### Transactional approved dbt rerun
+
+The backfill flow above is the legacy path: its append-versioned request lifecycle is stored in ClickHouse and DAG `90` validates the matching approved range before dispatch. The newer exact-scope action path uses `dq_control.approval_requests` in PostgreSQL. Each transition uses a request version as a compare-and-swap guard, while DAG `90_02_dag_dq_platform_approved_actions` is the only Airflow execution boundary for this path.
+
+The following walkthrough reruns dbt for exactly one business date. It cannot request a full refresh or select another target DAG.
+
+1. Create or reuse the immutable request scope:
+
+```text
+docker exec dq_airflow_api_server python /opt/airflow/project/scripts/manage_approved_action.py create --action rerun_dbt --scope-json '{"dt":"2026-09-02","run_tests":true,"full_refresh":false}' --requested-by local-demo-operator --reason "Rebuild the reviewed synthetic incident partition"
+```
+
+The JSON response contains `request_id`, `request_generation`, `status`, and `version`. The default generation is `1`, and the same canonical scope plus generation always reuses its existing idempotent record. If the same scope must be requested again after a terminal attempt, increment the generation explicitly, for example `--generation 2`; do not change the scope merely to bypass idempotency.
+
+2. Read the record before deciding:
+
+```text
+docker exec dq_airflow_api_server python /opt/airflow/project/scripts/manage_approved_action.py get --request-id APR-YOUR_REQUEST_ID
+```
+
+3. Approve the exact version returned by create/get:
+
+```text
+docker exec dq_airflow_api_server python /opt/airflow/project/scripts/manage_approved_action.py decide --request-id APR-YOUR_REQUEST_ID --decision approve --decided-by local-demo-approver --expected-version YOUR_CURRENT_VERSION --comment "Reviewed one-date dbt rerun"
+```
+
+If another actor already changed the record, the version check rejects this stale decision. Read the request again rather than guessing a newer version.
+
+The requester label cannot approve the same request, including a case-only spelling change. Use a distinct reviewer label. This is a local separation-of-duties guard, not authenticated identity or enterprise RBAC; anyone with direct database or host access remains inside the local trust boundary.
+
+4. Trigger the default non-mutating preview:
+
+```text
+docker exec dq_airflow_api_server python /opt/airflow/project/scripts/trigger_airflow_approved_action.py --request-id APR-YOUR_REQUEST_ID
+```
+
+This creates a DAG `90_02` run with `dry_run=true`. It reports provider readiness and writes a sanitized ClickHouse audit event that distinguishes the Airflow execution principal from the requester and approver, but it does not claim the request or trigger dbt.
+
+5. Only after inspecting the preview and approval state, execute explicitly:
+
+```text
+docker exec dq_airflow_api_server python /opt/airflow/project/scripts/trigger_airflow_approved_action.py --request-id APR-YOUR_REQUEST_ID --execute
+```
+
+DAG `90_02` atomically claims the approved PostgreSQL record, then triggers the fixed child DAG `20_dag_dq_orders_dbt_transform` with `run_mode=approved_rerun`, the approved `dt`, and tests enabled by the persisted scope. Inspect both DagRuns instead of treating the parent dispatch as proof that dbt finished:
+
+```text
+docker exec dq_airflow_api_server airflow dags list-runs -o table 90_02_dag_dq_platform_approved_actions
+docker exec dq_airflow_api_server airflow dags list-runs -o table 20_dag_dq_orders_dbt_transform
+```
+
+The current checkout retains a successful example for request `APR-CE62C33DDCB9F8238054`: parent run `manual__approved_action_execute_apr-ce62c33ddcb9f8238054_20260928T124335713164` and child run `approved_rerun_dbt__apr-ce62c33ddcb9f8238054` both finished successfully. That evidence proves one bounded local dbt dispatch; it does not authorize replaying the request or generalize to external side effects.
+
+`create_ticket` and `post_notification` use the same transactional lifecycle but are intentionally disabled by default. Their caller-provided scope contains bounded content only; the GitHub repository, token, and Discord webhook come from operator-owned environment settings, not from the request. Ticket delivery requires `APPROVED_ACTION_GITHUB_ENABLED=true`, `APPROVED_ACTION_GITHUB_REPOSITORY`, and `APPROVED_ACTION_GITHUB_TOKEN`. Notification delivery requires `APPROVED_ACTION_NOTIFICATION_ENABLED=true` and `APPROVED_ACTION_DISCORD_WEBHOOK_URL`. HTTP calls have a bounded timeout and no automatic retry; ambiguous delivery is persisted and audited as `unknown`, not mislabeled as a safe failure, so an operator must reconcile the target before any new generation is considered. No external GitHub issue or Discord notification was sent for the acceptance described here.
+
 ### Incident scenarios
 
 | Scenario | Purpose |
@@ -541,13 +597,15 @@ All table names below use the default `dq` database. This is a synthetic orders 
 | `alerts` | Versioned alert state keyed by a deterministic system alert key |
 | `pipeline_runs` | Pipeline execution metadata, timing, status, and partition |
 | `agent_audit_log` | Tool/model/decision event correlated to an agent run |
-| `approval_requests` | Versioned approval and execution lifecycle |
+| `approval_requests` | Legacy ClickHouse `dq.approval_requests` backfill lifecycle; inspect with `FINAL` |
 | `metadata_assets` | Registry-backed asset context and ownership |
 | `schema_snapshots` / `schema_drift_results` | Captured schema and comparison evidence |
 | `agent_run_context_events` | Bounded run-context lifecycle events |
 | `incident_memory` | Durable investigation summaries and evidence references |
 
 DDL is in [infra/init/clickhouse](infra/init/clickhouse). ReplacingMergeTree tables can contain physical versions before merges; use `FINAL` or the existing latest-state tool when inspecting logical state. Do not assume every observability table has one row per date.
+
+PostgreSQL separately contains `dq_control.approval_requests`, the transactional compare-and-swap store for `rerun_dbt`, `create_ticket`, and `post_notification`. It lives in an isolated schema inside the local Airflow PostgreSQL database and is not part of the ClickHouse warehouse catalog. Its explicit migration is [infra/init/postgres/01_approval_control_store.sql](infra/init/postgres/01_approval_control_store.sql), applied by the one-shot `approval-control-init` service.
 
 Read-only pipeline inspection:
 
@@ -639,6 +697,9 @@ Open `/docs` on the API port for request/response schemas. Selected interfaces i
 | `GET /health` | API health |
 | `GET /api/v1/alerts` | Filtered alerts |
 | `GET /api/v1/summaries/daily` | Daily DQ summary |
+| `GET /api/v1/summaries/weekly` | Seven-day DQ summary ending on one date |
+| `GET /api/v1/summaries/table` | Bounded health summary for one qualified table |
+| `GET /api/v1/summaries/database` | Bounded warehouse-wide health summary |
 | `GET /api/v1/audit/logs` | Bounded audit lookup |
 | `GET /api/v1/reports/read` | Guarded artifact reading |
 | `GET /api/v1/lineage/dbt` | dbt lineage evidence |
@@ -673,13 +734,16 @@ Commands are guild-scoped for local development. Both the existing top-level com
 | --- | --- |
 | `/dq alerts` | Find current alerts by supported filters |
 | `/dq daily_summary` | Review one business date |
+| `/dq weekly_summary` | Review a seven-day window ending on one date |
+| `/dq table_summary` | Review one qualified table over a bounded date range |
+| `/dq db_summary` | Review warehouse-wide quality over a bounded date range |
 | `/dq triage` | Investigate an actual Alert Ref |
 | `/dq ask` | Ask a bounded, evidence-aware question |
 | `/dq backfill_preview` | Create a durable request without dispatching Airflow |
 | `/dq approve` | Approve a pending request, without executing it |
 | `/dq reject` | Reject a pending request |
 
-Try a question such as “What likely caused this alert, and what should I check next?” with an actual alert selected. The response should prioritize the issue, date, Alert Ref, evidence, and next action. Technical keys belong in a reference section. Formatting examples are in [Discord output templates](docs/discord_output_templates.md).
+Try a question such as “What likely caused this alert, and what should I check next?” with an actual alert selected. The response should prioritize the issue, date, Alert Ref, evidence, and next action. Weekly, table, and warehouse summaries may include allowlisted manual-rerun suggestions, but those suggestions are advisory only and still require separate triage and approval. Technical keys belong in a reference section. Formatting examples are in [Discord output templates](docs/discord_output_templates.md).
 
 For scheduled alert delivery, `DISCORD_ALERT_WEBHOOK_URL` enables a separate one-way notification path after alert generation. It is not the interactive bot token. Keep it blank when running a local test that should not send messages to a real channel.
 
@@ -703,6 +767,8 @@ The routing source is [configs/agent/model_routing.yml](configs/agent/model_rout
 | Heuristic | No provider key | Deterministic/no-key fallback |
 
 The current Gemini example model is `gemini-3.5-flash-lite`. Model availability, prices, and account quotas change; treat this as a checked-in configuration value, not a perpetual availability promise. Review official provider documentation before enabling billing. Qwen and Telegram are not part of this production configuration. OpenClaw is not the orchestration runtime.
+
+Provider discovery, local-model claims, multi-agent debate, and optional external MCP-client boundaries are recorded in [`docs/decisions/provider-and-agent-runtime-boundaries.md`](docs/decisions/provider-and-agent-runtime-boundaries.md). Third-party provider lists are discovery aids only; runtime configuration must use official provider endpoints and verified model information.
 
 ### One bounded Gemini smoke through Airflow
 
@@ -832,7 +898,7 @@ For clients that accept a command/arguments configuration, use a command equival
 
 Client configuration file locations vary. The container must already be running. Do not allocate a TTY for the protocol stream and do not put provider keys into the MCP client configuration.
 
-Tools cover alert lookup, bounded SQL, metadata search, lineage/blast radius, DQ history, pipeline runs, triage, skills, and report reading. Some calls are read-only; triage can write reports/audit events and incur provider usage when enabled. Review the tool list rather than treating every MCP tool as side-effect-free. Example question: “Show the evidence and downstream impact for this Alert Ref; do not execute remediation.”
+Tools cover alert lookup, bounded SQL, daily/weekly/table/warehouse quality summaries, metadata search, lineage/blast radius, DQ history, pipeline runs, triage, skills, and report reading. Summary tools remain read-only and expose rerun guidance as advisory output only. Triage can write reports/audit events and incur provider usage when enabled. Review the tool list rather than treating every MCP tool as side-effect-free. Example question: “Show the evidence and downstream impact for this Alert Ref; do not execute remediation.”
 
 <!-- --- Documenting Acceptance and Safety -->
 ## Testing and acceptance
@@ -889,11 +955,11 @@ make airflow-validation-logs VALIDATION_RUN_ID=YOUR_RUN_ID
 
 ### What existing evidence proves
 
-The repository retains specific acceptance records for [single-agent Gemini triage](docs/gemini_triage_acceptance.md), [three-worker fan-out](docs/gemini_fanout_acceptance.md), and [web operator checks](docs/web_operator_testing.md). These distinguish successful deterministic runs, real provider responses, failed transport attempts, and browser checks still pending.
+The repository retains specific acceptance records for [single-agent Gemini triage](docs/gemini_triage_acceptance.md), [three-worker fan-out](docs/gemini_fanout_acceptance.md), [web operator checks](docs/web_operator_testing.md), and [README/fresh-clone verification](docs/readme_acceptance.md). These distinguish successful deterministic runs, real provider responses, failed transport attempts, browser checks, and isolated installation evidence.
 
 They are historical snapshots. They do not imply that the current provider account is healthy, every optional integration is enabled, or every machine can reproduce a fresh installation without environment work. Test counts change as the suite grows; there is intentionally no unverified coverage/build badge here.
 
-The [README documentation verification record](docs/readme_acceptance.md) tracks this guide's source checks separately from pending Airflow, fresh-install, and rendering acceptance.
+The [README documentation verification record](docs/readme_acceptance.md) tracks source checks, Airflow acceptance, local browser rendering, and the isolated fresh-clone test separately so one form of evidence is not substituted for another.
 
 ## Security and operational boundaries
 
@@ -904,8 +970,8 @@ The [README documentation verification record](docs/readme_acceptance.md) tracks
 - Guarded SQL restricts statement behavior, table access, date scope, and row limits. Model-written SQL is a proposal, not execution authority.
 - Tool allowlists and budgets are enforced by application policy, not by asking a model to behave.
 - Reports show confidence and missing evidence; confidence is not a guarantee of correctness.
-- Approval lifecycle and execution lifecycle are separate. A model recommendation cannot approve itself, and cancellation is not a rollback.
-- Approval state is append-versioned in ClickHouse. Concurrent production approval/dispatch coordination needs a transactional control store; this POC does not claim transactional compare-and-swap across API and dispatcher.
+- Approval lifecycle and execution lifecycle are separate. A model recommendation cannot approve itself, the requester label cannot approve the same exact-scope request, and cancellation is not a rollback.
+- Legacy backfill approvals remain append-versioned in ClickHouse. The exact-scope dbt/ticket/notification path uses PostgreSQL row updates with request-version compare-and-swap, explicit request generations for intentional repeats, and an atomic dispatch claim. This local control store improves concurrency safety, but caller-supplied operator labels are not enterprise identity, authorization, distributed transaction, or rollback infrastructure.
 - Pausing a DAG prevents future scheduling; it does not necessarily cancel work already running. Inspect active runs before shutting down.
 - Local defaults do not provide full SSO, tenant isolation, enterprise RBAC, TLS termination, secrets management, HA, or disaster recovery.
 
@@ -961,13 +1027,19 @@ Start the core stack again with `up -d` from local setup. Start only the optiona
 | Auditability | How the diagnosis and decisions can be traced | Airflow task logs and audit events |
 | Optional real AI | A strict provider response with limits | Provider/model, usage, fallback state and cost estimate |
 
-Capture real screenshots after running the demo: Airflow graph, CH-UI date-scoped query, incident list, report, S3 artifacts, and optional Discord/web UI. Do not substitute mock screenshots for operational evidence. Real screenshot capture and browser interaction review remain separate acceptance work.
+The checked-in demo set covers the Airflow graph, CH-UI, Streamlit alerts, persisted triage UI, S3 artifact inventory, Discord formatter output, MCP tool inventory, and the Next.js operator UI. Captions identify rendered inventories or formatter output that are not native client screenshots. Regenerate them only from a ready local stack; do not substitute mock images for operational evidence.
 
 ### Local demo screenshots
 
-These are real localhost captures from September 24, 2026, using synthetic data.
-The stored triage report is from the no-LLM walkthrough, not a paid model response.
-No live customer records or provider credentials are shown.
+These are real localhost captures from September 24 and September 28, 2026, using synthetic data. The stored triage report is from the no-LLM walkthrough, not a paid model response. No live customer records or provider credentials are shown.
+
+To regenerate the current operator evidence after the local stack is ready, install Playwright in the ignored acceptance directory and run the local-only capture utility. It rejects non-loopback URLs, performs read-only S3/MCP lookups, and does not send Discord messages:
+
+```powershell
+npm install --prefix data/acceptance/readme-render --no-save playwright
+npx --prefix data/acceptance/readme-render playwright install chromium
+node scripts/capture_demo_screenshots.cjs --strict
+```
 
 ![Reliability Overview in light mode](docs/images/control-plane-overview-light.png)
 
@@ -975,6 +1047,78 @@ No live customer records or provider credentials are shown.
 <summary>Stored triage report in dark mode</summary>
 
 ![Stored triage evidence in dark mode](docs/images/control-plane-triage-dark.png)
+
+</details>
+
+<details>
+<summary>Next.js Reliability Overview and historical triaged alerts</summary>
+
+![Next.js Reliability Overview with an empty current-date summary and historical triaged alerts](docs/images/demo-next-overview.png)
+
+The selected September 28 summary legitimately contains zero checks and zero open alerts, while the lower table shows retained historical triaged alerts. This is an honest empty-state capture, not evidence of a successful daily pipeline for that date.
+
+</details>
+
+<details>
+<summary>Next.js Triage Workbench with persisted evidence</summary>
+
+![Next.js Triage Workbench showing a persisted heuristic report and bounded evidence](docs/images/demo-next-triage.png)
+
+The report shown is a persisted heuristic artifact for Alert Ref `DQ-20260922-3218EA`. The page labels external model use as false and does not imply that opening the report invoked an LLM or executed remediation.
+
+</details>
+
+<details>
+<summary>Streamlit alert selection</summary>
+
+![Streamlit operator console showing retained triaged synthetic alerts](docs/images/demo-streamlit-alerts.png)
+
+This view shows retained alert rows and the selected alert controls. It is not a live Discord response and does not prove that an approval or action was executed.
+
+</details>
+
+<details>
+<summary>Airflow daily orchestrator graph</summary>
+
+![Airflow graph for the scheduled daily orchestrator](docs/images/demo-airflow-graph.png)
+
+The graph shows the single scheduled control path from landing through dbt, quality alerts, optional agent triage, and finish. The visible successful historical run and zero-failure counters are operational UI evidence for this local stack, not a guarantee that every future run will succeed.
+
+</details>
+
+<details>
+<summary>CH-UI read-only alert query</summary>
+
+![CH-UI showing a read-only grouped alert count query](docs/images/demo-ch-ui.png)
+
+The query groups historical `dq.alerts` rows by business date. It demonstrates read-only warehouse inspection, not table mutation or remediation.
+
+</details>
+
+<details>
+<summary>Discord operator output</summary>
+
+![Rendered Discord alert output from the local formatter and retained alert data](docs/images/demo-discord-output.png)
+
+This image renders the actual local `/dq alerts` formatter output against retained synthetic alerts. It is intentionally labeled as a rendered message rather than a Discord client screenshot; no outbound message or external model call was needed to capture it.
+
+</details>
+
+<details>
+<summary>SeaweedFS artifact inventory</summary>
+
+![Rendered read-only SeaweedFS S3 artifact inventory](docs/images/demo-s3-artifacts.png)
+
+This image is a rendered inventory produced from a local read-only S3 `ListObjectsV2` result. It is not a screenshot of the SeaweedFS Filer UI. Empty provisioned buckets are shown rather than hidden.
+
+</details>
+
+<details>
+<summary>MCP tool inventory</summary>
+
+![Rendered inventory of locally registered MCP tools](docs/images/demo-mcp-tools.png)
+
+This is a rendered local registry listing, not an MCP client UI and not proof that every listed tool was invoked during one investigation.
 
 </details>
 
@@ -998,9 +1142,9 @@ certification or proof of remediation execution. See the
 
 This checkout is a local synthetic-data platform with explicit safety boundaries. It is not a benchmark of production throughput or a promise that an agent can repair arbitrary warehouse incidents.
 
-Current limitations include one dataset, local credentials and network assumptions, non-transactional approval coordination, incomplete accessibility certification, and pending comparative quality evaluation of paid fan-out. Fresh-clone installation on every operating system has not been certified.
+Current limitations include one dataset, local credentials and network assumptions, a legacy ClickHouse backfill approval path alongside the newer PostgreSQL transactional action path, incomplete accessibility certification, and no enterprise identity/RBAC or cross-system distributed transaction. One isolated Windows/Docker Desktop fresh-clone path has passed; macOS, Linux, and other host configurations have not been certified. Ticket and notification providers remain disabled by default and have not been accepted against live external destinations.
 
-Next priorities are to finish repeatable browser/operator acceptance, verify bounded paid fan-out against the single-handoff baseline, improve reliability evaluation, and add further datasets/contracts only where they demonstrate a distinct use case. Broader governance, semantic drift, enterprise authentication, cloud deployment, and autonomous remediation are not implied by the project title.
+Next priorities are to keep browser/operator acceptance repeatable, verify bounded paid fan-out against the single-handoff baseline, improve reliability evaluation, and add further datasets/contracts only where they demonstrate a distinct use case. Broader governance, semantic drift, enterprise authentication, cloud deployment, and autonomous remediation are not implied by the project title.
 
 Prefer a small measured improvement to adding more agent personas. A runtime extension should improve evidence coverage or investigation quality without unacceptable latency, cost, or operational risk.
 

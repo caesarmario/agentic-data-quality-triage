@@ -27,7 +27,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent.llm.copilot import build_alert_list_copilot_note, build_daily_summary_copilot_note
+from agent.llm.copilot import (
+    build_alert_list_copilot_note,
+    build_daily_summary_copilot_note,
+    build_quality_summary_copilot_note,
+)
 from apps.discord_bot.formatters import (
     format_alert_list,
     format_approval_recorded,
@@ -35,6 +39,7 @@ from apps.discord_bot.formatters import (
     format_bot_online,
     format_daily_summary,
     format_operator_answer,
+    format_quality_summary,
     format_triage_result,
     split_message,
 )
@@ -46,7 +51,10 @@ from apps.discord_bot.service import (
     create_discord_backfill_approval_request,
     decide_discord_approval_request,
     fetch_discord_daily_summary,
+    fetch_discord_database_summary,
     fetch_discord_alerts,
+    fetch_discord_table_summary,
+    fetch_discord_weekly_summary,
     probe_control_plane_health,
     run_discord_triage,
 )
@@ -470,6 +478,129 @@ async def daily_summary(interaction: discord.Interaction, dt: str) -> None:
         await command_error(interaction=interaction, operation="Daily summary", exc=exc)
 
 
+async def publish_extended_quality_summary(
+    interaction: discord.Interaction,
+    payload: dict[str, Any],
+    data_transport: str,
+    acknowledgement: str,
+) -> None:
+    """Build a bounded Copilot note and publish one extended quality summary."""
+    note = await asyncio.to_thread(build_quality_summary_copilot_note, payload)
+    message = format_quality_summary(
+        payload=payload,
+        assistant_note=note,
+        data_transport=data_transport,
+    )
+    await publish_result(
+        interaction=interaction,
+        channel_id=ALERTS_CHANNEL_ID,
+        message=message,
+        acknowledgement=acknowledgement,
+    )
+
+
+@tree.command(
+    name="weekly_summary",
+    description="Show a seven-day DQ reliability summary",
+    guild=guild_object(),
+)
+@app_commands.describe(end_date="Inclusive end date in YYYY-MM-DD format")
+async def weekly_summary(interaction: discord.Interaction, end_date: str) -> None:
+    """Show a deterministic seven-day summary with a bounded Copilot readout."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    try:
+        normalized_end = parse_date(end_date.strip()).isoformat()
+        payload, transport = await asyncio.to_thread(
+            fetch_discord_weekly_summary,
+            normalized_end,
+        )
+        await publish_extended_quality_summary(
+            interaction=interaction,
+            payload=payload,
+            data_transport=transport,
+            acknowledgement="Weekly summary posted to the configured alerts channel.",
+        )
+
+    except Exception as exc:
+        await command_error(interaction=interaction, operation="Weekly summary", exc=exc)
+
+
+@tree.command(
+    name="table_summary",
+    description="Show bounded DQ health for one warehouse table",
+    guild=guild_object(),
+)
+@app_commands.describe(
+    table_name="Qualified table such as dq.fct_orders_daily",
+    start_date="Inclusive start date in YYYY-MM-DD format",
+    end_date="Inclusive end date in YYYY-MM-DD format",
+)
+async def table_summary(
+    interaction: discord.Interaction,
+    table_name: str,
+    start_date: str,
+    end_date: str,
+) -> None:
+    """Show a bounded per-table quality summary and advisory rerun candidates."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    try:
+        normalized_start = parse_date(start_date.strip()).isoformat()
+        normalized_end   = parse_date(end_date.strip()).isoformat()
+        payload, transport = await asyncio.to_thread(
+            fetch_discord_table_summary,
+            table_name.strip(),
+            normalized_start,
+            normalized_end,
+        )
+        await publish_extended_quality_summary(
+            interaction=interaction,
+            payload=payload,
+            data_transport=transport,
+            acknowledgement="Table summary posted to the configured alerts channel.",
+        )
+
+    except Exception as exc:
+        await command_error(interaction=interaction, operation="Table summary", exc=exc)
+
+
+@tree.command(
+    name="db_summary",
+    description="Show bounded warehouse-wide DQ and metadata health",
+    guild=guild_object(),
+)
+@app_commands.describe(
+    start_date="Inclusive start date in YYYY-MM-DD format",
+    end_date="Inclusive end date in YYYY-MM-DD format",
+)
+async def db_summary(
+    interaction: discord.Interaction,
+    start_date: str,
+    end_date: str,
+) -> None:
+    """Show the registered warehouse quality summary without arbitrary database access."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    try:
+        normalized_start = parse_date(start_date.strip()).isoformat()
+        normalized_end   = parse_date(end_date.strip()).isoformat()
+        payload, transport = await asyncio.to_thread(
+            fetch_discord_database_summary,
+            normalized_start,
+            normalized_end,
+        )
+        await publish_extended_quality_summary(
+            interaction=interaction,
+            payload=payload,
+            data_transport=transport,
+            acknowledgement="Warehouse summary posted to the configured alerts channel.",
+        )
+
+    except Exception as exc:
+        await command_error(interaction=interaction, operation="Warehouse summary", exc=exc)
+
+
 @tree.command(
     name="triage",
     description="Investigate one Alert Ref or system alert key",
@@ -754,6 +885,43 @@ async def dq_alerts(
 async def dq_daily_summary(interaction: discord.Interaction, dt: str) -> None:
     """Route the canonical grouped daily summary to the existing handler."""
     await daily_summary.callback(interaction, dt)
+
+
+@dq_group.command(name="weekly_summary", description="Show a seven-day DQ reliability summary")
+@app_commands.describe(end_date="Inclusive end date in YYYY-MM-DD format")
+async def dq_weekly_summary(interaction: discord.Interaction, end_date: str) -> None:
+    """Route the canonical grouped weekly summary to the existing handler."""
+    await weekly_summary.callback(interaction, end_date)
+
+
+@dq_group.command(name="table_summary", description="Show DQ health for one warehouse table")
+@app_commands.describe(
+    table_name="Qualified table such as dq.fct_orders_daily",
+    start_date="Inclusive start date in YYYY-MM-DD format",
+    end_date="Inclusive end date in YYYY-MM-DD format",
+)
+async def dq_table_summary(
+    interaction: discord.Interaction,
+    table_name: str,
+    start_date: str,
+    end_date: str,
+) -> None:
+    """Route the canonical grouped table summary to the existing handler."""
+    await table_summary.callback(interaction, table_name, start_date, end_date)
+
+
+@dq_group.command(name="db_summary", description="Show bounded warehouse-wide DQ health")
+@app_commands.describe(
+    start_date="Inclusive start date in YYYY-MM-DD format",
+    end_date="Inclusive end date in YYYY-MM-DD format",
+)
+async def dq_db_summary(
+    interaction: discord.Interaction,
+    start_date: str,
+    end_date: str,
+) -> None:
+    """Route the canonical grouped warehouse summary to the existing handler."""
+    await db_summary.callback(interaction, start_date, end_date)
 
 
 @dq_group.command(name="triage", description="Investigate one Alert Ref or system alert key")

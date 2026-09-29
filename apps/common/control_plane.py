@@ -33,6 +33,11 @@ INCIDENT_OUTCOME_STATUSES             = {"success", "partial", "failed", "blocke
 INCIDENT_APPROVAL_STATES              = {"not_required", "pending", "approved", "rejected"}
 MAX_BLAST_RADIUS_DEPTH                = 10
 MAX_BLAST_RADIUS_NODES                = 250
+QUALITY_SUMMARY_SCOPES                = {"weekly", "table", "database"}
+QUALITY_SUMMARY_RERUN_DAGS            = {
+    "10_dag_dq_orders_landing_orchestrator",
+    "20_dag_dq_orders_dbt_transform",
+}
 FORBIDDEN_LINEAGE_FIELDS              = {"raw_code", "compiled_code", "compiled_sql"}
 FORBIDDEN_METADATA_FIELDS             = {"config_sha256", "source_config_path", "version", "is_active"}
 FORBIDDEN_INCIDENT_HISTORY_FIELDS     = {
@@ -759,6 +764,208 @@ class ControlPlaneClient:
             raise ControlPlaneResponseError("Daily summary API returned an inconsistent alert total.")
 
         return payload
+
+    def validate_quality_summary_payload(
+        self,
+        payload: Any,
+        expected_scope: str,
+        expected_start_date: str,
+        expected_end_date: str,
+        expected_table_name: str = "",
+    ) -> dict[str, Any]:
+        """Validate one public weekly, table, or database summary payload."""
+        if not isinstance(payload, dict) or FORBIDDEN_READ_API_FIELDS.intersection(payload):
+            raise ControlPlaneResponseError("Quality summary API returned malformed or internal fields.")
+
+        scope = str(payload.get("scope") or "")
+
+        if scope not in QUALITY_SUMMARY_SCOPES or scope != expected_scope:
+            raise ControlPlaneResponseError("Quality summary API returned a different scope.")
+
+        if str(payload.get("start_date") or "") != expected_start_date:
+            raise ControlPlaneResponseError("Quality summary API returned a different start date.")
+
+        if str(payload.get("end_date") or "") != expected_end_date:
+            raise ControlPlaneResponseError("Quality summary API returned a different end date.")
+
+        if str(payload.get("table_name") or "") != expected_table_name:
+            raise ControlPlaneResponseError("Quality summary API returned a different table identity.")
+
+        collection_limits = {
+            "check_counts": 100,
+            "alert_counts": 100,
+            "daily_counts": 31,
+            "table_counts": 100,
+            "metadata_counts": 100,
+            "rerun_suggestions": 20,
+        }
+
+        for field_name, limit in collection_limits.items():
+            rows = payload.get(field_name)
+
+            if not isinstance(rows, list) or len(rows) > limit:
+                raise ControlPlaneResponseError(f"Quality summary {field_name} is missing or unbounded.")
+
+            if any(not isinstance(row, dict) or FORBIDDEN_READ_API_FIELDS.intersection(row) for row in rows):
+                raise ControlPlaneResponseError(f"Quality summary {field_name} contains malformed rows.")
+
+        def count_total(rows: list[dict[str, Any]], label_field: str) -> int:
+            """Validate labeled count rows and return their total."""
+            labels: list[str] = []
+            total = 0
+
+            for row in rows:
+                label = str(row.get(label_field) or "").strip()
+                count = row.get("count")
+
+                if not label or isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                    raise ControlPlaneResponseError("Quality summary aggregate contains invalid values.")
+
+                labels.append(label)
+                total += count
+
+            if len(labels) != len(set(labels)):
+                raise ControlPlaneResponseError("Quality summary aggregate contains duplicate labels.")
+
+            return total
+
+        check_total = count_total(payload["check_counts"], "status")
+        alert_total = count_total(payload["alert_counts"], "severity")
+        asset_total = count_total(payload["metadata_counts"], "certification_status")
+
+        if payload.get("total_checks") != check_total:
+            raise ControlPlaneResponseError("Quality summary API returned an inconsistent check total.")
+
+        if payload.get("total_open_alerts") != alert_total:
+            raise ControlPlaneResponseError("Quality summary API returned an inconsistent alert total.")
+
+        if payload.get("registered_asset_count") != asset_total:
+            raise ControlPlaneResponseError("Quality summary API returned an inconsistent metadata total.")
+
+        for row in [*payload["daily_counts"], *payload["table_counts"]]:
+            count_fields = (
+                "total_checks",
+                "failed_checks",
+                "warning_checks",
+                "open_alerts",
+                "critical_alerts",
+            )
+
+            if any(
+                isinstance(row.get(field_name), bool)
+                or not isinstance(row.get(field_name), int)
+                or row[field_name] < 0
+                for field_name in count_fields
+            ):
+                raise ControlPlaneResponseError("Quality summary health rollup contains invalid counts.")
+
+        if sum(row["total_checks"] for row in payload["daily_counts"]) != check_total:
+            raise ControlPlaneResponseError("Quality summary daily checks do not match the aggregate total.")
+
+        if sum(row["open_alerts"] for row in payload["daily_counts"]) != alert_total:
+            raise ControlPlaneResponseError("Quality summary daily alerts do not match the aggregate total.")
+
+        if sum(row["total_checks"] for row in payload["table_counts"]) != check_total:
+            raise ControlPlaneResponseError("Quality summary table checks do not match the aggregate total.")
+
+        if sum(row["open_alerts"] for row in payload["table_counts"]) != alert_total:
+            raise ControlPlaneResponseError("Quality summary table alerts do not match the aggregate total.")
+
+        for suggestion in payload["rerun_suggestions"]:
+            target_dag_id   = str(suggestion.get("target_dag_id") or "")
+            affected_tables = suggestion.get("affected_tables")
+
+            if target_dag_id not in QUALITY_SUMMARY_RERUN_DAGS:
+                raise ControlPlaneResponseError("Quality summary suggested a non-allowlisted rerun DAG.")
+
+            if suggestion.get("mode") != "advisory_only" or suggestion.get("requires_approval") is not True:
+                raise ControlPlaneResponseError("Quality summary rerun suggestion bypasses the approval boundary.")
+
+            if not isinstance(affected_tables, list) or not affected_tables:
+                raise ControlPlaneResponseError("Quality summary rerun suggestion has no affected tables.")
+
+        return payload
+
+    def get_weekly_summary(self, end_date: str) -> dict[str, Any]:
+        """Fetch and validate the seven-day quality window ending on end_date."""
+        try:
+            normalized_end = date.fromisoformat(end_date.strip())
+
+        except (AttributeError, ValueError) as exc:
+            raise ValueError("Weekly summary requires end_date in YYYY-MM-DD format.") from exc
+
+        normalized_start = normalized_end.fromordinal(normalized_end.toordinal() - 6)
+        payload = self.request_json(
+            "GET",
+            "/api/v1/summaries/weekly",
+            params={"end_date": normalized_end.isoformat()},
+        )
+
+        return self.validate_quality_summary_payload(
+            payload=payload,
+            expected_scope="weekly",
+            expected_start_date=normalized_start.isoformat(),
+            expected_end_date=normalized_end.isoformat(),
+        )
+
+    def get_table_summary(
+        self,
+        table_name: str,
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, Any]:
+        """Fetch and validate a bounded per-table quality summary."""
+        normalized_table = table_name.strip()
+
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*", normalized_table):
+            raise ValueError("Table summary requires a qualified schema.table name.")
+
+        try:
+            normalized_start = date.fromisoformat(start_date.strip()).isoformat()
+            normalized_end   = date.fromisoformat(end_date.strip()).isoformat()
+
+        except (AttributeError, ValueError) as exc:
+            raise ValueError("Table summary requires valid YYYY-MM-DD dates.") from exc
+
+        payload = self.request_json(
+            "GET",
+            "/api/v1/summaries/table",
+            params={
+                "table_name": normalized_table,
+                "start_date": normalized_start,
+                "end_date": normalized_end,
+            },
+        )
+
+        return self.validate_quality_summary_payload(
+            payload=payload,
+            expected_scope="table",
+            expected_start_date=normalized_start,
+            expected_end_date=normalized_end,
+            expected_table_name=normalized_table,
+        )
+
+    def get_database_summary(self, start_date: str, end_date: str) -> dict[str, Any]:
+        """Fetch and validate a bounded warehouse-wide quality summary."""
+        try:
+            normalized_start = date.fromisoformat(start_date.strip()).isoformat()
+            normalized_end   = date.fromisoformat(end_date.strip()).isoformat()
+
+        except (AttributeError, ValueError) as exc:
+            raise ValueError("Database summary requires valid YYYY-MM-DD dates.") from exc
+
+        payload = self.request_json(
+            "GET",
+            "/api/v1/summaries/database",
+            params={"start_date": normalized_start, "end_date": normalized_end},
+        )
+
+        return self.validate_quality_summary_payload(
+            payload=payload,
+            expected_scope="database",
+            expected_start_date=normalized_start,
+            expected_end_date=normalized_end,
+        )
 
     @staticmethod
     def validate_public_alert_payload(alert: Any) -> dict[str, Any]:

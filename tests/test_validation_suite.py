@@ -65,13 +65,12 @@ def test_airflow_first_acceptance_policy_is_documented() -> None:
         None.
     """
     agent_instructions = Path("AGENTS.md").read_text(encoding="utf-8")
-    todo                = Path("todo/list.todo").read_text(encoding="utf-8")
 
     assert "Whenever the project owner asks to test" in agent_instructions
     assert "trigger the appropriate Airflow validation or operational DAG" in agent_instructions
     assert "non-authoritative inner-loop feedback only" in agent_instructions
-    assert "Every project-owner testing request must produce an Airflow DagRun" in todo
-    assert "DAG ID, run ID, final DagRun state" in todo
+    assert "Airflow DAG ID and run ID" in agent_instructions
+    assert "Final DagRun state" in agent_instructions
 
 
 def test_build_pytest_command_uses_allowlisted_paths_without_shell() -> None:
@@ -88,6 +87,7 @@ def test_build_pytest_command_uses_allowlisted_paths_without_shell() -> None:
         "tests/test_control_plane_client.py",
         "tests/test_copilot_narratives.py",
         "tests/test_daily_summary_tool.py",
+        "tests/test_quality_summary_tool.py",
         "tests/test_discord_bot.py",
         "tests/test_discord_formatters.py",
         "tests/test_discord_webhook.py",
@@ -105,6 +105,7 @@ def test_api_validation_suite_covers_server_and_shared_client_contracts() -> Non
     command = run_validation_suite.build_pytest_command("api")
 
     assert "tests/test_daily_summary_tool.py" in command
+    assert "tests/test_quality_summary_tool.py" in command
     assert "tests/test_api_app.py" in command
     assert "tests/test_control_plane_client.py" in command
     assert "tests/test_smoke_readiness.py" in command
@@ -1155,4 +1156,32 @@ def test_validation_summary_uses_airflow3_compatible_context() -> None:
         "t20_run_platform_readiness": "success",
     }
     assert "all_success" in summary["state_evidence"]
+
+
+def test_approved_action_log_reader_is_allowlisted_and_prints_retained_logs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Keep the Makefile-approved action log helper aligned with DAG 90_02."""
+    dag_id = read_airflow_validation_logs.APPROVED_ACTION_DAG_ID
+    run_id = "manual__approved_action_preview_test"
+    directory = read_airflow_validation_logs.airflow_log_directory(
+        dag_id=dag_id,
+        run_id=run_id,
+        log_root=tmp_path,
+    )
+    log_path = directory / "task_id=t10_preview_or_execute" / "attempt=1.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("Approved action preview completed\n", encoding="utf-8")
+
+    return_code = read_airflow_validation_logs.print_airflow_logs(
+        dag_id=dag_id,
+        run_id=run_id,
+        log_root=tmp_path,
+    )
+    output = capsys.readouterr().out
+
+    assert return_code == 0
+    assert "task_id=t10_preview_or_execute" in output
+    assert "Approved action preview completed" in output
 

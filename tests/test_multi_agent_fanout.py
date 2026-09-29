@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -28,7 +29,10 @@ from agent.specialists.contracts import (
     EvidenceReference,
 )
 from agent.specialists.metadata_lineage import build_metadata_lineage_task
-from agent.supervisor.budgets import SupervisorFanoutBudgetAllocator
+from agent.supervisor.budgets import (
+    SupervisorFanoutBudgetAllocator,
+    active_supervisor_llm_budget,
+)
 from agent.supervisor.execution_plan import (
     AgentAggregationStrategy,
     AgentDependency,
@@ -58,6 +62,8 @@ from agent.supervisor.runtime import (
     SupervisorRuntimeConfig,
     derive_supervisor_parent_run_id,
 )
+from scripts import run_agent_worker as isolated_worker
+from scripts.run_agent_worker import resolve_worker_execution_policy
 
 
 # --- Defining Test Doubles
@@ -158,6 +164,10 @@ def successful_result(worker: PlannedAgentTask) -> AgentResultEnvelope:
         Successful AgentResultEnvelope with no provider usage.
     """
     task = worker.task
+    evidence_tool = next(
+        tool for tool in task.allowed_tools
+        if tool != "agent_audit_log"
+    )
 
     return AgentResultEnvelope(
         task_id=task.task_id,
@@ -167,8 +177,8 @@ def successful_result(worker: PlannedAgentTask) -> AgentResultEnvelope:
         status=AgentTaskStatus.SUCCESS,
         evidence_references=[
             EvidenceReference(
-                evidence_type="metadata_catalog_query",
-                source_tool="metadata_catalog",
+                evidence_type=f"{evidence_tool}_query",
+                source_tool=evidence_tool,
                 reference=f"task:{task.task_id}",
                 summary=f"Deterministic evidence for {task.task_type}.",
             )
@@ -351,6 +361,193 @@ def test_plan_hash_and_worker_ids_are_stable_across_recompilation() -> None:
         item.task.task_id for item in second.workers
     ]
     assert len({item.checkpoint_namespace for item in first.workers}) == 2
+
+
+def test_no_llm_triage_fanout_keeps_capability_but_reserves_zero_provider_budget() -> None:
+    """A deterministic triage fan-out must not be blocked by dormant LLM capacity."""
+    request = SupervisorRequest(
+        intent=SupervisorIntent.TRIAGE_ALERT,
+        alert_key="DQ-TEST-NO-LLM",
+        qualified_name="dq.fct_orders_daily",
+        execution_mode=SupervisorExecutionMode.FANOUT,
+        max_workers=2,
+        max_concurrency=2,
+        max_handoffs=2,
+        max_model_calls=0,
+        token_budget=0,
+        estimated_cost_budget_usd=0.0,
+        allow_external_llm=False,
+    )
+    parent_run_id = derive_supervisor_parent_run_id("manual__fanout_triage_no_llm")
+    plan = compile_execution_plan(request, parent_run_id)
+    recorder = AuditRecorder()
+
+    assert plan.workers[0].task.model_route == AgentModelRoute.DEEPTHINK_LLM
+    assert plan.workers[0].task.model_call_budget > 0
+
+    result = run_control_plane_fanout(
+        request=request,
+        external_run_id="manual__fanout_triage_no_llm",
+        config=fake_runtime(
+            lambda _request, worker: successful_result(worker),
+            recorder=recorder,
+        ),
+        execution_plan=plan,
+    )
+
+    assert result.status == AgentTaskStatus.SUCCESS, (
+        result.supervisor_state.errors,
+        result.final_response,
+    )
+    budget_events = [
+        event for event in recorder.events
+        if event["action"] == "supervisor_worker_budget_reserved"
+    ]
+    assert len(budget_events) == 2
+    assert all(
+        event["output_payload"]["resilience"]["worker_budget"]["model_calls"] == 0
+        for event in budget_events
+    )
+
+
+def test_zero_parent_budget_disables_child_provider_permission() -> None:
+    """Child runtime must not inherit dormant task capacity as executable budget."""
+    request = SupervisorRequest(
+        intent=SupervisorIntent.TRIAGE_ALERT,
+        alert_key="DQ-TEST-ZERO-CHILD-BUDGET",
+        qualified_name="dq.fct_orders_daily",
+        execution_mode=SupervisorExecutionMode.FANOUT,
+        max_workers=2,
+        max_concurrency=2,
+        max_handoffs=2,
+        max_model_calls=0,
+        token_budget=0,
+        estimated_cost_budget_usd=0.0,
+        allow_external_llm=True,
+    )
+    plan = compile_execution_plan(
+        request,
+        derive_supervisor_parent_run_id("manual__fanout_zero_child_budget"),
+    )
+
+    allow_external_llm, budget = resolve_worker_execution_policy(
+        request=request,
+        worker=plan.workers[0],
+    )
+
+    assert plan.workers[0].task.model_call_budget > 0
+    assert allow_external_llm is False
+    assert budget.model_calls == 0
+    assert budget.tokens == 0
+    assert budget.estimated_cost_usd == 0.0
+
+
+def test_zero_parent_budget_rejects_in_process_worker_usage() -> None:
+    """Parent usage validation must reject model usage before aggregation."""
+    request = SupervisorRequest(
+        intent=SupervisorIntent.TRIAGE_ALERT,
+        alert_key="DQ-TEST-ZERO-PARENT-USAGE",
+        qualified_name="dq.fct_orders_daily",
+        execution_mode=SupervisorExecutionMode.FANOUT,
+        max_workers=2,
+        max_concurrency=2,
+        max_handoffs=2,
+        max_model_calls=0,
+        token_budget=0,
+        estimated_cost_budget_usd=0.0,
+        allow_external_llm=True,
+    )
+    plan = compile_execution_plan(
+        request,
+        derive_supervisor_parent_run_id("manual__fanout_zero_parent_usage"),
+    )
+
+    def executor(_request: SupervisorRequest, worker: PlannedAgentTask) -> AgentResultEnvelope:
+        """Return unauthorized provider usage without making a network call."""
+        result                    = successful_result(worker)
+        result.model_call_count   = 1
+        result.token_usage        = 100
+        result.estimated_cost_usd = 0.001
+
+        return result
+
+    result = run_control_plane_fanout(
+        request=request,
+        external_run_id="manual__fanout_zero_parent_usage",
+        config=fake_runtime(executor),
+        execution_plan=plan,
+    )
+
+    assert result.status == AgentTaskStatus.BLOCKED
+    assert any("model-call budget" in error for error in result.supervisor_state.errors)
+
+
+def test_isolated_worker_uses_zero_effective_ledger_when_parent_budget_is_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production child boundary must fail closed before provider execution."""
+    request = SupervisorRequest(
+        intent=SupervisorIntent.TRIAGE_ALERT,
+        alert_key="DQ-TEST-ISOLATED-ZERO-BUDGET",
+        qualified_name="dq.fct_orders_daily",
+        execution_mode=SupervisorExecutionMode.FANOUT,
+        max_workers=2,
+        max_concurrency=2,
+        max_handoffs=2,
+        max_model_calls=0,
+        token_budget=0,
+        estimated_cost_budget_usd=0.0,
+        allow_external_llm=True,
+    )
+    plan = compile_execution_plan(
+        request,
+        derive_supervisor_parent_run_id("manual__isolated_zero_budget"),
+    )
+    worker = plan.workers[0]
+    observed: dict[str, object] = {}
+
+    monkeypatch.setenv("EXTERNAL_LLM_ENABLED", "true")
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-test-key")
+    monkeypatch.setenv(
+        "GEMINI_BASE_URL",
+        "https://generativelanguage.googleapis.com/v1beta/openai/",
+    )
+
+    runtime = SimpleNamespace(
+        audit_client_factory=lambda **_kwargs: FakeClient(),
+        clickhouse_host="clickhouse",
+        clickhouse_port=8123,
+    )
+    monkeypatch.setattr(isolated_worker, "SupervisorRuntimeConfig", lambda: runtime)
+
+    def invoke_without_provider(**_kwargs: Any) -> SimpleNamespace:
+        """Inspect child policy state without attempting a provider request."""
+        ledger = active_supervisor_llm_budget()
+        assert ledger is not None
+        observed["model_calls"] = ledger.max_model_calls
+        observed["tokens"] = ledger.token_budget
+        observed["cost"] = ledger.estimated_cost_budget_usd
+        observed["route_uses_heuristic"] = resolve_route("cheap_summary").use_heuristic
+
+        return SimpleNamespace(result=successful_result(worker))
+
+    monkeypatch.setattr(
+        isolated_worker,
+        "invoke_specialist_with_resilience",
+        invoke_without_provider,
+    )
+
+    result = AgentResultEnvelope.model_validate_json(
+        isolated_worker.run_worker_contract(request=request, worker=worker)
+    )
+
+    assert result.status == AgentTaskStatus.SUCCESS
+    assert observed == {
+        "model_calls": 0,
+        "tokens": 0,
+        "cost": 0.0,
+        "route_uses_heuristic": True,
+    }
 
 
 def test_plan_validation_rejects_tampered_hash() -> None:

@@ -577,6 +577,118 @@ def test_get_daily_summary_rejects_invalid_or_mismatched_dates(monkeypatch) -> N
         api_client.get_daily_summary("2026-06-10")
 
 
+# --- Defining Extended Quality Summary Client Tests
+def sample_quality_summary_payload(scope: str, table_name: str = "") -> dict[str, Any]:
+    """Build one valid public extended-summary response fixture."""
+    return {
+        "status": "success",
+        "scope": scope,
+        "start_date": "2026-06-04",
+        "end_date": "2026-06-10",
+        "table_name": table_name,
+        "check_counts": [{"status": "fail", "count": 2}, {"status": "pass", "count": 8}],
+        "alert_counts": [{"severity": "critical", "count": 1}],
+        "daily_counts": [
+            {
+                "dt": "2026-06-10",
+                "table_name": "",
+                "total_checks": 10,
+                "failed_checks": 2,
+                "warning_checks": 0,
+                "open_alerts": 1,
+                "critical_alerts": 1,
+            }
+        ],
+        "table_counts": [
+            {
+                "dt": None,
+                "table_name": table_name or "dq.fct_orders_daily",
+                "total_checks": 10,
+                "failed_checks": 2,
+                "warning_checks": 0,
+                "open_alerts": 1,
+                "critical_alerts": 1,
+            }
+        ],
+        "metadata_counts": [{"certification_status": "certified", "count": 3}],
+        "total_checks": 10,
+        "total_open_alerts": 1,
+        "registered_asset_count": 3,
+        "rerun_suggestions": [
+            {
+                "target_dag_id": "20_dag_dq_orders_dbt_transform",
+                "affected_tables": [table_name or "dq.fct_orders_daily"],
+                "start_date": "2026-06-04",
+                "end_date": "2026-06-10",
+                "mode": "advisory_only",
+                "requires_approval": True,
+                "reason": "Review evidence first.",
+            }
+        ],
+        "duration_ms": 5,
+        "summary": "Bounded quality summary.",
+    }
+
+
+@pytest.mark.parametrize(
+    ("method_name", "args", "scope", "table_name"),
+    [
+        ("get_weekly_summary", ("2026-06-10",), "weekly", ""),
+        (
+            "get_table_summary",
+            ("dq.fct_orders_daily", "2026-06-04", "2026-06-10"),
+            "table",
+            "dq.fct_orders_daily",
+        ),
+        (
+            "get_database_summary",
+            ("2026-06-04", "2026-06-10"),
+            "database",
+            "",
+        ),
+    ],
+)
+def test_extended_quality_summary_clients_validate_identity_and_advisory_boundary(
+    monkeypatch,
+    method_name: str,
+    args: tuple[str, ...],
+    scope: str,
+    table_name: str,
+) -> None:
+    """Ensure every client method accepts only its exact public contract."""
+    api_client = ControlPlaneClient("http://api:8000")
+    payload    = sample_quality_summary_payload(scope=scope, table_name=table_name)
+    monkeypatch.setattr(api_client, "request_json", lambda *call_args, **kwargs: payload)
+
+    result = getattr(api_client, method_name)(*args)
+
+    assert result["scope"] == scope
+    assert result["rerun_suggestions"][0]["mode"] == "advisory_only"
+
+    payload["rerun_suggestions"][0]["requires_approval"] = False
+
+    with pytest.raises(ControlPlaneResponseError, match="approval boundary"):
+        getattr(api_client, method_name)(*args)
+
+
+def test_extended_quality_summary_client_rejects_internal_or_unallowlisted_values(monkeypatch) -> None:
+    """Ensure clients reject SQL leakage and non-allowlisted rerun targets."""
+    api_client = ControlPlaneClient("http://api:8000")
+    payload    = sample_quality_summary_payload(scope="database")
+    monkeypatch.setattr(api_client, "request_json", lambda *args, **kwargs: payload)
+
+    payload["rerun_suggestions"][0]["target_dag_id"] = "arbitrary_operator_dag"
+
+    with pytest.raises(ControlPlaneResponseError, match="non-allowlisted"):
+        api_client.get_database_summary("2026-06-04", "2026-06-10")
+
+    payload["rerun_suggestions"][0]["target_dag_id"] = "20_dag_dq_orders_dbt_transform"
+    payload["sql"] = "SELECT * FROM dq.dq_check_results"
+
+    with pytest.raises(ControlPlaneResponseError, match="internal fields"):
+        api_client.get_database_summary("2026-06-04", "2026-06-10")
+
+
 def test_get_alert_accepts_alert_ref_and_rejects_identity_mismatch(monkeypatch) -> None:
     """
     Ensure alert detail lookup remains bound to the requested Alert Ref.

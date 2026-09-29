@@ -312,6 +312,44 @@ def build_daily_summary_fallback(dt: str, check_rows: list[dict[str, Any]], aler
     )
 
 
+def build_quality_summary_fallback(summary: dict[str, Any]) -> str:
+    """Build a natural fallback for weekly, table, and database summaries."""
+    check_counts = {
+        str(row.get("status") or ""): int(row.get("count") or 0)
+        for row in list(summary.get("check_counts") or [])
+    }
+    alert_counts = {
+        str(row.get("severity") or ""): int(row.get("count") or 0)
+        for row in list(summary.get("alert_counts") or [])
+    }
+    scope        = str(summary.get("scope") or "quality")
+    table_name   = str(summary.get("table_name") or "")
+    start_date   = str(summary.get("start_date") or "")
+    end_date     = str(summary.get("end_date") or "")
+    failed       = check_counts.get("fail", 0)
+    warnings     = check_counts.get("warn", 0)
+    critical     = alert_counts.get("critical", 0)
+    suggestions  = list(summary.get("rerun_suggestions") or [])
+    subject      = f"table `{table_name}`" if scope == "table" else f"the `{scope}` view"
+
+    if failed or critical:
+        action_text = (
+            f"I found `{len(suggestions)}` allowlisted rerun candidate(s), but they are advisory only and still require evidence review and approval."
+            if suggestions
+            else "No safe allowlisted rerun can be inferred from this aggregate alone, so inspect the highest-priority alert before choosing an action."
+        )
+
+        return (
+            f"From `{start_date}` through `{end_date}`, {subject} needs attention: "
+            f"`{failed}` checks failed and `{critical}` critical alert(s) remain open. {action_text}"
+        )
+
+    return (
+        f"From `{start_date}` through `{end_date}`, {subject} has no failed checks or critical open alerts in this bounded summary. "
+        f"There are `{warnings}` warning check(s); review them before treating the data as fully trusted."
+    )
+
+
 def build_triage_fallback(report: Any) -> str:
     """
     Build a natural local fallback for triage report responses.
@@ -568,6 +606,29 @@ def build_daily_summary_copilot_note(dt: str, check_rows: list[dict[str, Any]], 
     prompt = (
         "Give a direct daily reliability assessment for a data engineer. "
         "Classify the date as healthy, review recommended, or needs attention, explain the strongest observed signal, and give one safe next step."
+    )
+
+    return run_copilot_task(prompt=prompt, context=context, fallback_text=fallback_text)
+
+
+def build_quality_summary_copilot_note(summary: dict[str, Any]) -> str:
+    """Generate a bounded Copilot readout for an extended quality summary."""
+    fallback_text = build_quality_summary_fallback(summary)
+    context = {
+        "scope": summary.get("scope"),
+        "start_date": summary.get("start_date"),
+        "end_date": summary.get("end_date"),
+        "table_name": summary.get("table_name"),
+        "check_counts": list(summary.get("check_counts") or [])[:10],
+        "alert_counts": list(summary.get("alert_counts") or [])[:10],
+        "table_counts": list(summary.get("table_counts") or [])[:10],
+        "registered_asset_count": summary.get("registered_asset_count", 0),
+        "rerun_suggestions": list(summary.get("rerun_suggestions") or [])[:5],
+    }
+    prompt = (
+        "Give a direct reliability assessment for this bounded weekly, table, or warehouse summary. "
+        "State the strongest observed risk, identify the most affected table when available, and give one safe next step. "
+        "Treat rerun candidates as advisory and approval-gated; never claim that a rerun was executed."
     )
 
     return run_copilot_task(prompt=prompt, context=context, fallback_text=fallback_text)

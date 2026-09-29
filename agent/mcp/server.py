@@ -37,6 +37,11 @@ from agent.tools.dbt_lineage import (
 from agent.tools.dq_history import fetch_dq_history
 from agent.tools.metadata_catalog import get_metadata_asset, search_metadata_assets
 from agent.tools.pipeline_runs import fetch_pipeline_runs
+from agent.tools.quality_summary import (
+    fetch_database_quality_summary,
+    fetch_table_quality_summary,
+    fetch_weekly_quality_summary,
+)
 from agent.tools.s3 import parse_s3_uri
 from pipelines.common.clickhouse import build_clickhouse_client
 from pipelines.common.logging import logger
@@ -126,6 +131,21 @@ MCP_TOOL_REGISTRY: tuple[McpToolSpec, ...] = (
         name="get_pipeline_runs",
         purpose="Fetch pipeline run status history around a business date.",
         audit_behavior="Audited by agent.tools.pipeline_runs.fetch_pipeline_runs.",
+    ),
+    McpToolSpec(
+        name="get_weekly_quality_summary",
+        purpose="Read one deterministic seven-day DQ, alert, metadata, and advisory-rerun summary.",
+        audit_behavior="Audited by agent.tools.quality_summary.fetch_quality_summary.",
+    ),
+    McpToolSpec(
+        name="get_table_quality_summary",
+        purpose="Read bounded DQ health and advisory rerun guidance for one qualified table.",
+        audit_behavior="Audited by agent.tools.quality_summary.fetch_quality_summary.",
+    ),
+    McpToolSpec(
+        name="get_database_quality_summary",
+        purpose="Read a bounded warehouse-wide quality and metadata summary without arbitrary SQL.",
+        audit_behavior="Audited by agent.tools.quality_summary.fetch_quality_summary.",
     ),
     McpToolSpec(
         name="run_triage",
@@ -514,6 +534,50 @@ def mcp_get_pipeline_runs(
     )
 
 
+def mcp_get_weekly_quality_summary(end_date: str) -> dict[str, Any]:
+    """Fetch one deterministic seven-day quality summary for MCP clients."""
+    logger.info("MCP get_weekly_quality_summary called | end_date=%s", end_date)
+    payload = fetch_weekly_quality_summary(end_date=end_date)
+    payload.pop("sql", None)
+
+    return payload
+
+
+def mcp_get_table_quality_summary(
+    table_name: str,
+    start_date: str,
+    end_date: str,
+) -> dict[str, Any]:
+    """Fetch one bounded per-table quality summary for MCP clients."""
+    logger.info(
+        "MCP get_table_quality_summary called | table=%s start=%s end=%s",
+        table_name,
+        start_date,
+        end_date,
+    )
+    payload = fetch_table_quality_summary(
+        table_name=table_name,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    payload.pop("sql", None)
+
+    return payload
+
+
+def mcp_get_database_quality_summary(start_date: str, end_date: str) -> dict[str, Any]:
+    """Fetch one bounded warehouse quality summary for MCP clients."""
+    logger.info(
+        "MCP get_database_quality_summary called | start=%s end=%s",
+        start_date,
+        end_date,
+    )
+    payload = fetch_database_quality_summary(start_date=start_date, end_date=end_date)
+    payload.pop("sql", None)
+
+    return payload
+
+
 def mcp_run_triage(
     alert_id: str | None = None,
     alert_key: str | None = None,
@@ -731,6 +795,9 @@ def register_mcp_tools(server: Any) -> Any:
     server.tool(name="get_dbt_blast_radius")(mcp_get_dbt_blast_radius)
     server.tool(name="get_dq_history")(mcp_get_dq_history)
     server.tool(name="get_pipeline_runs")(mcp_get_pipeline_runs)
+    server.tool(name="get_weekly_quality_summary")(mcp_get_weekly_quality_summary)
+    server.tool(name="get_table_quality_summary")(mcp_get_table_quality_summary)
+    server.tool(name="get_database_quality_summary")(mcp_get_database_quality_summary)
     server.tool(name="run_triage")(mcp_run_triage)
     server.tool(name="get_triage_skills")(mcp_get_triage_skills)
     server.tool(name="read_report_artifact")(mcp_read_report_artifact)

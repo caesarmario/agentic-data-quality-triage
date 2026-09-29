@@ -12,7 +12,8 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from agent.graph import build_hypotheses_for_state, build_report_from_state
+from agent.graph import build_approval_actions, build_hypotheses_for_state, build_report_from_state
+from agent.evaluation.life import action_safety_check
 from agent.llm.client import LlmResponse
 from agent.reasoning import hypotheses as hypothesis_reasoning
 from agent.reasoning.hypotheses import (
@@ -113,6 +114,136 @@ def build_structured_output() -> dict[str, object]:
             }
         ]
     }
+
+
+def build_segment_state() -> TriageState:
+    """Build a missing-segment state with downstream-only evidence."""
+    return TriageState(
+        alert=Alert(
+            alert_key=(
+                "orders|dq_failure|2026-09-22|dq.fct_orders_daily|"
+                "segment_coverage__country_channel|country_channel"
+            ),
+            severity="high",
+            table_name="dq.fct_orders_daily",
+            metric="segment_coverage__country_channel",
+            dt="2026-09-22",
+            observed_value=10,
+            expected_value=12,
+        ),
+        evidence=[
+            EvidenceItem(
+                evidence_id="EV-SEGMENT-COUNT",
+                evidence_type=EvidenceType.SQL_RESULT,
+                tool_name="clickhouse_sql",
+                description="Current segment count.",
+                query=(
+                    "SELECT count() FROM dq.fct_orders_daily "
+                    "WHERE dt = '2026-09-22' LIMIT 1"
+                ),
+                rows=[{"row_count": 10}],
+                summary="Two expected country and channel segments are missing.",
+            )
+        ],
+    )
+
+
+# --- Defining Partition Regeneration Safety Tests
+@pytest.mark.parametrize("keep_downstream_evidence", [False, True])
+def test_missing_segment_without_raw_loss_has_no_approval_action(keep_downstream_evidence: bool) -> None:
+    """Absent evidence and mart-only gaps must leave regeneration unapproved."""
+    state = build_segment_state()
+    if not keep_downstream_evidence:
+        state.evidence = []
+    state.hypotheses = build_hypotheses_for_state(state)
+    recommendation = state.hypotheses[0].recommended_action
+    report = build_report_from_state(state)
+
+    assert report.approval_gated_actions == []
+    assert report.hypotheses[0].recommended_action == recommendation
+    assert "Compare segment counts" in recommendation
+
+
+def raw_partition_evidence(query: str, rows: list[dict]) -> EvidenceItem:
+    """Build deterministic SQL evidence, deliberately without persuasive prose."""
+    return EvidenceItem(
+        evidence_type=EvidenceType.SQL_RESULT,
+        tool_name="clickhouse_sql",
+        description="Raw partition count.",
+        query=query,
+        rows=rows,
+    )
+
+
+@pytest.mark.parametrize("date_filter", ["'2026-09-22'", "toDate('2026-09-22')"])
+def test_missing_segment_with_corroborated_raw_loss_is_approval_gated(date_filter: str) -> None:
+    """Only a same-date empty raw partition corroborates partition regeneration."""
+    state = build_segment_state()
+    state.evidence.append(
+        raw_partition_evidence(
+            f"SELECT count() AS row_count FROM dq.raw_orders WHERE dt = {date_filter} LIMIT 1",
+            [{"row_count": 0}],
+        )
+    )
+    state.hypotheses = build_hypotheses_for_state(state)
+    report = build_report_from_state(state)
+
+    assert len(report.approval_gated_actions) == 1
+    assert report.approval_gated_actions[0].action_type.value == "backfill"
+    assert report.approval_gated_actions[0].requires_approval is True
+    assert "raw partition" in report.approval_gated_actions[0].reason
+    assert action_safety_check(report.model_dump(mode="json")).status == "pass"
+
+
+# Wrong-date, filtered, downstream, and malformed counts cannot authorize repair.
+@pytest.mark.parametrize(
+    "query,rows",
+    [
+        ("SELECT count() FROM dq.raw_orders WHERE dt = '2026-09-21' LIMIT 1", [{"row_count": 0}]),
+        (
+            "SELECT count() FROM dq.raw_orders WHERE dt = '2026-09-22' AND country = 'ID' LIMIT 1",
+            [{"row_count": 0}],
+        ),
+        ("SELECT count() FROM dq.stg_orders WHERE dt = '2026-09-22' LIMIT 1", [{"row_count": 0}]),
+        ("SELECT count(customer_id) FROM dq.raw_orders WHERE dt = '2026-09-22' LIMIT 1", [{"row_count": 0}]),
+        ("SELECT count() FROM dq.raw_orders WHERE dt = '2026-09-22' LIMIT 1", []),
+        ("SELECT count() FROM dq.raw_orders WHERE dt = '2026-09-22' LIMIT 1", [{}]),
+        ("SELECT count() FROM dq.raw_orders WHERE dt = '2026-09-22' LIMIT 1", [{"row_count": False}]),
+        ("SELECT count() FROM dq.raw_orders WHERE dt = '2026-09-22' LIMIT 1", [{"row_count": "0"}]),
+        ("SELECT count() FROM dq.raw_orders WHERE dt = '2026-09-22' LIMIT 1", [{"row_count": -1}]),
+        ("SELECT count() FROM dq.raw_orders WHERE dt = '2026-09-22' LIMIT 1", [{"row_count": 500}]),
+    ],
+)
+def test_missing_segment_rejects_noncorroborating_raw_evidence(query: str, rows: list[dict]) -> None:
+    """Require a same-date whole-partition count with one valid zero row."""
+    state = build_segment_state()
+    state.evidence.append(raw_partition_evidence(query, rows))
+    hypothesis = build_hypotheses_for_state(state)[0]
+
+    assert build_approval_actions(state, hypothesis) == []
+
+
+def test_missing_segment_rejects_conflicting_raw_counts() -> None:
+    """A healthy raw observation must not be ignored in favor of an empty one."""
+    state = build_segment_state()
+    query = "SELECT count() FROM dq.raw_orders WHERE dt = '2026-09-22' LIMIT 1"
+    state.evidence.extend(raw_partition_evidence(query, [{"row_count": count}]) for count in (0, 500))
+
+    assert build_approval_actions(state, build_hypotheses_for_state(state)[0]) == []
+
+
+@pytest.mark.parametrize("category", ["missing_partition", "freshness_gap", "late_arriving"])
+def test_existing_partition_backfill_categories_remain_unchanged(category: str) -> None:
+    """The new corroboration gate applies only to missing-segment actions."""
+    state = build_segment_state()
+    state.evidence = []
+    hypothesis = build_hypotheses_for_state(state)[0].model_copy(update={"root_cause_category": category})
+    actions = build_approval_actions(state, hypothesis)
+
+    assert len(actions) == 1
+    assert actions[0].action_type.value == "backfill"
+    assert actions[0].requires_approval is True
+    assert actions[0].parameters["run_seed"] is True
 
 
 # --- Defining Contract Tests

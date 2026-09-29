@@ -9,6 +9,9 @@ import { browserCapability, browserRequestError, readBoundedBody, MAX_REQUEST_BY
 // --- Exercising Exact Route Boundaries
 for (const [method, path, expected] of [
   ['GET', 'api/v1/alerts', 'read'],
+  ['GET', 'api/v1/summaries/weekly', 'read'],
+  ['GET', 'api/v1/summaries/table', 'read'],
+  ['GET', 'api/v1/summaries/database', 'read'],
   ['GET', 'api/v1/reports/read', 'read'],
   ['GET', 'api/v1/metadata/assets/dq.raw_orders', 'read'],
   ['POST', 'api/v1/triage/run', 'triage'],

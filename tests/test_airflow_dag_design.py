@@ -30,6 +30,7 @@ TRIGGERED_DAG_FILES = [
     "30_dag_dq_orders_quality_alerts.py",
     "40_dag_dq_orders_triage_agent.py",
     "90_dag_dq_platform_backfill_dispatcher.py",
+    "90_02_dag_dq_platform_approved_actions.py",
     "91_dag_dq_platform_validation.py",
     "92_dag_dq_llm_provider_smoke.py",
     "93_dag_dq_agent_checkpoint_smoke.py",
@@ -120,6 +121,7 @@ def test_platform_dag_numbering_matches_operational_flow() -> None:
         "30_dag_dq_orders_quality_alerts",
         "40_dag_dq_orders_triage_agent",
         "90_dag_dq_platform_backfill_dispatcher",
+        "90_02_dag_dq_platform_approved_actions",
         "91_dag_dq_platform_validation",
         "92_dag_dq_llm_provider_smoke",
         "93_dag_dq_agent_checkpoint_smoke",
@@ -170,6 +172,27 @@ def test_validation_dag_is_manual_bounded_and_auditable() -> None:
     assert '"require_web": Param(' in content
     assert "--require-web" in content
     assert "arbitrary" not in content.lower()
+
+
+def test_approved_action_dag_is_manual_exact_scope_and_retry_free() -> None:
+    """Ensure side effects require one durable request and never auto-retry."""
+    content = read_dag_file("90_02_dag_dq_platform_approved_actions.py")
+
+    assert 'DAG_ID = "90_02_dag_dq_platform_approved_actions"' in content
+    assert "schedule=None" in content
+    assert "max_active_runs=1" in content
+    assert "default_dag_args(retries=0)" in content
+    assert 'task_id="t10_preview_or_execute"' in content
+    assert '"approval_request_id": Param(' in content
+    assert '"dry_run": Param(' in content
+    assert "target_dag_id" not in approved_action_params_source(content)
+
+
+def approved_action_params_source(content: str) -> str:
+    """Return only the approved-action parameter function for scope checks."""
+    start = content.index("def approved_action_params")
+    end = content.index("# --- Defining DAG Structure")
+    return content[start:end]
 
 
 def test_quality_dag_observes_schema_drift_before_data_checks_and_alert_delivery() -> None:

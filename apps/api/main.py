@@ -56,6 +56,11 @@ from agent.tools.dq_history import fetch_dq_history
 from agent.tools.life_history import LifeEvaluationHistoryResult, list_life_evaluation_history
 from agent.tools.metadata_catalog import get_metadata_asset, search_metadata_assets
 from agent.tools.pipeline_runs import fetch_pipeline_runs
+from agent.tools.quality_summary import (
+    fetch_database_quality_summary,
+    fetch_table_quality_summary,
+    fetch_weekly_quality_summary,
+)
 from apps.api.schemas import (
     AlertListResponse,
     AlertResponse,
@@ -80,6 +85,7 @@ from apps.api.schemas import (
     MetadataAssetListResponse,
     MetadataAssetResponse,
     PipelineRunEvidenceResponse,
+    QualitySummaryResponse,
     ReportArtifactResponse,
     TriageRunRequest,
     TriageRunResponse,
@@ -784,6 +790,58 @@ def api_get_daily_summary(
         payload = fetch_daily_quality_summary(dt=dt)
 
         return DailySummaryResponse.model_validate(payload)
+
+    except Exception as exc:
+        raise_api_error(exc)
+
+
+@app.get("/api/v1/summaries/weekly", response_model=QualitySummaryResponse)
+def api_get_weekly_summary(
+    end_date: str = Query(description="Inclusive end date for the seven-day quality window."),
+) -> QualitySummaryResponse:
+    """Return a deterministic seven-day warehouse quality summary."""
+    try:
+        payload = fetch_weekly_quality_summary(end_date=end_date)
+
+        return QualitySummaryResponse.model_validate(payload)
+
+    except Exception as exc:
+        raise_api_error(exc)
+
+
+@app.get("/api/v1/summaries/table", response_model=QualitySummaryResponse)
+def api_get_table_summary(
+    table_name: str = Query(description="Qualified schema.table warehouse asset."),
+    start_date: str = Query(description="Inclusive summary start date."),
+    end_date: str = Query(description="Inclusive summary end date."),
+) -> QualitySummaryResponse:
+    """Return a deterministic bounded summary for one warehouse table."""
+    try:
+        payload = fetch_table_quality_summary(
+            table_name=table_name,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        return QualitySummaryResponse.model_validate(payload)
+
+    except Exception as exc:
+        raise_api_error(exc)
+
+
+@app.get("/api/v1/summaries/database", response_model=QualitySummaryResponse)
+def api_get_database_summary(
+    start_date: str = Query(description="Inclusive summary start date."),
+    end_date: str = Query(description="Inclusive summary end date."),
+) -> QualitySummaryResponse:
+    """Return a bounded warehouse-wide quality and metadata summary."""
+    try:
+        payload = fetch_database_quality_summary(
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        return QualitySummaryResponse.model_validate(payload)
 
     except Exception as exc:
         raise_api_error(exc)

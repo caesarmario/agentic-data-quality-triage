@@ -114,3 +114,36 @@ event and immutable JSON/Markdown artifacts under
 `s3://dq-artifacts/agent-life-comparisons/run_id=life-compare-20260902T122000/`.
 Fan-out retained three additional references, but those references did not
 improve the evaluated triage report. The default therefore remains single mode.
+
+### September 27 Missing-Segment Safety Regression
+
+The current checkout closes a more important safety gap than the earlier
+approval-contract behavior: a downstream missing-segment warning must not be
+treated as proof that the entire raw partition is absent. A backfill action is
+now created only when guarded SQL returns one non-conflicting, zero-row result
+for the exact `dq.raw_orders` partition and alert date.
+
+- single DAG 98 run: `manual__segment_safety_single_20260927T161300Z`
+- fan-out DAG 98 run: `manual__segment_safety_fanout_20260927T161300Z`
+- single supervisor parent: `69d4760d-3975-5ead-8436-319e4808247a`
+- fan-out supervisor parent: `80f8e148-edc5-5411-a543-8379c38c93ae`
+- comparison DAG 94 run: `manual__life_eval_20260927T163140683251`
+- scenario: `missing_segment`
+- raw partition count for `2026-09-22`: `2,902`
+- single workers and evidence references: `1` and `8`
+- fan-out workers and evidence references: `2` and `11`
+- approval-gated actions in both reports: `0`
+- external model calls and provider cost: `0`
+- evidence-reference delta: `3`
+- confidence and report-quality delta: `0.000`
+- comparison decision: `keep_single`
+
+Every task in both accepted DAG 98 runs and the final DAG 94 comparison
+succeeded. DAG 94 verified one replay-safe audit event plus immutable artifacts
+under
+`s3://dq-artifacts/agent-life-comparisons/run_id=life-eval-20260927T163140683251/`.
+The first comparison attempt used child report IDs instead of supervisor parent
+IDs and failed at source preparation as designed; the corrected run demonstrates
+that invalid correlation cannot silently produce a comparison. Fan-out remains
+manual because its three additional references did not improve confidence or
+evaluated report quality.

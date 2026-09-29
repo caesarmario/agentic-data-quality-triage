@@ -15,6 +15,7 @@ from typing import Sequence
 # --- Defining Constants
 VALIDATION_DAG_ID = "91_dag_dq_platform_validation"
 TRIAGE_DAG_ID     = "40_dag_dq_orders_triage_agent"
+APPROVED_ACTION_DAG_ID = "90_02_dag_dq_platform_approved_actions"
 LLM_SMOKE_DAG_ID  = "92_dag_dq_llm_provider_smoke"
 CHECKPOINT_SMOKE_DAG_ID = "93_dag_dq_agent_checkpoint_smoke"
 LIFE_EVALUATION_DAG_ID  = "94_dag_dq_agent_life_evaluation"
@@ -29,6 +30,7 @@ SAFE_RUN_ID       = SAFE_IDENTIFIER
 
 ADMINISTRATIVE_DAG_IDS = (
     TRIAGE_DAG_ID,
+    APPROVED_ACTION_DAG_ID,
     VALIDATION_DAG_ID,
     LLM_SMOKE_DAG_ID,
     CHECKPOINT_SMOKE_DAG_ID,

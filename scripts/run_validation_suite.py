@@ -72,6 +72,7 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
     ),
     "api": (
         "tests/test_daily_summary_tool.py",
+        "tests/test_quality_summary_tool.py",
         "tests/test_api_app.py",
         "tests/test_control_plane_client.py",
         "tests/test_smoke_readiness.py",
@@ -87,6 +88,7 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_control_plane_client.py",
         "tests/test_copilot_narratives.py",
         "tests/test_daily_summary_tool.py",
+        "tests/test_quality_summary_tool.py",
         "tests/test_discord_bot.py",
         "tests/test_discord_formatters.py",
         "tests/test_discord_webhook.py",
@@ -111,6 +113,7 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_validation_suite.py",
     ),
     "mcp": (
+        "tests/test_quality_summary_tool.py",
         "tests/test_mcp_server.py",
     ),
     "metadata": (

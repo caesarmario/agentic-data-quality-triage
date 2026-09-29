@@ -130,7 +130,11 @@ VALIDATION_RUN_ID ?=
 REQUIRE_API ?= false
 REQUIRE_WEB ?= false
 REQUIRE_WEB_REPORT ?= false
+APPROVED_ACTION_REQUEST_ID ?=
+APPROVED_ACTION_RUN_ID ?=
+APPROVED_ACTION_EXECUTE ?= false
 TRIAGE_DAG_ID := 40_dag_dq_orders_triage_agent
+APPROVED_ACTION_DAG_ID := 90_02_dag_dq_platform_approved_actions
 VALIDATION_DAG_ID := 91_dag_dq_platform_validation
 LLM_SMOKE_DAG_ID := 92_dag_dq_llm_provider_smoke
 CHECKPOINT_SMOKE_DAG_ID := 93_dag_dq_agent_checkpoint_smoke
@@ -176,6 +180,9 @@ help:
 	echo "  make airflow-triage AIRFLOW_TRIAGE_ACTION=inspect AIRFLOW_TRIAGE_NAMESPACE=... Inspect checkpoint history"
 	echo "  make airflow-triage AIRFLOW_TRIAGE_ACTION=replay AIRFLOW_TRIAGE_NAMESPACE=... AIRFLOW_TRIAGE_CHECKPOINT_ID=... Replay checkpoint"
 	echo "  make airflow-triage-logs AIRFLOW_TRIAGE_RUN_ID=... Show retained triage task logs"
+	echo "  make approval-control-init Apply the transactional approval schema"
+	echo "  make airflow-approved-action APPROVED_ACTION_REQUEST_ID=... Preview an exact-scope action"
+	echo "  make airflow-approved-action APPROVED_ACTION_REQUEST_ID=... APPROVED_ACTION_EXECUTE=true Execute an approved action"
 	echo "  make airflow-validate VALIDATION_SUITE=all Trigger manual Airflow validation"
 	echo "  make airflow-validation-runs List validation DagRuns"
 	echo "  make airflow-validation-tasks VALIDATION_RUN_ID=... Show task states"
@@ -387,6 +394,35 @@ airflow-triage-logs:
 		--run-id "$(AIRFLOW_TRIAGE_RUN_ID)"
 
 # --- Code And Platform Validation
+.PHONY: approval-control-init
+approval-control-init:
+	$(DC) run --rm approval-control-init
+
+.PHONY: airflow-approved-action
+airflow-approved-action:
+	$(if $(strip $(APPROVED_ACTION_REQUEST_ID)),,$(error APPROVED_ACTION_REQUEST_ID is required))
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/trigger_airflow_approved_action.py \
+		--request-id "$(APPROVED_ACTION_REQUEST_ID)" \
+		$(if $(strip $(APPROVED_ACTION_RUN_ID)),--run-id "$(APPROVED_ACTION_RUN_ID)",) \
+		$(if $(filter true 1 yes,$(APPROVED_ACTION_EXECUTE)),--execute,)
+
+.PHONY: airflow-approved-action-runs
+airflow-approved-action-runs:
+	$(DC) exec -T $(AIRFLOW_WEB) airflow dags list-runs -o table $(APPROVED_ACTION_DAG_ID)
+
+.PHONY: airflow-approved-action-tasks
+airflow-approved-action-tasks:
+	$(if $(strip $(APPROVED_ACTION_RUN_ID)),,$(error APPROVED_ACTION_RUN_ID is required))
+	$(DC) exec -T $(AIRFLOW_WEB) airflow tasks states-for-dag-run \
+		-o table $(APPROVED_ACTION_DAG_ID) "$(APPROVED_ACTION_RUN_ID)"
+
+.PHONY: airflow-approved-action-logs
+airflow-approved-action-logs:
+	$(if $(strip $(APPROVED_ACTION_RUN_ID)),,$(error APPROVED_ACTION_RUN_ID is required))
+	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/read_airflow_validation_logs.py \
+		--dag-id $(APPROVED_ACTION_DAG_ID) \
+		--run-id "$(APPROVED_ACTION_RUN_ID)"
+
 .PHONY: airflow-validate
 airflow-validate:
 	$(DC) exec -T $(AIRFLOW_WEB) python /opt/airflow/project/scripts/trigger_airflow_validation.py \

@@ -471,7 +471,8 @@ def test_fanout_becomes_candidate_only_when_report_quality_improves() -> None:
     """
     single_score = score(
         eval_status="review",
-        failed_checks=["confidence"],
+        failed_checks=["expected_evidence"],
+        expected_evidence_status="review",
         confidence=0.65,
     )
     fanout_score = score(eval_status="pass", confidence=0.80)
@@ -485,7 +486,92 @@ def test_fanout_becomes_candidate_only_when_report_quality_improves() -> None:
 
     assert decision == "fanout_candidate"
     assert benefit is True
-    assert any("LIFE status improved" in reason for reason in reasons)
+    assert any("Independent report checks improved: expected_evidence" in reason for reason in reasons)
+
+
+@pytest.mark.parametrize("crosses_threshold", [False, True])
+def test_confidence_alone_cannot_promote_fanout(crosses_threshold: bool) -> None:
+    """Increasing certainty, even across the LIFE threshold, is not correctness."""
+    baseline = score(eval_status="review" if crosses_threshold else "pass",
+                     failed_checks=["confidence"] if crosses_threshold else [], confidence=0.65)
+    decision, benefit, reasons = decide_comparison(snapshot("single"), snapshot("fanout"), baseline, score(confidence=0.95))
+    assert decision == "keep_single"
+    assert not benefit
+    assert any("not quality evidence" in reason for reason in reasons)
+
+
+def test_provider_availability_alone_cannot_promote_fanout() -> None:
+    """Removing LLM fallback does not prove a more correct investigation."""
+    single = score(eval_status="review").model_copy(
+        update={
+            "check_statuses": {
+                "report_contract": "pass",
+                "expected_evidence": "pass",
+                "confidence": "pass",
+                "llm_fallback": "review",
+            },
+            "failed_checks": ["llm_fallback"],
+            "total_check_count": 4,
+        }
+    )
+    fanout = score().model_copy(
+        update={
+            "check_statuses": {
+                "report_contract": "pass",
+                "expected_evidence": "pass",
+                "confidence": "pass",
+                "llm_fallback": "pass",
+            },
+            "total_check_count": 4,
+        }
+    )
+
+    decision, benefit, _ = decide_comparison(
+        snapshot("single"),
+        snapshot("fanout"),
+        single,
+        fanout,
+    )
+
+    assert decision == "keep_single"
+    assert not benefit
+
+
+def test_removing_checks_cannot_improve_comparison() -> None:
+    """A truncated evaluator must not hide a regression by dropping a check."""
+    reduced = score().model_copy(update={"check_statuses": {"confidence": "pass"}})
+    decision, benefit, _ = decide_comparison(snapshot("single"), snapshot("fanout"), score(), reduced)
+    assert decision == "insufficient_evidence"
+    assert not benefit
+
+
+def test_failed_baseline_is_not_a_quality_control() -> None:
+    """Require a completed baseline before comparing another execution mode."""
+    baseline = snapshot("single").model_copy(update={"terminal_status": "failed"})
+    decision, benefit, _ = decide_comparison(baseline, snapshot("fanout"), score(), score())
+    assert decision == "insufficient_evidence"
+    assert not benefit
+
+
+@pytest.mark.parametrize("identity", [ALERT_KEY, "orders|system-key"])
+def test_source_report_accepts_exact_retained_system_or_display_identity(identity: str) -> None:
+    """Both identifier forms must resolve to the exact persisted report alert."""
+    report = {"alert": {"alert_key": "orders|system-key", "alert_display_id": ALERT_KEY,
+                        "table_name": "dq.fct_orders_daily"}}
+    comparison.validate_source_report_identity(snapshot("single").model_copy(update={"alert_key": identity}), report)
+
+
+@pytest.mark.parametrize("report", [
+    {},
+    {"alert": {"alert_key": "unrelated", "table_name": "dq.fct_orders_daily"}},
+    {"alert": {"alert_display_id": ALERT_KEY, "table_name": "dq.other"}},
+    {"agent_run_id": "other-run", "alert": {"alert_display_id": ALERT_KEY, "table_name": "dq.fct_orders_daily"}},
+])
+def test_source_report_rejects_missing_or_conflicting_identity(report: dict) -> None:
+    """A valid report for another investigation cannot satisfy this comparison."""
+    baseline = snapshot("single").model_copy(update={"report_s3_uri": "s3://dq-artifacts/agent_run_id=expected-run/report.json"})
+    with pytest.raises(ValueError):
+        comparison.validate_source_report_identity(baseline, report)
 
 
 def test_missing_report_score_is_insufficient_evidence() -> None:

@@ -22,9 +22,12 @@ LEGACY_COMMANDS = {
     "approve",
     "ask",
     "backfill_preview",
+    "db_summary",
     "daily_summary",
     "reject",
+    "table_summary",
     "triage",
+    "weekly_summary",
 }
 
 GROUPED_COMMANDS  = {f"dq {command}" for command in LEGACY_COMMANDS}
@@ -116,7 +119,7 @@ def test_smoke_cli_reports_configuration_without_connecting(monkeypatch, capsys)
 
     assert return_code == 0
     assert '"status": "ready"' in output
-    assert '"registered_command_count": 14' in output
+    assert f'"registered_command_count": {len(EXPECTED_COMMANDS)}' in output
     assert '"message_content_intent_enabled": false' in output
     assert environment["DISCORD_BOT_TOKEN"] not in output
     assert environment["CONTROL_PLANE_APPROVAL_TOKEN"] not in output
@@ -398,6 +401,83 @@ def test_fetch_discord_daily_summary_does_not_hide_contract_failure(monkeypatch)
 
     with pytest.raises(ControlPlaneResponseError):
         service.fetch_discord_daily_summary("2026-06-10")
+
+
+@pytest.mark.parametrize(
+    ("service_name", "client_name", "local_name", "args"),
+    [
+        (
+            "fetch_discord_weekly_summary",
+            "get_weekly_summary",
+            "fetch_weekly_quality_summary",
+            ("2026-06-10",),
+        ),
+        (
+            "fetch_discord_table_summary",
+            "get_table_summary",
+            "fetch_table_quality_summary",
+            ("dq.fct_orders_daily", "2026-06-04", "2026-06-10"),
+        ),
+        (
+            "fetch_discord_database_summary",
+            "get_database_summary",
+            "fetch_database_quality_summary",
+            ("2026-06-04", "2026-06-10"),
+        ),
+    ],
+)
+def test_extended_discord_summaries_use_api_and_only_transport_fallback(
+    monkeypatch,
+    service_name: str,
+    client_name: str,
+    local_name: str,
+    args: tuple[str, ...],
+) -> None:
+    """Ensure extended summaries share API-first, contract-safe fallback behavior."""
+    expected = {"scope": "bounded", "sql": "internal"}
+
+    class ApiClient:
+        """Dynamic summary API test double."""
+
+        def __getattr__(self, name: str):
+            """Return the selected API method and reject unexpected names."""
+            if name != client_name:
+                raise AttributeError(name)
+
+            return lambda *call_args, **kwargs: expected
+
+    monkeypatch.setattr(service, "build_control_plane_client", lambda **kwargs: ApiClient())
+    monkeypatch.setattr(
+        service,
+        local_name,
+        lambda **kwargs: pytest.fail("Local summary tool should not run when API succeeds."),
+    )
+
+    payload, transport = getattr(service, service_name)(*args)
+
+    assert payload == expected
+    assert transport == "api"
+
+    class UnavailableClient(ApiClient):
+        """Transport-failing summary API test double."""
+
+        def __getattr__(self, name: str):
+            """Raise a transport error for the selected API method."""
+            if name != client_name:
+                raise AttributeError(name)
+
+            return lambda *call_args, **kwargs: (_ for _ in ()).throw(
+                ControlPlaneTransportError("network unavailable")
+            )
+
+    local_payload = {"scope": "bounded", "sql": "internal"}
+    monkeypatch.setattr(service, "build_control_plane_client", lambda **kwargs: UnavailableClient())
+    monkeypatch.setattr(service, local_name, lambda **kwargs: dict(local_payload))
+
+    payload, transport = getattr(service, service_name)(*args)
+
+    assert payload == {"scope": "bounded"}
+    assert transport == "local"
 
 
 def test_answer_discord_question_uses_api_correlation(monkeypatch) -> None:

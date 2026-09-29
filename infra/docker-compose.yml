@@ -36,6 +36,7 @@ x-app-env: &app-env
   AGENT_CHECKPOINT_SQLITE_PATH: ${AGENT_CHECKPOINT_SQLITE_PATH:-/var/lib/agent-checkpoints/triage.sqlite3}
   AGENT_CHECKPOINT_BUSY_TIMEOUT_MS: ${AGENT_CHECKPOINT_BUSY_TIMEOUT_MS:-5000}
   LANGGRAPH_STRICT_MSGPACK: ${LANGGRAPH_STRICT_MSGPACK:-true}
+  DQ_CONTROL_DATABASE_URL: ${DQ_CONTROL_DATABASE_URL:-postgresql://airflow:airflow@airflow-postgres:5432/airflow}
 
 # --- Defining Python Runner Template
 x-python-runner: &python-runner
@@ -55,6 +56,8 @@ x-python-runner: &python-runner
       condition: service_healthy
     s3-init:
       condition: service_completed_successfully
+    approval-control-init:
+      condition: service_completed_successfully
   command:
     - /bin/sh
     - -lc
@@ -65,7 +68,12 @@ x-python-runner: &python-runner
 
 # --- Defining Airflow Service Template
 x-airflow-common: &airflow-common
-  image: apache/airflow:${AIRFLOW_VERSION:-3.1.7}
+  image: ${AIRFLOW_IMAGE:-agentic-dq-airflow:local}
+  build:
+    context: ..
+    dockerfile: infra/docker/airflow/Dockerfile
+    args:
+      AIRFLOW_VERSION: ${AIRFLOW_VERSION:-3.1.7}
   env_file: *env-file
   user: "${AIRFLOW_UID:-50000}:0"
   environment:
@@ -97,6 +105,8 @@ x-airflow-common: &airflow-common
       condition: service_healthy
     airflow-redis:
       condition: service_healthy
+    approval-control-init:
+      condition: service_completed_successfully
   restart: unless-stopped
 
 # --- Defining Services
@@ -462,6 +472,33 @@ services:
       retries: 10
       start_period: 30s
     restart: unless-stopped
+
+  # --- Initializing Transactional Approval Control Store
+  approval-control-init:
+    image: postgres:16-alpine
+    container_name: dq_approval_control_init
+    env_file: *env-file
+    environment:
+      PGPASSWORD: ${AIRFLOW_POSTGRES_PASSWORD:-airflow}
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    volumes:
+      - ./init/postgres:/bootstrap:ro
+    entrypoint: ["/bin/sh", "-lc"]
+    command:
+      - |
+        set -eu
+        for file in /bootstrap/*.sql; do
+          echo "[approval-control-init] applying $${file}"
+          psql \
+            --host airflow-postgres \
+            --username "${AIRFLOW_POSTGRES_USER:-airflow}" \
+            --dbname airflow \
+            --set ON_ERROR_STOP=1 \
+            --file "$${file}"
+        done
+    restart: "no"
 
   discord-bot:
     <<: *python-runner

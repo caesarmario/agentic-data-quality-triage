@@ -18,6 +18,7 @@ from apps.discord_bot.formatters import (
     format_backfill_preview,
     format_daily_summary,
     format_operator_answer,
+    format_quality_summary,
     format_triage_result,
     split_message,
     trim_message,
@@ -288,6 +289,50 @@ def test_format_daily_summary_includes_copilot_readout() -> None:
     assert "Alert Risk" in message
     assert "Copilot Analysis" in message
     assert "needs investigation" in message
+    assert "Data Transport `api`" in message
+    assert DISCORD_SEPARATOR in message
+
+
+def test_format_quality_summary_is_readable_and_keeps_rerun_advisory() -> None:
+    """Validate that extended summaries clearly separate evidence from action."""
+    message = format_quality_summary(
+        payload={
+            "scope": "table",
+            "start_date": "2026-06-04",
+            "end_date": "2026-06-10",
+            "table_name": "dq.fct_orders_daily",
+            "check_counts": [{"status": "fail", "count": 2}],
+            "alert_counts": [{"severity": "critical", "count": 1}],
+            "registered_asset_count": 1,
+            "table_counts": [
+                {
+                    "table_name": "dq.fct_orders_daily",
+                    "failed_checks": 2,
+                    "critical_alerts": 1,
+                }
+            ],
+            "rerun_suggestions": [
+                {
+                    "target_dag_id": "20_dag_dq_orders_dbt_transform",
+                    "affected_tables": ["dq.fct_orders_daily"],
+                    "mode": "advisory_only",
+                    "requires_approval": True,
+                }
+            ],
+        },
+        assistant_note="The mart needs investigation before reporting can be trusted.",
+        data_transport="api",
+    )
+
+    assert "DQ Table Summary" in message
+    assert "Quick Read" in message
+    assert "Copilot Analysis" in message
+    assert "Most Affected Tables" in message
+    assert "Manual Rerun Guidance" in message
+    assert "advisory candidates only" in message
+    assert "Nothing has been executed" in message
+    assert "explicit approval is still required" in message
+    assert "20_dag_dq_orders_dbt_transform" in message
     assert "Data Transport `api`" in message
     assert DISCORD_SEPARATOR in message
 

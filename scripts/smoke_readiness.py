@@ -71,6 +71,10 @@ DEFAULT_API_DAILY_SUMMARY_URL = os.getenv(
     "CONTROL_PLANE_API_DAILY_SUMMARY_URL",
     "http://api:8000/api/v1/summaries/daily?dt=2026-06-10",
 )
+DEFAULT_API_DATABASE_SUMMARY_URL = os.getenv(
+    "CONTROL_PLANE_API_DATABASE_SUMMARY_URL",
+    "http://api:8000/api/v1/summaries/database?start_date=2026-06-04&end_date=2026-06-10",
+)
 DEFAULT_API_LIFE_HISTORY_URL = os.getenv(
     "CONTROL_PLANE_API_LIFE_HISTORY_URL",
     "http://api:8000/api/v1/evaluations/life?lookback_days=30&limit=1",
@@ -348,8 +352,8 @@ def check_control_plane_api(
         opener: urllib-compatible opener injected by tests.
 
     Returns:
-        Health, daily summary, LIFE history, incident history, metadata, and
-        blast-radius checks.
+        Health, daily and database summaries, LIFE history, incident history,
+        metadata, and blast-radius checks.
     """
     logger.info(
         "Checking control-plane API health, daily summary, LIFE history, incident history, metadata, and dbt blast-radius routes"
@@ -365,6 +369,12 @@ def check_control_plane_api(
         check_http_service(
             service_name="control-plane-daily-summary",
             url=DEFAULT_API_DAILY_SUMMARY_URL,
+            timeout_seconds=timeout_seconds,
+            opener=opener,
+        ),
+        check_http_service(
+            service_name="control-plane-database-summary",
+            url=DEFAULT_API_DATABASE_SUMMARY_URL,
             timeout_seconds=timeout_seconds,
             opener=opener,
         ),
