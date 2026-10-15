@@ -1,0 +1,294 @@
+{
+  "schemaVersion": 1,
+  "policy": "Actual retained UI only. No mockups, synthesized UI, new provider call, or source repair. Cross-session evidence is not one autonomous run.",
+  "privateSource": "Owner-retained visualization directory, supplied via --captures; originals intentionally excluded.",
+  "assets": [
+    {
+      "id": "discord-inbox",
+      "source": "discord-new-server-live-20261014.jpg",
+      "crop": [
+        455,
+        468,
+        521,
+        545
+      ],
+      "sourceSha256": "a7fd9b2e53cc0981150896aeb0769a6dc5b52275af55a4f57190544d71911edf",
+      "path": "docs/images/demo-refresh-discord-inbox.png",
+      "sha256": "726f3e5591a737f13812ec16c164c21cb1720c067df79bf0a9d962449c0b7a6a",
+      "width": 521,
+      "height": 545,
+      "treatment": "Crop only. Original evidence text preserved.",
+      "label": "Recorded UI",
+      "inspectedBeforeUse": true
+    },
+    {
+      "id": "help",
+      "source": "datasentry-help-english-desktop.jpg",
+      "crop": [
+        455,
+        520,
+        484,
+        431
+      ],
+      "sourceSha256": "4881d65cb24a537e54ed556cf8aa121efd93842c14cf9ddec82320c90fca99a8",
+      "path": "docs/images/demo-refresh-help.png",
+      "sha256": "ce4a33612c2a0a3029236a0f01b8987cf57c8c84b8d350ae6f6abd158736fb95",
+      "width": 484,
+      "height": 431,
+      "treatment": "Crop only. Original evidence text preserved.",
+      "label": "Recorded UI",
+      "inspectedBeforeUse": true
+    },
+    {
+      "id": "resolved",
+      "source": "discord-resolved-dq-20261012.jpg",
+      "crop": [
+        456,
+        293,
+        520,
+        531
+      ],
+      "mask": [
+        12,
+        337,
+        230,
+        17
+      ],
+      "sourceSha256": "9f8801adbf3b1605a554168467434c395ffbf959e7121c0306042a1908881cad",
+      "path": "docs/images/demo-refresh-resolved.png",
+      "sha256": "6f84026e750a1c5b8eb50b76540cff395fecab51db5145b89a55dcf4124e1cbb",
+      "width": 520,
+      "height": 531,
+      "treatment": "Crop; opaque operator-name redaction only. Evidence unchanged.",
+      "label": "Recorded UI",
+      "inspectedBeforeUse": true
+    },
+    {
+      "id": "workspace",
+      "source": "discord-grounded-followup-20261012.jpg",
+      "crop": [
+        456,
+        669,
+        328,
+        202
+      ],
+      "sourceSha256": "460db49918806fe415063d30748147cba682bf97504648d1f00a3f5ec33e4b0c",
+      "path": "docs/images/demo-refresh-workspace.png",
+      "sha256": "bb6d26d511e88685633bbcb588e1f10c4e877044f6f61372bca36dae3d3714d2",
+      "width": 328,
+      "height": 202,
+      "treatment": "Crop only. Original evidence text preserved.",
+      "label": "Recorded UI",
+      "inspectedBeforeUse": true
+    },
+    {
+      "id": "gemini-answer",
+      "source": "discord-grounded-followup-20261012.jpg",
+      "crop": [
+        918,
+        560,
+        354,
+        340
+      ],
+      "sourceSha256": "460db49918806fe415063d30748147cba682bf97504648d1f00a3f5ec33e4b0c",
+      "path": "docs/images/demo-refresh-gemini-answer.png",
+      "sha256": "117f114c39c6f0fb636b24cd6479524ade39decff99c59d673ce1002780d6e83",
+      "width": 354,
+      "height": 340,
+      "treatment": "Crop only. Original evidence text preserved.",
+      "label": "Recorded Gemini analysis",
+      "inspectedBeforeUse": true
+    },
+    {
+      "id": "gemini-investigation",
+      "source": "discord-grounded-followup-20261012.jpg",
+      "crop": [
+        456,
+        190,
+        328,
+        332
+      ],
+      "sourceSha256": "460db49918806fe415063d30748147cba682bf97504648d1f00a3f5ec33e4b0c",
+      "path": "docs/images/demo-refresh-gemini-investigation.png",
+      "sha256": "d1778f3e74daebfaa8b447044b070845c616e7dbd9ff623eb12e37c1d95302c3",
+      "width": 328,
+      "height": 332,
+      "treatment": "Crop only. Original evidence text preserved.",
+      "label": "Recorded Gemini analysis",
+      "inspectedBeforeUse": true
+    },
+    {
+      "id": "gemini-report-summary",
+      "source": "streamlit-recorded-gemini-investigation-20261015.jpg",
+      "crop": [
+        399,
+        149,
+        775,
+        187
+      ],
+      "sourceSha256": "11ba6d8a74eac90b0c8bd2ebbf336cf1c91135f903ea68b3488831cf968538e7",
+      "path": "docs/images/demo-refresh-gemini-report-summary.png",
+      "sha256": "5c4e5ed53bce770b3877b680c773f27c6efc1788897a523f4d4f16eda485d9b4",
+      "width": 775,
+      "height": 187,
+      "treatment": "Crop only. Original evidence text preserved.",
+      "label": "Recorded Gemini analysis",
+      "inspectedBeforeUse": true
+    },
+    {
+      "id": "gemini-report-reasoning",
+      "source": "streamlit-recorded-gemini-recommendation-20261015.jpg",
+      "crop": [
+        399,
+        60,
+        775,
+        158
+      ],
+      "sourceSha256": "945274217c040f9f95bffe007c5fa7503c016c81e72f22551c6baac91445dd60",
+      "path": "docs/images/demo-refresh-gemini-report-reasoning.png",
+      "sha256": "ed00608c7cc02b5abf4bb8436f65aa66c5ff7f78dd4c1ed778178873eb48df1a",
+      "width": 775,
+      "height": 158,
+      "treatment": "Crop only. Original evidence text preserved.",
+      "label": "Recorded Gemini analysis",
+      "inspectedBeforeUse": true
+    },
+    {
+      "id": "gemini-report-recommendation",
+      "source": "streamlit-recorded-gemini-provenance-20261015.jpg",
+      "crop": [
+        399,
+        117,
+        775,
+        204
+      ],
+      "sourceSha256": "5f9d606ef69bc96971a1294297d87bae85c8d9aac64208217da68b844a20db65",
+      "path": "docs/images/demo-refresh-gemini-report-recommendation.png",
+      "sha256": "4bccae71edab20717f0a80a2a71d5f0c80da8642cb7f41d8e513a5b5a5770f8b",
+      "width": 775,
+      "height": 204,
+      "treatment": "Crop only. Original evidence text preserved.",
+      "label": "Recorded Gemini analysis",
+      "inspectedBeforeUse": true
+    },
+    {
+      "id": "gemini-report-provenance",
+      "source": "streamlit-recorded-gemini-provenance-20261015.jpg",
+      "crop": [
+        399,
+        458,
+        775,
+        35
+      ],
+      "sourceSha256": "5f9d606ef69bc96971a1294297d87bae85c8d9aac64208217da68b844a20db65",
+      "path": "docs/images/demo-refresh-gemini-report-provenance.png",
+      "sha256": "d8d9e077b044d5d50f937e5c371a10e790eda6ed43194fd759f82762ca108f94",
+      "width": 775,
+      "height": 35,
+      "treatment": "Crop only. Original evidence text preserved.",
+      "label": "Recorded Gemini analysis",
+      "inspectedBeforeUse": true
+    },
+    {
+      "id": "streamlit-light",
+      "source": "streamlit-english-light-20261013.jpg",
+      "crop": [
+        379,
+        177,
+        890,
+        339
+      ],
+      "sourceSha256": "8a4bfdca96e467ded81b0b419b88ac9f1a6d865d22149e23e31777a6ec2848f1",
+      "path": "docs/images/demo-refresh-streamlit-light.png",
+      "sha256": "d3f9e7455ec62c5a52891c67d418636f6278c8a2ec8116b232e89d44562073fb",
+      "width": 890,
+      "height": 339,
+      "treatment": "Crop only. Original evidence text preserved.",
+      "label": "Recorded UI",
+      "inspectedBeforeUse": true
+    },
+    {
+      "id": "streamlit-dark",
+      "source": "streamlit-english-dark-20261013.jpg",
+      "crop": [
+        379,
+        177,
+        890,
+        339
+      ],
+      "sourceSha256": "a6c7e41826b5b296990d799906b3510577f1ccdf12ab627c2b5c2196fb6360b7",
+      "path": "docs/images/demo-refresh-streamlit-dark.png",
+      "sha256": "4351f313bc818c68913d56e2966682d5bd6e3dd435183afb3b3fdcd8c891032f",
+      "width": 890,
+      "height": 339,
+      "treatment": "Crop only. Original evidence text preserved.",
+      "label": "Recorded UI",
+      "inspectedBeforeUse": true
+    },
+    {
+      "id": "incident-queue",
+      "source": "streamlit-english-light-20261013.jpg",
+      "crop": [
+        379,
+        540,
+        890,
+        540
+      ],
+      "sourceSha256": "8a4bfdca96e467ded81b0b419b88ac9f1a6d865d22149e23e31777a6ec2848f1",
+      "path": "docs/images/demo-refresh-incident-queue.png",
+      "sha256": "4859835aa0815605c3b381af36e5fbb8dbb01a5a7025a14576c39ba6041642d8",
+      "width": 890,
+      "height": 540,
+      "treatment": "Crop only. Original evidence text preserved.",
+      "label": "Recorded UI",
+      "inspectedBeforeUse": true
+    }
+  ],
+  "diagrams": [
+    {
+      "path": "docs/diagrams/architecture.svg",
+      "sha256": "494a72260ac466a6faffd31dc651187aa19b4b682660ff386ef00aafe53e8a30",
+      "label": "Repository diagram; not a UI capture",
+      "videoRegions": [
+        [
+          40,
+          184,
+          610,
+          145
+        ],
+        [
+          688,
+          184,
+          632,
+          145
+        ]
+      ],
+      "treatment": "Guided detail views of the original SVG; original labels unchanged."
+    },
+    {
+      "path": "docs/diagrams/data-model-overview.svg",
+      "sha256": "1b8d16d20e91f3a75f5462d9dd86ab22d72ffef6a1de1bfbd4207dbd7e2800da",
+      "label": "Repository diagram; not a UI capture",
+      "videoRegions": [
+        [
+          35,
+          184,
+          748,
+          215
+        ],
+        [
+          815,
+          184,
+          431,
+          215
+        ]
+      ],
+      "treatment": "Guided detail views of the original SVG; original labels unchanged."
+    }
+  ],
+  "documentarySources": [
+    "docs/gemini_triage_acceptance.md",
+    "docs/discord_workspace_acceptance.md",
+    "docs/incident_resolution.md"
+  ]
+}

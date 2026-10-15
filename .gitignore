@@ -35,3 +35,9 @@ apps/web/.next/
 apps/web/*.tsbuildinfo
 apps/web/.env*
 !apps/web/.env.example
+
+# --- Ignoring Isolated Demo Rendering Dependencies And Output
+tools/demo-video/node_modules/
+tools/demo-video/.cache/
+tools/demo-video/out/
+tools/demo-video/*.tsbuildinfo

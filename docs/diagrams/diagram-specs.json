@@ -1,0 +1,178 @@
+{
+  "schema_version": 1,
+  "detail_policy": "Physical subsystem diagrams; at most five tables and eight selected fields per table. Catalog is complete; connectors are selective. No ClickHouse PK/FK or logical cardinality claims.",
+  "logical_relationships": [
+    {"from": "dq.alerts", "to": "dq.dq_check_results", "from_columns": ["source_check_run_id"], "to_columns": ["check_run_id"], "label": "Nullable source_check_run_id -> check_run_id; schema alerts may have no DQ check", "source": {"path": "pipelines/dq/generate_alerts.py", "line": 223}},
+    {"from": "dq.data_profile_results", "to": "dq.stg_orders", "from_columns": ["table_name", "dt"], "to_columns": ["dt"], "label": "table_name and optional dt identify the observed dataset/date; not a row FK", "source": {"path": "infra/init/clickhouse/02_observability_tables.sql", "line": 9}},
+    {"from": "dq.pipeline_runs", "to": "dq.stg_orders", "from_columns": ["target_table", "partition_dt"], "to_columns": ["dt"], "label": "target_table and partition_dt describe run scope, not relational identity", "source": {"path": "infra/init/clickhouse/02_observability_tables.sql", "line": 77}},
+    {"from": "dq.schema_drift_results", "to": "dq.schema_snapshots", "from_columns": ["snapshot_id"], "to_columns": ["snapshot_id"], "label": "snapshot_id correlates findings to observations; not enforced", "source": {"path": "pipelines/schema_drift/storage.py", "line": 37}},
+    {"from": "dq.schema_snapshots", "to": "dq.metadata_assets", "from_columns": ["qualified_name"], "to_columns": ["qualified_name"], "label": "qualified_name is a dataset identity convention; metadata is independently versioned", "source": {"path": "infra/init/clickhouse/06_schema_drift_tables.sql", "line": 17}},
+    {"from": "dq.agent_audit_log", "to": "dq.alerts", "from_columns": ["alert_key"], "to_columns": ["alert_key"], "label": "alert_key links incident audit evidence; blank/null context is allowed", "source": {"path": "infra/init/clickhouse/03_agent_tables.sql", "line": 14}},
+    {"from": "dq.agent_run_context_events", "to": "dq.incident_memory", "from_columns": ["parent_run_id", "alert_key"], "to_columns": ["parent_run_id", "alert_key"], "label": "Shared parent_run_id / incident identity; temporary events and durable memory differ", "source": {"path": "agent/context/store.py", "line": 224}},
+    {"from": "dq.approval_requests", "to": "dq.alerts", "from_columns": ["alert_key"], "to_columns": ["alert_key"], "label": "Legacy backfill request incident correlation; not a cross-store action-control FK", "source": {"path": "infra/init/clickhouse/03_agent_tables.sql", "line": 41}},
+    {"from": "dq_control.incident_controls", "to": "dq.alerts", "from_columns": ["alert_key"], "to_columns": ["alert_key"], "label": "PostgreSQL incident authority projects a versioned ClickHouse snapshot through outbox", "source": {"path": "agent/tools/incident_resolution.py", "line": 144}},
+    {"from": "dq_control.approval_requests", "to": "dq_control.incident_controls", "from_columns": ["scope_json"], "to_columns": ["alert_key", "alert_ref"], "label": "scope_json incident/date matching checks remediation blockers; no declared FK", "source": {"path": "agent/tools/incident_resolution.py", "line": 203}},
+    {"from": "dq.discord_incident_messages", "to": "dq.alerts", "from_columns": ["alert_key"], "to_columns": ["alert_key"], "label": "alert_key associates a canonical public incident message with its alert", "source": {"path": "apps/discord_bot/registry.py", "line": 47}},
+    {"from": "dq_control.discord_workspace_events", "to": "dq_control.discord_incident_workspaces", "from_columns": ["guild_id", "alert_key"], "to_columns": ["guild_id", "alert_key"], "label": "Guild/incident/generation correlation; no workspace-event FK", "source": {"path": "apps/discord_bot/thread_store.py", "line": 86}},
+    {"from": "dq_control.discord_investigation_claims", "to": "dq_control.discord_incident_workspaces", "from_columns": ["guild_id", "alert_key"], "to_columns": ["guild_id", "alert_key"], "label": "Guild/incident-scoped investigation identity and partial single-active uniqueness; no FK", "source": {"path": "apps/discord_bot/thread_store.py", "line": 161}},
+    {"from": "dq_control.discord_copilot_requests", "to": "dq_control.discord_incident_workspaces", "from_columns": ["guild_id", "thread_id"], "to_columns": ["guild_id", "thread_id"], "label": "Thread/guild metadata correlate Copilot claims with workspaces; no FK", "source": {"path": "infra/init/postgres/04_discord_workspaces.sql", "line": 47}}
+  ],
+  "groups": [
+    {
+      "slug": "erd-warehouse", "title": "Warehouse / dbt derivation",
+      "subtitle": "Three physical ClickHouse relations. Derivation arrows are not foreign keys.",
+      "caption": "Selected partition, event identity and metric fields. dbt staging filters synthetic test rows and computes net amount; the mart aggregates by date/country/channel. ORDER BY does not enforce uniqueness.",
+      "tables": [
+        {"name": "dq.raw_orders", "row": 0, "col": 0, "fields": ["dt", "order_id", "order_ts", "ingestion_ts", "gross_amount_usd", "is_test"]},
+        {"name": "dq.stg_orders", "row": 0, "col": 1, "fields": ["dt", "order_id", "country", "channel", "net_amount_usd", "transformed_at"]},
+        {"name": "dq.fct_orders_daily", "row": 1, "col": 1, "fields": ["dt", "country", "channel", "row_count", "distinct_order_count", "recognized_revenue_usd", "updated_at"]}
+      ],
+      "edges": [
+        {"from": "dq.raw_orders", "to": "dq.stg_orders", "kind": "dbt_derivation"},
+        {"from": "dq.stg_orders", "to": "dq.fct_orders_daily", "kind": "dbt_derivation"}
+      ],
+      "notes": ["dbt: incremental insert_overwrite / MergeTree(). Bootstrap mart: ReplacingMergeTree(updated_at). See catalog caveat."]
+    },
+    {
+      "slug": "erd-observability", "title": "Observability / checks and incidents",
+      "subtitle": "Analytical evidence and alert projection; logical links, never ClickHouse FKs.",
+      "caption": "Profiles and pipeline runs describe table/date scope. DQ alerts can refer to check_run_id; schema alerts need not. The open_alerts view is a filtered, non-FINAL read, not a transactional lifecycle authority.",
+      "tables": [
+        {"name": "dq.alerts", "row": 0, "col": 0, "fields": ["alert_key", "alert_id", "source_check_run_id", "status", "table_name", "dt"]},
+        {"name": "dq.dq_check_results", "row": 0, "col": 1, "fields": ["check_run_id", "table_name", "dt", "check_name", "status", "evidence_s3_uri"]},
+        {"name": "dq.data_profile_results", "row": 1, "col": 0, "fields": ["profile_run_id", "table_name", "dt", "column_name", "metric_name", "metric_value"]},
+        {"name": "dq.pipeline_runs", "row": 1, "col": 1, "fields": ["run_id", "dag_id", "partition_dt", "target_table", "status", "duration_ms"]}
+      ],
+      "edges": [{"from": "dq.alerts", "to": "dq.dq_check_results", "kind": "logical_correlation"}],
+      "notes": ["Link shown: alerts.source_check_run_id -> dq_check_results.check_run_id (nullable, logical only)."]
+    },
+    {
+      "slug": "erd-alert-view", "title": "Alerts / a filtered read is not authority",
+      "subtitle": "Two relations, one view derivation. The view does not collapse old alert versions.",
+      "caption": "open_alerts inherits all 20 alert columns, but only selected lifecycle fields are shown. Its literal filter includes open/triaged, not acknowledged. No FK, UNIQUE or FINAL is introduced by the view.",
+      "tables": [
+        {"name": "dq.alerts", "row": 0, "col": 0, "fields": ["alert_key", "status", "created_at", "updated_at", "resolved_at"]},
+        {"name": "dq.open_alerts", "row": 0, "col": 1, "fields": ["alert_key", "status", "created_at", "updated_at", "resolved_at"]}
+      ],
+      "edges": [{"from": "dq.alerts", "to": "dq.open_alerts", "kind": "view_derivation"}],
+      "notes": ["WHERE status IN ('open', 'triaged') ORDER BY created_at DESC; source SQL does not use FINAL."]
+    },
+    {
+      "slug": "erd-metadata-schema", "title": "Metadata / schema observations",
+      "subtitle": "Asset metadata and schema history share logical identity, not database constraints.",
+      "caption": "Findings correlate with schema observations through snapshot_id; qualified_name identifies the observed asset. Contract/version hashes preserve provenance. These ClickHouse fields are not FK/PK declarations.",
+      "tables": [
+        {"name": "dq.schema_drift_results", "row": 0, "col": 0, "fields": ["result_id", "snapshot_id", "qualified_name", "column_name", "status", "severity"]},
+        {"name": "dq.schema_snapshots", "row": 0, "col": 1, "fields": ["snapshot_id", "run_id", "qualified_name", "contract_sha256", "schema_sha256", "status"]},
+        {"name": "dq.metadata_assets", "row": 1, "col": 1, "fields": ["qualified_name", "technical_owner", "grain", "sensitivity", "certification_status", "version"]}
+      ],
+      "edges": [
+        {"from": "dq.schema_drift_results", "to": "dq.schema_snapshots", "kind": "logical_correlation"},
+        {"from": "dq.schema_snapshots", "to": "dq.metadata_assets", "kind": "logical_correlation"}
+      ],
+      "notes": ["Logical labels: snapshot_id across the top; qualified_name between observation and asset registry."]
+    },
+    {
+      "slug": "erd-context", "title": "Triage / context and audit evidence",
+      "subtitle": "Temporary run context, durable incident memory and tool audit have different lifetimes.",
+      "caption": "parent_run_id and alert identity correlate context with memory. Temporary context uses an expires_at deletion TTL; incident memory remains durable. Audit is append evidence, not an approval or recovery engine.",
+      "tables": [
+        {"name": "dq.agent_run_context_events", "row": 0, "col": 0, "fields": ["context_event_id", "parent_run_id", "alert_key", "phase", "expires_at", "content_sha256"]},
+        {"name": "dq.incident_memory", "row": 0, "col": 1, "fields": ["memory_id", "parent_run_id", "alert_key", "outcome_status", "resolution_reference", "content_sha256"]},
+        {"name": "dq.agent_audit_log", "row": 1, "col": 0, "fields": ["audit_id", "agent_run_id", "alert_key", "action", "tool_name", "status"]}
+      ],
+      "edges": [{"from": "dq.agent_run_context_events", "to": "dq.incident_memory", "kind": "logical_correlation"}],
+      "notes": ["Context TTL: expires_at DELETE. Logical shared run/incident identity does not imply one-to-one records."]
+    },
+    {
+      "slug": "erd-approvals", "title": "Approvals / two distinct stores",
+      "subtitle": "Legacy backfill approval evidence and transactional action control coexist.",
+      "caption": "No connector is drawn because these two approval tables are not declared counterparts or FK-linked replicas. The backfill/API path still uses legacy ClickHouse approvals; the approved-action dispatcher uses PostgreSQL control. PostgreSQL advisory locking in parts of the legacy path does not turn ClickHouse into a transactional store.",
+      "tables": [
+        {"name": "dq.approval_requests", "row": 0, "col": 0, "fields": ["request_id", "alert_key", "action_type", "status", "start_date", "end_date", "execution_status", "updated_at"]},
+        {"name": "dq_control.approval_requests", "row": 0, "col": 1, "fields": ["request_id", "idempotency_hash", "request_generation", "action_type", "scope_json", "status", "version", "execution_status"]}
+      ],
+      "edges": [],
+      "notes": ["PostgreSQL has request PK + idempotency UNIQUE; ClickHouse ORDER BY request_id is not a UNIQUE constraint."]
+    },
+    {
+      "slug": "erd-resolution-requests", "title": "Resolution / scoped revalidation",
+      "subtitle": "Only explicit PostgreSQL DDL references are solid FK connectors.",
+      "caption": "A revalidation request belongs to one incident control; an idempotency key points to a durable request. Child-to-parent FK references use NO ACTION. Fresh PASS does not automatically close an incident.",
+      "tables": [
+        {"name": "dq_control.incident_revalidation_keys", "row": 0, "col": 0, "fields": ["idempotency_hash", "request_id", "actor"]},
+        {"name": "dq_control.incident_revalidations", "row": 0, "col": 1, "fields": ["request_id", "alert_key", "incident_revision", "idempotency_hash", "status", "record"]},
+        {"name": "dq_control.incident_controls", "row": 1, "col": 1, "fields": ["alert_key", "alert_ref", "revision", "episode", "status", "snapshot"]}
+      ],
+      "edges": [
+        {"from": "dq_control.incident_revalidation_keys", "to": "dq_control.incident_revalidations", "kind": "foreign_key"},
+        {"from": "dq_control.incident_revalidations", "to": "dq_control.incident_controls", "kind": "foreign_key"}
+      ],
+      "notes": ["N -> 1 required references, no cascading deletes. Revalidation DAG success can carry a blocked business result."]
+    },
+    {
+      "slug": "erd-resolution-decisions", "title": "Resolution / explicit closure decisions",
+      "subtitle": "Human-confirmed closure retains both incident and revalidation references.",
+      "caption": "The decision has two true FKs, one to the incident and one to its revalidation request. The diagram shows both. Application revision/scope/evidence gates add semantics that the FK constraints alone cannot enforce.",
+      "tables": [
+        {"name": "dq_control.incident_controls", "row": 0, "col": 0, "fields": ["alert_key", "alert_ref", "revision", "status"]},
+        {"name": "dq_control.incident_resolution_decisions", "row": 0, "col": 1, "fields": ["idempotency_hash", "alert_key", "request_id", "record", "created_at"]},
+        {"name": "dq_control.incident_revalidations", "row": 1, "col": 1, "fields": ["request_id", "alert_key", "incident_revision", "status", "record"]}
+      ],
+      "edges": [
+        {"from": "dq_control.incident_resolution_decisions", "to": "dq_control.incident_controls", "kind": "foreign_key"},
+        {"from": "dq_control.incident_resolution_decisions", "to": "dq_control.incident_revalidations", "kind": "foreign_key"}
+      ],
+      "notes": ["Both decision FKs: ON DELETE NO ACTION / ON UPDATE NO ACTION. No autonomous or unconditional closure."]
+    },
+    {
+      "slug": "erd-resolution-outbox", "title": "Resolution / independent sink delivery",
+      "subtitle": "A committed incident decision is separate from projection, audit and Discord delivery.",
+      "caption": "incident_outbox references the incident control with one true FK. The unique event tuple prevents duplicate logical events. Projection/audit/delivery flags track separate sinks; there is no atomic cross-store transaction or blanket exactly-once guarantee.",
+      "tables": [
+        {"name": "dq_control.incident_outbox", "row": 0, "col": 0, "fields": ["event_id", "alert_key", "revision", "event_type", "projection_done", "audit_done", "delivery_done", "error_code"]},
+        {"name": "dq_control.incident_controls", "row": 0, "col": 1, "fields": ["alert_key", "alert_ref", "revision", "status", "snapshot"]}
+      ],
+      "edges": [{"from": "dq_control.incident_outbox", "to": "dq_control.incident_controls", "kind": "foreign_key"}],
+      "notes": ["UNIQUE(alert_key, revision, event_type). Sink failures remain pending; successful closure is not delivery success."]
+    },
+    {
+      "slug": "erd-discord-workspaces", "title": "Discord / canonical workspaces",
+      "subtitle": "Composite identities and partial unique indexes; no declared Discord-table FKs.",
+      "caption": "Workspaces, event history and investigation claims correlate on guild/incident. Thread uniqueness is partial (nonempty thread IDs), and single-active investigation uniqueness applies only to claimed/uncertain rows. No field-level FK is invented.",
+      "tables": [
+        {"name": "dq_control.discord_workspace_events", "row": 0, "col": 0, "fields": ["event_id", "guild_id", "alert_key", "event", "generation", "thread_id"]},
+        {"name": "dq_control.discord_incident_workspaces", "row": 0, "col": 1, "fields": ["guild_id", "alert_key", "channel_id", "generation", "starter_message_id", "thread_id"]},
+        {"name": "dq_control.discord_investigation_claims", "row": 1, "col": 1, "fields": ["guild_id", "alert_key", "request_id", "status", "report_id"]}
+      ],
+      "edges": [
+        {"from": "dq_control.discord_workspace_events", "to": "dq_control.discord_incident_workspaces", "kind": "logical_correlation"},
+        {"from": "dq_control.discord_investigation_claims", "to": "dq_control.discord_incident_workspaces", "kind": "logical_correlation"}
+      ],
+      "notes": ["PK labels mark members of a composite key, not individual uniqueness. Full index predicates are in the catalog."]
+    },
+    {
+      "slug": "erd-discord-control", "title": "Discord / claims and service identity",
+      "subtitle": "Durable request claims, user language preferences and bot-owned service messages.",
+      "caption": "These tables have independent PKs, not a declared relational parent-child chain. Copilot source_kind incorporates the command migration; service messages currently constrain kind to welcome. Physical BIGINT/TEXT identifier differences are preserved.",
+      "tables": [
+        {"name": "dq_control.discord_copilot_requests", "row": 0, "col": 0, "fields": ["source_message_id", "guild_id", "actor_id", "thread_id", "alert_ref", "status", "source_kind"]},
+        {"name": "dq_control.discord_service_messages", "row": 0, "col": 1, "fields": ["guild_id", "channel_id", "kind", "message_id", "creation_pending", "edit_pending", "generation"]},
+        {"name": "dq_control.discord_user_preferences", "row": 1, "col": 0, "fields": ["guild_id", "user_id", "language", "updated_at"]}
+      ],
+      "edges": [],
+      "notes": ["Effective source_kind CHECK: message / modal / command. Preference CHECK: en / id. No conversation bodies copied here."]
+    },
+    {
+      "slug": "erd-discord-delivery", "title": "Discord / incident delivery projection",
+      "subtitle": "ClickHouse message identity is a versioned projection, not transactional control.",
+      "caption": "The message registry correlates to alerts through alert_key. transport/author_id are included after the idempotent bot-delivery ALTERs; legacy_webhook remains a historical default, not an active architecture recommendation.",
+      "tables": [
+        {"name": "dq.discord_incident_messages", "row": 0, "col": 0, "fields": ["alert_key", "channel_id", "message_id", "transport", "author_id", "rendered_lifecycle", "updated_at"]},
+        {"name": "dq.alerts", "row": 0, "col": 1, "fields": ["alert_key", "alert_display_id", "status", "updated_at"]}
+      ],
+      "edges": [{"from": "dq.discord_incident_messages", "to": "dq.alerts", "kind": "logical_correlation"}],
+      "notes": ["ORDER BY alert_key is not a UNIQUE constraint. Historical webhook values do not imply supported webhook delivery."]
+    }
+  ]
+}

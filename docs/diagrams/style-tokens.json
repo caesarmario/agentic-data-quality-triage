@@ -1,0 +1,24 @@
+{
+  "name": "DataSentry Green Editorial / Light",
+  "paper": "#f7f8f2",
+  "paper-2": "#edf1e8",
+  "surface": "#fdfef9",
+  "ink": "#18382a",
+  "muted": "#4c6558",
+  "rule": "#c1cfbe",
+  "accent": "#22734b",
+  "accent-tint": "#e3efdf",
+  "link": "#356851",
+  "font_policy": "Self-contained SVG; no network fonts. Preferred editorial families with explicit local fallbacks; metrics may differ by platform.",
+  "typography": {
+    "title": {"family": "Instrument Serif, Georgia, serif", "size": 36, "weight": 400, "color": "ink"},
+    "heading": {"family": "Geist, Trebuchet MS, sans-serif", "size": 18, "weight": 600, "color": "ink"},
+    "table-name": {"family": "Geist, Trebuchet MS, sans-serif", "size": 16, "weight": 600, "color": "ink"},
+    "body": {"family": "Geist, Trebuchet MS, sans-serif", "size": 14, "weight": 400, "color": "muted"},
+    "field": {"family": "Geist, Trebuchet MS, sans-serif", "size": 13, "weight": 400, "color": "ink"},
+    "sql-type": {"family": "Geist Mono, Consolas, monospace", "size": 11, "weight": 400, "color": "muted"},
+    "annotation": {"family": "Geist Mono, Consolas, monospace", "size": 11, "weight": 400, "color": "muted"},
+    "eyebrow": {"family": "Geist Mono, Consolas, monospace", "size": 11, "weight": 500, "color": "accent"},
+    "key": {"family": "Geist Mono, Consolas, monospace", "size": 8, "weight": 500, "color": "muted"}
+  }
+}

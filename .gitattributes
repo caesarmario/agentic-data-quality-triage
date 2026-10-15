@@ -10,3 +10,11 @@ Makefile    text eol=lf
 *.py        text eol=lf
 *.yml       text eol=lf
 *.yaml      text eol=lf
+
+# --- Keeping Source-Hashed Documentation Reproducible Across Platforms
+docs/architecture.md       text eol=lf
+docs/data-model.md         text eol=lf
+docs/diagrams/*.json       text eol=lf
+docs/diagrams/*.svg        text eol=lf
+docs/diagrams/*.mmd        text eol=lf
+docs/images/*.png          binary

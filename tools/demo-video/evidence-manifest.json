@@ -1,0 +1,110 @@
+{
+  "scope": "Documentary source map, not newly executed platform acceptance. UI captures and ledgers span different sessions.",
+  "claims": [
+    {
+      "sceneSeconds": [
+        10,
+        20,
+        75,
+        95
+      ],
+      "source": "docs/discord_workspace_acceptance.md",
+      "section": "Daily snapshot isolation and final desktop check, 2026-10-13",
+      "claim": "Historical 2026-10-11 snapshot: 64 checks, zero failed checks; independent active queue: 17 incidents including 10 critical.",
+      "captureAssets": [
+        "docs/images/demo-refresh-streamlit-light.png",
+        "docs/images/demo-refresh-streamlit-dark.png"
+      ]
+    },
+    {
+      "sceneSeconds": [
+        45,
+        75
+      ],
+      "source": "docs/discord_workspace_acceptance.md",
+      "section": "Current interaction contract",
+      "claim": "One canonical thread per incident; Investigate can read an existing report. Help and inbox are retained UI, not a current queue census.",
+      "captureAssets": [
+        "docs/images/demo-refresh-discord-inbox.png",
+        "docs/images/demo-refresh-help.png",
+        "docs/images/demo-refresh-workspace.png"
+      ]
+    },
+    {
+      "sceneSeconds": [
+        88,
+        110
+      ],
+      "source": "docs/demo-video.md",
+      "section": "Stored Report Readback, 2026-10-15",
+      "claim": "Previously stored report RPT-85F4FEA2 on DQ-20261008-72DF3B records 93 duplicates out of 2919 rows; its retained Gemini narrative cites evidence but leaves the precise source/load-layer cause unconfirmed. Opened read-only, no new model call.",
+      "captureAssets": [
+        "docs/images/demo-refresh-gemini-report-summary.png",
+        "docs/images/demo-refresh-gemini-report-reasoning.png",
+        "docs/images/demo-refresh-gemini-report-recommendation.png",
+        "docs/images/demo-refresh-gemini-report-provenance.png"
+      ],
+      "screenshotReportId": "RPT-85F4FEA2",
+      "limitation": "Do not assign a specific report ID to the investigation crop without additional evidence. The report IDs in provider acceptance records are separate documentary evidence."
+    },
+    {
+      "sceneSeconds": [
+        130,
+        140
+      ],
+      "source": "docs/gemini_triage_acceptance.md",
+      "section": "Discord Incident Decision UX Acceptance On 2026-10-08",
+      "requests": [
+        "APR-20261006-A89DDA5E",
+        "APR-20261008-1CAA3926"
+      ],
+      "claim": "APPROVED and REJECTED decisions both retained execution_status=not_started; no remediation DagRun during the decision window.",
+      "presentation": "Editorial summary of acceptance record, not a captured UI"
+    },
+    {
+      "sceneSeconds": [
+        140,
+        148
+      ],
+      "source": "docs/incident_resolution.md",
+      "section": "Retained operational evidence",
+      "dagId": "90_03_dag_dq_incident_revalidation",
+      "runId": "manual__incident_revalidation_c0e73abd-3875-4f30-8da9-0805bc004f02",
+      "claim": "All six tasks and DagRun succeeded; business verdict blocked, 24/25 segments.",
+      "presentation": "Editorial summary of acceptance record, not a captured UI"
+    },
+    {
+      "sceneSeconds": [
+        148,
+        156
+      ],
+      "source": "docs/incident_resolution.md",
+      "section": "Retained operational evidence",
+      "dagId": "90_03_dag_dq_incident_revalidation",
+      "runId": "manual__incident_revalidation_021417a4-5374-41c2-89fe-05d1b92c1bb5",
+      "claim": "Separate read-only check: PASS, 25/25 segments. Not source repair and not automatic closure.",
+      "presentation": "Editorial summary of acceptance record, not a captured UI"
+    },
+    {
+      "sceneSeconds": [
+        156,
+        165
+      ],
+      "source": "docs/discord_workspace_acceptance.md",
+      "section": "Delegated DQ closure, 2026-10-12",
+      "dagId": "90_03_dag_dq_incident_revalidation",
+      "runId": "manual__incident_revalidation_cf7c92ba-f3c9-4b1e-ac1c-b8f0c04c1d26",
+      "claim": "Fresh scoped check and delegated confirmation closed this incident. No repair or LLM call.",
+      "captureAssets": [
+        "docs/images/demo-refresh-resolved.png"
+      ]
+    }
+  ],
+  "prohibitions": [
+    "No new provider call",
+    "No source repair implied",
+    "No single autonomous repair sequence",
+    "No warehouse-wide health claim",
+    "No production-readiness claim"
+  ]
+}

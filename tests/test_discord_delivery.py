@@ -1,4 +1,4 @@
-﻿####
+####
 ## Discord Bot Delivery Tests for Agentic Data Quality Triage
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
@@ -1034,4 +1034,3 @@ def test_registry_decodes_clickhouse_fixed_string_content_hash() -> None:
 
     assert state is not None
     assert state.content_hash == expected_hash
-

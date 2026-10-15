@@ -1,0 +1,145 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:05.000
+DataSentry: from a failed warehouse check to an auditable operator decision.
+
+2
+00:00:05.000 --> 00:00:10.000
+Recorded UI and repository evidence, not one continuous autonomous repair.
+
+3
+00:00:10.000 --> 00:00:15.000
+A clean daily snapshot does not mean the active incident queue is healthy.
+
+4
+00:00:15.000 --> 00:00:20.000
+The retained desktop view still shows 17 active incidents, including 10 critical incidents.
+
+5
+00:00:20.000 --> 00:00:26.000
+Airflow orchestrates S3 landing, ClickHouse raw data, dbt models and deterministic quality checks.
+
+6
+00:00:26.000 --> 00:00:32.000
+Checks create alerts. Guarded investigation reads the evidence; AI does not move or repair data.
+
+7
+00:00:32.000 --> 00:00:38.000
+ClickHouse and object storage retain evidence. PostgreSQL serializes transactional control state.
+
+8
+00:00:38.000 --> 00:00:45.000
+The optional model explains and recommends within bounded tools, budgets and audit records.
+
+9
+00:00:45.000 --> 00:00:50.000
+Start from a specific Alert Ref, rule, table and business date.
+
+10
+00:00:50.000 --> 00:00:55.000
+Discord and Streamlit share incident context through the control-plane API.
+
+11
+00:00:55.000 --> 00:01:00.000
+Recorded Discord Help: show incidents, choose an Alert Ref and inspect the evidence.
+
+12
+00:01:00.000 --> 00:01:05.000
+Help is deterministic. It does not call a model, approve, repair or close incidents.
+
+13
+00:01:05.000 --> 00:01:10.000
+The recorded workspace keeps reports, evidence and follow-up questions in one incident thread.
+
+14
+00:01:10.000 --> 00:01:15.000
+Reading a stored report does not imply a new investigation or paid provider call.
+
+15
+00:01:15.000 --> 00:01:22.000
+Recorded English Streamlit: the historical daily snapshot is not the independent active incident queue.
+
+16
+00:01:22.000 --> 00:01:28.000
+The dark desktop view retains the same facts. Mobile and two-human acceptance are not established.
+
+17
+00:01:28.000 --> 00:01:34.000
+Stored report RPT-85F4FEA2 records 93 duplicate records out of 2,919 rows for this incident.
+
+18
+00:01:34.000 --> 00:01:41.000
+The recorded Gemini narrative cites quality history, recent pipeline runs and dbt lineage evidence.
+
+19
+00:01:41.000 --> 00:01:46.000
+The exact upstream cause remains unconfirmed. Review source evidence before approving remediation.
+
+20
+00:01:46.000 --> 00:01:50.000
+Historical Gemini provenance, viewed read-only on 2026-10-15. No new call or repair.
+
+21
+00:01:50.000 --> 00:01:55.000
+Trace raw orders through staging to the daily mart using retained dbt metadata.
+
+22
+00:01:55.000 --> 00:02:00.000
+Lineage supports impact investigation; it is not proof of a downstream outage.
+
+23
+00:02:00.000 --> 00:02:05.000
+The repository data model separates analytical facts from transactional control state.
+
+24
+00:02:05.000 --> 00:02:10.000
+Approvals, revalidation and closure keep their own durable identities and audit trail.
+
+25
+00:02:10.000 --> 00:02:15.000
+Separate acceptance evidence: an approval decision does not start remediation.
+
+26
+00:02:15.000 --> 00:02:20.000
+Recorded APPROVED and REJECTED requests both retained execution_status=not_started.
+
+27
+00:02:20.000 --> 00:02:24.000
+A successful Airflow run can still produce a blocked business verdict.
+
+28
+00:02:24.000 --> 00:02:28.000
+The negative revalidation found 24 of 25 required segments. Closure stayed blocked.
+
+29
+00:02:28.000 --> 00:02:32.000
+A separate read-only request found 25 of 25 segments. Resolve did not repair the source.
+
+30
+00:02:32.000 --> 00:02:36.000
+Matching fresh PASS evidence still needs an operator reason and explicit confirmation.
+
+31
+00:02:36.000 --> 00:02:41.000
+Recorded resolved card: a fresh scoped check supported closure of this incident only.
+
+32
+00:02:41.000 --> 00:02:45.000
+No data repair, no LLM call and no claim that the whole warehouse is healthy.
+
+33
+00:02:45.000 --> 00:02:49.000
+To reproduce locally, follow README setup with Docker and Compose. Review local secrets first.
+
+34
+00:02:49.000 --> 00:02:53.000
+Keep external models disabled and provider keys blank for the initial local run.
+
+35
+00:02:53.000 --> 00:02:57.000
+Build and start using the documented commands, then inspect Airflow and Streamlit.
+
+36
+00:02:57.000 --> 00:03:00.000
+Use DAG 91 for application acceptance. This recording is media, not a new platform test.

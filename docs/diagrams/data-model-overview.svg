@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="840" viewBox="0 0 1280 840" role="img" aria-labelledby="data-model-overview-title data-model-overview-desc">
+<title id="data-model-overview-title">The application data model</title>
+<desc id="data-model-overview-desc">Warehouse and analytical evidence in ClickHouse; transactional action, incident and Discord state in PostgreSQL. Only the incident subsystem declares foreign keys.</desc>
+<defs>
+<marker id="data-model-overview-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#4c6558"/></marker>
+<marker id="data-model-overview-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#22734b"/></marker>
+<marker id="data-model-overview-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#356851"/></marker>
+</defs>
+<rect x="0" y="0" width="1280" height="840" rx="0" fill="#f7f8f2" stroke="none"/>
+<text x="40" y="40" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">DATASENTRY / REPOSITORY CONTRACT</text>
+<text x="40" y="84" text-anchor="start" fill="#18382a" font-family="Instrument Serif, Georgia, serif" font-size="36" font-weight="400">The application data model</text>
+<text x="40" y="116" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">28 relations / 399 catalog fields / 5 PostgreSQL FKs / no ClickHouse uniqueness claims</text>
+<text x="40" y="164" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">CLICKHOUSE / dq / 15 TABLES + 1 VIEW</text>
+<text x="824" y="164" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">POSTGRESQL / dq_control / 12 TABLES</text>
+<path d="M 384 300 L 432 300" fill="none" stroke="#4c6558" stroke-width="1.5" stroke-dasharray="5 5" marker-end="url(#data-model-overview-arrow-muted)"/>
+<path d="M 608 392 L 608 464" fill="none" stroke="#4c6558" stroke-width="1.5" stroke-dasharray="5 5" marker-end="url(#data-model-overview-arrow-muted)"/>
+<rect x="40" y="192" width="344" height="200" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="56" y="216" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">WAREHOUSE / 3 TABLES</text>
+<text x="56" y="244" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="18" font-weight="600">Orders and daily metrics</text>
+<text x="56" y="268" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">raw_orders -&gt; stg_orders</text>
+<text x="56" y="288" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">-&gt; fct_orders_daily</text>
+<text x="56" y="308" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">dbt derivation, not FK</text>
+<text x="56" y="328" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">Grain expectations are tested.</text>
+<rect x="432" y="192" width="344" height="200" rx="8" fill="#e3efdf" stroke="#22734b"/>
+<text x="448" y="216" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">OBSERVABILITY / 4 TABLES + VIEW</text>
+<text x="448" y="244" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="18" font-weight="600">Quality evidence and alerts</text>
+<text x="448" y="268" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">profiles / checks / pipeline_runs</text>
+<text x="448" y="288" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">alerts / open_alerts</text>
+<text x="448" y="308" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">source_check_run_id: logical</text>
+<text x="448" y="328" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">open_alerts is not FINAL.</text>
+<rect x="40" y="464" width="344" height="228" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="56" y="488" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">METADATA + SCHEMA / 3 TABLES</text>
+<text x="56" y="516" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="18" font-weight="600">Assets and schema history</text>
+<text x="56" y="540" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">metadata_assets</text>
+<text x="56" y="560" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">schema_snapshots</text>
+<text x="56" y="580" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">schema_drift_results</text>
+<text x="56" y="600" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">qualified_name / snapshot_id</text>
+<text x="56" y="620" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">Correlations, not constraints.</text>
+<rect x="432" y="464" width="344" height="228" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="448" y="488" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">TRIAGE + LEGACY / 5 TABLES</text>
+<text x="448" y="516" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="18" font-weight="600">Context, audit and delivery</text>
+<text x="448" y="540" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">agent_audit_log / incident_memory</text>
+<text x="448" y="560" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">agent_run_context_events (TTL)</text>
+<text x="448" y="580" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">approval_requests (legacy)</text>
+<text x="448" y="600" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">discord_incident_messages</text>
+<text x="448" y="620" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">alert_key: no enforced FK.</text>
+<rect x="824" y="192" width="416" height="200" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="840" y="216" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">ACTION + RESOLUTION / 6 TABLES</text>
+<text x="840" y="244" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="18" font-weight="600">Transactional control</text>
+<text x="840" y="268" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">approval_requests + 5 incident tables</text>
+<text x="840" y="288" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">5 FKs within incident subsystem</text>
+<text x="840" y="308" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">Approval != execution != Resolve</text>
+<text x="840" y="328" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">Outbox tracks independent sinks.</text>
+<rect x="824" y="464" width="416" height="228" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="840" y="488" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">DISCORD / 6 TABLES</text>
+<text x="840" y="516" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="18" font-weight="600">Workspace and request identity</text>
+<text x="840" y="540" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">copilot_requests / workspaces</text>
+<text x="840" y="560" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">workspace_events / investigation_claims</text>
+<text x="840" y="580" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">user_preferences / service_messages</text>
+<text x="840" y="600" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">Composite PKs + partial UQ indexes</text>
+<text x="840" y="620" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">No Discord-table FKs declared.</text>
+<text x="40" y="740" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">Complete fields and types: docs/data-model.md. Small subsystem diagrams expose selected keys and explicit omissions.</text>
+<path d="M40 772 H1240" stroke="#c1cfbe"/>
+<text x="40" y="796" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">Dashed: logical correlation only; no cardinality guarantee. dbt derivation is expanded in the warehouse diagram.</text>
+<text x="40" y="816" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">No cross-store FK. PostgreSQL incident FKs use NO ACTION. Optional SQLite checkpoints and Airflow internals omitted.</text>
+</svg>

@@ -1,0 +1,50 @@
+{
+  "title": "Data reliability, with explicit boundaries",
+  "description": "Airflow orchestrates synthetic orders through SeaweedFS, ClickHouse, dbt and deterministic checks. API clients and a direct MCP adapter share guarded tools with bounded LangGraph investigation. Human approval, operational execution and evidence-gated Resolve are separate boundaries, not autonomous repair.",
+  "width": 1360,
+  "height": 1080,
+  "zones": [
+    {"title": "01 / DETERMINISTIC DATA PLANE / AIRFLOW ORCHESTRATION", "bounds": [24, 144, 1312, 204]},
+    {"title": "02 / SHARED SERVICES + BOUNDED INVESTIGATION", "bounds": [24, 376, 1312, 324]},
+    {"title": "03 / INDEPENDENT HUMAN AND OPERATIONAL GATES", "bounds": [24, 728, 1312, 244]}
+  ],
+  "nodes": [
+    {"tag": "PYTHON / SYNTHETIC INPUT", "title": "Generate orders", "bounds": [48, 192, 264, 124], "lines": ["Seeded dates and scenarios", "Not an external source connector"]},
+    {"tag": "SEAWEEDFS / S3", "title": "Land and retain", "bounds": [368, 192, 272, 124], "lines": ["Parquet landing partitions", "Reports / dbt artifacts / evidence"]},
+    {"tag": "CLICKHOUSE + DBT", "title": "Load and transform", "bounds": [696, 192, 272, 124], "lines": ["raw -> staging -> daily mart", "Bounded partition reruns"]},
+    {"tag": "DETERMINISTIC CHECKS", "title": "Detect and record", "bounds": [1024, 192, 288, 124], "lines": ["DQ / profiling / schema drift", "ClickHouse alerts + audit evidence"]},
+    {"tag": "OPERATOR CLIENTS", "title": "UI and Discord", "bounds": [48, 424, 264, 124], "lines": ["Streamlit / optional web UI", "Discord uses the shared API"]},
+    {"tag": "FASTAPI + SHARED SERVICES", "title": "One control surface", "bounds": [368, 424, 272, 124], "lines": ["Evidence / Copilot / triage", "Authorized approval + Resolve"], "focal": true},
+    {"tag": "BOUNDED LANGGRAPH", "title": "Investigate and explain", "bounds": [696, 424, 272, 124], "lines": ["Policy-owned evidence loops", "Reports, not direct repair"]},
+    {"tag": "OPTIONAL / ROUTED LLM", "title": "Narrative support", "bounds": [1024, 424, 288, 124], "lines": ["Explicit enablement + budgets", "Heuristic / no-LLM fallback"]},
+    {"tag": "MCP / STDIO ADAPTER", "title": "Direct tool sharing", "bounds": [368, 588, 272, 84], "lines": []},
+    {"tag": "SHARED GUARDED TOOLS", "title": "Read bounded evidence", "bounds": [696, 588, 272, 84], "lines": []},
+    {"tag": "GATE A / HUMAN APPROVAL", "title": "Authorize exact scope", "bounds": [48, 780, 360, 156], "lines": ["Legacy ClickHouse backfill approvals", "PostgreSQL approved-action control", "A decision does not execute work."]},
+    {"tag": "GATE B / AIRFLOW EXECUTION", "title": "Dispatch approved work", "bounds": [488, 780, 360, 156], "lines": ["Backfill / allowlisted action DAGs", "Claims + idempotency + audit", "Success does not resolve an incident."]},
+    {"tag": "GATE C / RECHECK + HUMAN RESOLVE", "title": "Confirm evidence, then close", "bounds": [928, 780, 384, 156], "lines": ["Separate scoped revalidation DAG", "Fresh PASS + operator confirmation", "PostgreSQL state + sink outbox"]}
+  ],
+  "edges": [
+    {"kind": "data_flow", "points": [[312, 252], [368, 252]]},
+    {"kind": "data_flow", "points": [[640, 252], [696, 252]]},
+    {"kind": "data_flow", "points": [[968, 252], [1024, 252]]},
+    {"kind": "http", "points": [[312, 484], [368, 484]]},
+    {"kind": "data_flow", "points": [[640, 484], [696, 484]]},
+    {"kind": "optional", "points": [[968, 484], [1024, 484]]},
+    {"kind": "data_flow", "points": [[832, 548], [832, 588]]},
+    {"kind": "data_flow", "points": [[640, 632], [696, 632]]},
+    {"kind": "logical_correlation", "points": [[1168, 316], [1168, 356], [984, 356], [984, 632], [968, 632]]},
+    {"kind": "http", "points": [[384, 548], [344, 548], [344, 752], [228, 752], [228, 780]]},
+    {"kind": "data_flow", "points": [[408, 848], [488, 848]]}
+  ],
+  "notes": [
+    [48, 568, "MCP is not routed through FastAPI."],
+    [1024, 592, "Evidence reads only;"],
+    [1024, 612, "no LLM SQL execution."],
+    [928, 956, "Resolve never repairs data."],
+    [40, 996, "Airflow internals, Redis/Celery, optional SQLite checkpoints and individual tool nodes are intentionally omitted."]
+  ],
+  "legend": [
+    "Solid: implemented calls / data movement. Dashed: evidence correlation or optional model route. No autonomous repair loop.",
+    "Implementation map, not live acceptance. Approval, execution, revalidation and human closure remain separate."
+  ]
+}

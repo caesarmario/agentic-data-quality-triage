@@ -14,6 +14,12 @@ from urllib.parse import unquote, urlsplit
 # --- Defining Document Locations
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 README_PATH  = PROJECT_ROOT / "README.md"
+OPERATIONS_PATH = PROJECT_ROOT / "docs/local-operations.md"
+
+
+def documentation_text() -> str:
+    """Keep the short entry point and its linked operational examples under test."""
+    return "\n".join(path.read_text(encoding="utf-8") for path in (README_PATH, OPERATIONS_PATH))
 
 # --- Getting Logger
 logger = logging.getLogger(__name__)
@@ -22,7 +28,7 @@ logger = logging.getLogger(__name__)
 # --- Checking Documentation Contracts
 def test_readme_final_queries_use_replacing_engines() -> None:
     """Reject FINAL examples for tables whose bootstrap engine cannot merge versions."""
-    document = README_PATH.read_text(encoding="utf-8")
+    document = documentation_text()
     ddl = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (PROJECT_ROOT / "infra/init/clickhouse").glob("*.sql")
@@ -79,7 +85,7 @@ def test_readme_navigation_anchors_exist() -> None:
 
 def test_readme_dag_ids_match_explicit_files() -> None:
     """Match documented DAG IDs to source files. Receives nothing; returns None."""
-    document = README_PATH.read_text(encoding="utf-8")
+    document = documentation_text()
     dag_ids  = set(re.findall(r"\b\d{2}_dag_dq_[a-z0-9_]+\b", document))
 
     assert "00_dag_dq_platform_daily_orchestrator" in dag_ids
@@ -92,7 +98,7 @@ def test_readme_dag_ids_match_explicit_files() -> None:
 
 def test_readme_json_examples_parse_and_remain_safe() -> None:
     """Parse example payloads and check demo defaults. No args; returns None."""
-    document = README_PATH.read_text(encoding="utf-8")
+    document = documentation_text()
     blocks   = re.findall(r"```json\n(.*?)\n```", document, flags=re.DOTALL)
 
     assert blocks
@@ -111,11 +117,13 @@ def test_readme_json_examples_parse_and_remain_safe() -> None:
 
 def test_readme_fences_and_local_acceptance_boundary() -> None:
     """Keep formatting and zero-cost onboarding explicit. No args; returns None."""
-    document = README_PATH.read_text(encoding="utf-8")
+    document = documentation_text()
     fences   = re.findall(r"^```.*$", document, flags=re.MULTILINE)
 
     assert len(fences) % 2 == 0
-    assert "```mermaid" in document
+    assert "docs/diagrams/architecture.svg" in document
+    assert "docs/diagrams/data-model-overview.svg" in document
+    assert (PROJECT_ROOT / "docs/diagrams/data-model.mmd").is_file()
     assert "EXTERNAL_LLM_ENABLED=false" in document
     assert "final acceptance comes from an Airflow DagRun" in document
     assert not re.search(r"^TBD\s*$", document, flags=re.MULTILINE)
@@ -125,7 +133,7 @@ def test_readme_fences_and_local_acceptance_boundary() -> None:
 
 def test_readme_trigger_scripts_exist() -> None:
     """Resolve documented Airflow trigger scripts. No args; returns None."""
-    document = README_PATH.read_text(encoding="utf-8")
+    document = documentation_text()
     scripts  = set(re.findall(r"/opt/airflow/project/(scripts/[a-z_]+\.py)", document))
 
     assert scripts
@@ -137,7 +145,7 @@ def test_readme_trigger_scripts_exist() -> None:
 
 def test_readme_api_routes_exist() -> None:
     """Compare documented endpoints with API decorators. No args; returns None."""
-    document = README_PATH.read_text(encoding="utf-8")
+    document = documentation_text()
     module   = ast.parse((PROJECT_ROOT / "apps/api/main.py").read_text(encoding="utf-8-sig"))
     routes   = set()
 

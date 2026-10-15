@@ -27,3 +27,9 @@ infra/airflow/auth
 warehouse/dbt/target
 warehouse/dbt/dbt_packages
 
+# --- Keeping Offline Media Tooling Out Of Runtime Build Contexts
+tools/demo-video/node_modules
+tools/demo-video/.cache
+tools/demo-video/out
+tools/demo-video/*.tsbuildinfo
+

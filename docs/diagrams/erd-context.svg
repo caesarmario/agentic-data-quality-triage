@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="988" viewBox="0 0 1280 988" role="img" aria-labelledby="erd-context-title erd-context-desc">
+<title id="erd-context-title">Triage / context and audit evidence</title>
+<desc id="erd-context-desc">parent_run_id and alert identity correlate context with memory. Temporary context uses an expires_at deletion TTL; incident memory remains durable. Audit is append evidence, not an approval or recovery engine.</desc>
+<defs>
+<marker id="erd-context-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#4c6558"/></marker>
+<marker id="erd-context-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#22734b"/></marker>
+<marker id="erd-context-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#356851"/></marker>
+</defs>
+<rect x="0" y="0" width="1280" height="988" rx="0" fill="#f7f8f2" stroke="none"/>
+<text x="40" y="40" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">DATASENTRY / REPOSITORY CONTRACT</text>
+<text x="40" y="84" text-anchor="start" fill="#18382a" font-family="Instrument Serif, Georgia, serif" font-size="36" font-weight="400">Triage / context and audit evidence</text>
+<text x="40" y="120" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">Temporary run context, durable incident memory and tool audit have different lifetimes.</text>
+<path d="M 600 276 L 632 276 Q 640 276 648 276 L 680 276" fill="none" stroke="#4c6558" stroke-width="1.5" stroke-dasharray="5 5" marker-end="url(#erd-context-arrow-muted)"/>
+<rect x="40" y="176" width="560" height="248" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="56" y="200" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">CLICKHOUSE / TABLE</text>
+<text x="56" y="228" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="16" font-weight="600">dq.agent_run_context_events</text>
+<rect x="41" y="240" width="558" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="256" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">context_event_id</text>
+<text x="584" y="256" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">UUID</text>
+<text x="56" y="284" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">parent_run_id</text>
+<text x="584" y="284" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">UUID</text>
+<rect x="41" y="296" width="558" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="312" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">alert_key</text>
+<text x="584" y="312" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">String</text>
+<text x="56" y="340" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">phase</text>
+<text x="584" y="340" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">LowCardinality(String)</text>
+<rect x="41" y="352" width="558" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="368" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">expires_at</text>
+<text x="584" y="368" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">DateTime(&#x27;UTC&#x27;)</text>
+<text x="56" y="396" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">content_sha256</text>
+<text x="584" y="396" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">FixedString(64)</text>
+<text x="56" y="416" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">+ 15 more columns</text>
+<rect x="680" y="176" width="560" height="248" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="696" y="200" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">CLICKHOUSE / TABLE</text>
+<text x="696" y="228" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="16" font-weight="600">dq.incident_memory</text>
+<rect x="681" y="240" width="558" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="696" y="256" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">memory_id</text>
+<text x="1224" y="256" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">UUID</text>
+<text x="696" y="284" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">parent_run_id</text>
+<text x="1224" y="284" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">UUID</text>
+<rect x="681" y="296" width="558" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="696" y="312" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">alert_key</text>
+<text x="1224" y="312" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">String</text>
+<text x="696" y="340" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">outcome_status</text>
+<text x="1224" y="340" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">LowCardinality(String)</text>
+<rect x="681" y="352" width="558" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="696" y="368" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">resolution_reference</text>
+<text x="1224" y="368" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">String</text>
+<text x="696" y="396" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">content_sha256</text>
+<text x="1224" y="396" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">FixedString(64)</text>
+<text x="696" y="416" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">+ 12 more columns</text>
+<rect x="40" y="524" width="560" height="248" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="56" y="548" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">CLICKHOUSE / TABLE</text>
+<text x="56" y="576" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="16" font-weight="600">dq.agent_audit_log</text>
+<rect x="41" y="588" width="558" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="604" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">audit_id</text>
+<text x="584" y="604" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">UUID</text>
+<text x="56" y="632" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">agent_run_id</text>
+<text x="584" y="632" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">UUID</text>
+<rect x="41" y="644" width="558" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="660" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">alert_key</text>
+<text x="584" y="660" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">String</text>
+<text x="56" y="688" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">action</text>
+<text x="584" y="688" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">LowCardinality(String)</text>
+<rect x="41" y="700" width="558" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="716" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">tool_name</text>
+<text x="584" y="716" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">LowCardinality(String)</text>
+<text x="56" y="744" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">status</text>
+<text x="584" y="744" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">LowCardinality(String)</text>
+<text x="56" y="764" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">+ 10 more columns</text>
+<text x="40" y="872" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">Context TTL: expires_at DELETE. Logical shared run/incident identity does not imply one-to-one records.</text>
+<path d="M40 920 H1240" stroke="#c1cfbe"/>
+<text x="40" y="944" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">PK/FK: PostgreSQL constraints only. Solid gray FK: child N -&gt; parent 1; ON DELETE / UPDATE NO ACTION.</text>
+<text x="40" y="964" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">Dashed gray: logical only. Solid blue: dbt derivation. Selected columns; full types and all omitted fields in data-model.md.</text>
+</svg>

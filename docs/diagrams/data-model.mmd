@@ -1,0 +1,57 @@
+%% Generated source index; SVG layouts are intentionally hand-directed.
+%% Only -->|FK ...| edges are enforced. Dashed edges are logical, not cardinality.
+flowchart LR
+  subgraph clickhouse[clickhouse]
+    dq_agent_audit_log["dq.agent_audit_log / table"]
+    dq_agent_run_context_events["dq.agent_run_context_events / table"]
+    dq_alerts["dq.alerts / table"]
+    dq_approval_requests["dq.approval_requests / table"]
+    dq_data_profile_results["dq.data_profile_results / table"]
+    dq_discord_incident_messages["dq.discord_incident_messages / table"]
+    dq_dq_check_results["dq.dq_check_results / table"]
+    dq_fct_orders_daily["dq.fct_orders_daily / table"]
+    dq_incident_memory["dq.incident_memory / table"]
+    dq_metadata_assets["dq.metadata_assets / table"]
+    dq_open_alerts["dq.open_alerts / view"]
+    dq_pipeline_runs["dq.pipeline_runs / table"]
+    dq_raw_orders["dq.raw_orders / table"]
+    dq_schema_drift_results["dq.schema_drift_results / table"]
+    dq_schema_snapshots["dq.schema_snapshots / table"]
+    dq_stg_orders["dq.stg_orders / table"]
+  end
+  subgraph postgresql[postgresql]
+    dq_control_approval_requests["dq_control.approval_requests / table"]
+    dq_control_discord_copilot_requests["dq_control.discord_copilot_requests / table"]
+    dq_control_discord_incident_workspaces["dq_control.discord_incident_workspaces / table"]
+    dq_control_discord_investigation_claims["dq_control.discord_investigation_claims / table"]
+    dq_control_discord_service_messages["dq_control.discord_service_messages / table"]
+    dq_control_discord_user_preferences["dq_control.discord_user_preferences / table"]
+    dq_control_discord_workspace_events["dq_control.discord_workspace_events / table"]
+    dq_control_incident_controls["dq_control.incident_controls / table"]
+    dq_control_incident_outbox["dq_control.incident_outbox / table"]
+    dq_control_incident_resolution_decisions["dq_control.incident_resolution_decisions / table"]
+    dq_control_incident_revalidation_keys["dq_control.incident_revalidation_keys / table"]
+    dq_control_incident_revalidations["dq_control.incident_revalidations / table"]
+  end
+  dq_raw_orders -.->|"dbt_derivation"| dq_stg_orders
+  dq_stg_orders -.->|"dbt_derivation"| dq_fct_orders_daily
+  dq_control_incident_outbox -->|"FK alert_key / NO ACTION"| dq_control_incident_controls
+  dq_control_incident_resolution_decisions -->|"FK alert_key / NO ACTION"| dq_control_incident_controls
+  dq_control_incident_resolution_decisions -->|"FK request_id / NO ACTION"| dq_control_incident_revalidations
+  dq_control_incident_revalidation_keys -->|"FK request_id / NO ACTION"| dq_control_incident_revalidations
+  dq_control_incident_revalidations -->|"FK alert_key / NO ACTION"| dq_control_incident_controls
+  dq_agent_audit_log -.->|"logical_correlation"| dq_alerts
+  dq_agent_run_context_events -.->|"logical_correlation"| dq_incident_memory
+  dq_alerts -.->|"logical_correlation"| dq_dq_check_results
+  dq_approval_requests -.->|"logical_correlation"| dq_alerts
+  dq_data_profile_results -.->|"logical_correlation"| dq_stg_orders
+  dq_discord_incident_messages -.->|"logical_correlation"| dq_alerts
+  dq_pipeline_runs -.->|"logical_correlation"| dq_stg_orders
+  dq_schema_drift_results -.->|"logical_correlation"| dq_schema_snapshots
+  dq_schema_snapshots -.->|"logical_correlation"| dq_metadata_assets
+  dq_control_approval_requests -.->|"logical_correlation"| dq_control_incident_controls
+  dq_control_discord_copilot_requests -.->|"logical_correlation"| dq_control_discord_incident_workspaces
+  dq_control_discord_investigation_claims -.->|"logical_correlation"| dq_control_discord_incident_workspaces
+  dq_control_discord_workspace_events -.->|"logical_correlation"| dq_control_discord_incident_workspaces
+  dq_control_incident_controls -.->|"logical_correlation"| dq_alerts
+  dq_alerts -.->|"view_derivation"| dq_open_alerts

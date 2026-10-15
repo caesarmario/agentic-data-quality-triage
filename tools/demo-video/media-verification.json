@@ -1,0 +1,27 @@
+{
+  "artifact": "data/acceptance/repository-refresh/datasentry-demo.mp4",
+  "bytes": 7452064,
+  "decimalMB": 7.452,
+  "sha256": "b14ce2c69efd0cc38b1077b4daad9a303ae48f1c79fb4a18991bc6f0621778b8",
+  "durationSeconds": 180,
+  "width": 1280,
+  "height": 720,
+  "codec": "h264",
+  "pixelFormat": "yuv420p",
+  "fps": "30/1",
+  "frames": "5400",
+  "audioStreams": 0,
+  "checks": {
+    "oneVideoStream": true,
+    "h264": true,
+    "resolution": true,
+    "fps": true,
+    "frameCount": true,
+    "duration": true,
+    "noAudio": true,
+    "uploadSize": true,
+    "yuv420p": true
+  },
+  "scope": "Local media QA only. No new Airflow/platform acceptance, services, browser UI actions, provider calls or remediation.",
+  "githubAttachment": "https://github.com/user-attachments/assets/186c375d-3629-47e3-b9c8-b69b2e261a0b"
+}

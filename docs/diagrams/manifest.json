@@ -1,0 +1,256 @@
+{
+  "schema_version": 1,
+  "generator": "scripts/build_repository_diagrams.py",
+  "command": "py -3 scripts/build_repository_diagrams.py",
+  "public_api": "build_catalog(root=None) -> dict; read-only",
+  "catalog": "docs/diagrams/schema-catalog.json",
+  "counts": {
+    "objects": 28,
+    "clickhouse_tables": 15,
+    "clickhouse_views": 1,
+    "postgresql_tables": 12,
+    "columns": 399,
+    "foreign_keys": 5,
+    "dbt_models": 2
+  },
+  "detail_diagram_objects": [
+    "dq.agent_audit_log",
+    "dq.agent_run_context_events",
+    "dq.alerts",
+    "dq.approval_requests",
+    "dq.data_profile_results",
+    "dq.discord_incident_messages",
+    "dq.dq_check_results",
+    "dq.fct_orders_daily",
+    "dq.incident_memory",
+    "dq.metadata_assets",
+    "dq.open_alerts",
+    "dq.pipeline_runs",
+    "dq.raw_orders",
+    "dq.schema_drift_results",
+    "dq.schema_snapshots",
+    "dq.stg_orders",
+    "dq_control.approval_requests",
+    "dq_control.discord_copilot_requests",
+    "dq_control.discord_incident_workspaces",
+    "dq_control.discord_investigation_claims",
+    "dq_control.discord_service_messages",
+    "dq_control.discord_user_preferences",
+    "dq_control.discord_workspace_events",
+    "dq_control.incident_controls",
+    "dq_control.incident_outbox",
+    "dq_control.incident_resolution_decisions",
+    "dq_control.incident_revalidation_keys",
+    "dq_control.incident_revalidations"
+  ],
+  "inputs": [
+    {
+      "path": "infra/init/clickhouse/00_database.sql",
+      "sha256": "ac2c0b91901efbf2e78a288c5dd481b4e522a0151181d852644efd74124a1d96"
+    },
+    {
+      "path": "infra/init/clickhouse/01_orders_tables.sql",
+      "sha256": "d44d46e4b49411fbeab367a9b0faa05328454e7023fed2d2b9beb18c41fc8c74"
+    },
+    {
+      "path": "infra/init/clickhouse/02_observability_tables.sql",
+      "sha256": "c2e716f75d68b2a310678afea5a20649655ac2c01fb1f03f76eccf1b73651f13"
+    },
+    {
+      "path": "infra/init/clickhouse/03_agent_tables.sql",
+      "sha256": "8e48bc1457c53143b66078bef79ea2641780d59bd47a1f88a8ae8282cc217f89"
+    },
+    {
+      "path": "infra/init/clickhouse/04_views.sql",
+      "sha256": "047164904f7847e148a289da486ae949312e2fc0a56b726db1e5577eb81255ff"
+    },
+    {
+      "path": "infra/init/clickhouse/05_metadata_tables.sql",
+      "sha256": "53a29c99109e82dbd510b5ae17429b143d0ccd5b6d9f18b729bfce4826fb89ab"
+    },
+    {
+      "path": "infra/init/clickhouse/06_schema_drift_tables.sql",
+      "sha256": "d794bbbf12be4e8dd15d1ed9c35a2193fdc06eee4e53e9cdbc784021fce00f60"
+    },
+    {
+      "path": "infra/init/clickhouse/07_agent_context_tables.sql",
+      "sha256": "f57e643fa6a33479e4b447521c6ff653d5dfb5c838a9027d9566612259818ab5"
+    },
+    {
+      "path": "infra/init/clickhouse/08_discord_incident_messages.sql",
+      "sha256": "0b2678081606499906678a1d49c18366dd663146556e8ed27cf11913bd134a3b"
+    },
+    {
+      "path": "infra/init/clickhouse/09_discord_bot_delivery_migration.sql",
+      "sha256": "63d9bed4a83b3059cf4ce660c8b6862253d76908158c74497c79808b0a5dfb71"
+    },
+    {
+      "path": "infra/init/postgres/01_approval_control_store.sql",
+      "sha256": "30d4fa6686f5b0337563c5822236ac8adf5ccac70bc116ccde9846bd6473906b"
+    },
+    {
+      "path": "infra/init/postgres/02_discord_copilot_requests.sql",
+      "sha256": "deb3dace1ef0c1c42db02543e1ee77eecb18d1c68ec9a054dbe108a9f1ce5baf"
+    },
+    {
+      "path": "infra/init/postgres/03_incident_resolution.sql",
+      "sha256": "60086ca6f88fee9e774cde16b2bfa1f79ffbd13524ad56ae68575dd10e54e04c"
+    },
+    {
+      "path": "infra/init/postgres/04_discord_workspaces.sql",
+      "sha256": "2bf5912180d054f37657d3247d044a826b466b1e02ccb1710e14235987d1a71e"
+    },
+    {
+      "path": "infra/init/postgres/05_discord_language_preferences.sql",
+      "sha256": "85f4560b7b4afe96f302a8ad5fb1bacad79d50b86df322060243dddfc189aff8"
+    },
+    {
+      "path": "infra/init/postgres/06_discord_command_conversations.sql",
+      "sha256": "9613e09b3153f31f70b01fe7798e7f04c3c9ed930313717a9846b817c6bc1a4c"
+    },
+    {
+      "path": "infra/init/postgres/07_discord_investigation_cancellation.sql",
+      "sha256": "619e1cacd03a31ac5e4e0c83ab3a88be7ff99db113518b9b311e08e51dfcafae"
+    },
+    {
+      "path": "infra/init/postgres/08_discord_service_messages.sql",
+      "sha256": "508df37d67cff7068b129d18e30fa757262f01e79da069b90a3983264098fc02"
+    },
+    {
+      "path": "warehouse/dbt/.user.yml",
+      "sha256": "63cac64e257670600dcb35a031c637e8c85b044ebfb186af4cc996a1cf6d1f8d"
+    },
+    {
+      "path": "warehouse/dbt/dbt_project.yml",
+      "sha256": "8e02650c2edb7a1ee0cab2e3db4c0ddc172a16a9d32a671efe32a551a29f3fc9"
+    },
+    {
+      "path": "warehouse/dbt/macros/tests/freshness_by_date.sql",
+      "sha256": "cfbf2369d31a61d3387ad2be529eec57437d046f4ecf7a33d03befb9bf6f309e"
+    },
+    {
+      "path": "warehouse/dbt/macros/tests/rowcount_anomaly.sql",
+      "sha256": "345815d8c7b7ecf00de6110f9e6e2dbf8bba8f766c5137805975d840536c3725"
+    },
+    {
+      "path": "warehouse/dbt/models/marts/fct_orders_daily.sql",
+      "sha256": "85329de08ff0dd2fb25f33b4fa3004a442f1c2f228d1e456803c3ca7633991e7"
+    },
+    {
+      "path": "warehouse/dbt/models/marts/schema.yml",
+      "sha256": "74b2065c8358df690c55dea0d63fb7d53e4f5d94a5c2c3f4537b6c0bc831a643"
+    },
+    {
+      "path": "warehouse/dbt/models/sources.yml",
+      "sha256": "6f68c4724632f88588cc10a66f8b1f0843e673132be43412a5c441ea2cc382a7"
+    },
+    {
+      "path": "warehouse/dbt/models/staging/schema.yml",
+      "sha256": "be30857719fe136d9c94ab8b24c9edbe976301220f22045c58d90f735642bcd1"
+    },
+    {
+      "path": "warehouse/dbt/models/staging/stg_orders.sql",
+      "sha256": "c375bc2f55af8c5f648ecb5913147540f0f622cedcc8187a35c156647f54fdea"
+    },
+    {
+      "path": "warehouse/dbt/tests/fct_orders_daily_reconciles_to_stg_orders.sql",
+      "sha256": "44971bc0ce12ed206254c3e524560d7ec04fcaf7f16df915309f6021befbb9cc"
+    },
+    {
+      "path": "warehouse/dbt/tests/fct_orders_daily_unique_grain.sql",
+      "sha256": "f6c1b5e627ee5ad912dd72600aae3d9c49fe4eeb78f5d006bb8fd92dff046fd7"
+    },
+    {
+      "path": "scripts/build_repository_diagrams.py",
+      "sha256": "75a6aa03bc7506e91a5ad9b3ab47a26848e940b01346965845279a29183d0107"
+    },
+    {
+      "path": "docs/architecture.md",
+      "sha256": "19cdd6b3b539a3c52d269ec3f29002d6f8f974336822ee111cfc90c0c595bdb4"
+    },
+    {
+      "path": "docs/diagrams/diagram-specs.json",
+      "sha256": "57461d409db2a364aa4d1367fe81566d94602fe73d76e7b768547fc8323dec25"
+    },
+    {
+      "path": "docs/diagrams/style-tokens.json",
+      "sha256": "f6f0266d696e0336125a51b034a1745fed15edbbf6860ece4d5167a79d99fd01"
+    },
+    {
+      "path": "docs/diagrams/architecture.json",
+      "sha256": "04bfc5003084d015cdb7d26d2fc273408d089a237203a02395a72b2a0ef6d537"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "docs/data-model.md",
+      "sha256": "a6af7a8fa2bb0d42a4a6a6058eeae8c123a9314f1855cbdea3d170c1b60a4483"
+    },
+    {
+      "path": "docs/diagrams/architecture.svg",
+      "sha256": "494a72260ac466a6faffd31dc651187aa19b4b682660ff386ef00aafe53e8a30"
+    },
+    {
+      "path": "docs/diagrams/data-model-overview.svg",
+      "sha256": "1b8d16d20e91f3a75f5462d9dd86ab22d72ffef6a1de1bfbd4207dbd7e2800da"
+    },
+    {
+      "path": "docs/diagrams/data-model.mmd",
+      "sha256": "a60c708a2bd6ab44b8a7d6718241453d90a94f9d7bd5c5cc908b3d0d4c98cc92"
+    },
+    {
+      "path": "docs/diagrams/erd-alert-view.svg",
+      "sha256": "2e90d926a2a3c22c949b73c1c59355b07d5b8dbef8a1391657848dfb75384e03"
+    },
+    {
+      "path": "docs/diagrams/erd-approvals.svg",
+      "sha256": "a30d9c1fc39e59421aab0c3fd955b60ca3e3a58852793a5d2f0957f33269bdb1"
+    },
+    {
+      "path": "docs/diagrams/erd-context.svg",
+      "sha256": "7455a2e47564a6670f6ea8b813894bdbb29a41f6e3b2e3b82ef515e8a186b0c0"
+    },
+    {
+      "path": "docs/diagrams/erd-discord-control.svg",
+      "sha256": "a42130215a8b2bf8b0fee725b0bb1180e1cacc0a92856dd43a90ff2aef3f93f2"
+    },
+    {
+      "path": "docs/diagrams/erd-discord-delivery.svg",
+      "sha256": "85783cfd8465e321d51b6dc870ef32c2da72443f04fec5bbc80194dcf6541362"
+    },
+    {
+      "path": "docs/diagrams/erd-discord-workspaces.svg",
+      "sha256": "8a18595bc67eb377312be220bb31e4e04339d5e3c103435f5064f8f1f426f846"
+    },
+    {
+      "path": "docs/diagrams/erd-metadata-schema.svg",
+      "sha256": "67766ad1d97698f5705628cda7c41c196ebe03cba2528c9fac54e1bd85947ef1"
+    },
+    {
+      "path": "docs/diagrams/erd-observability.svg",
+      "sha256": "83abc0a53255d1a1cfcc6829cab7cb2efe6c2ffcf302e441a10f8c7172432c3d"
+    },
+    {
+      "path": "docs/diagrams/erd-resolution-decisions.svg",
+      "sha256": "18597539a73c655a734efaa66a474258012d8619f2833c3ffee02cabe6b00195"
+    },
+    {
+      "path": "docs/diagrams/erd-resolution-outbox.svg",
+      "sha256": "b6cc153ae6d148763492cae3aa452d8192902592e80a115fce6d6edd676b1403"
+    },
+    {
+      "path": "docs/diagrams/erd-resolution-requests.svg",
+      "sha256": "3bc5f9cd4dba241d3d3004557ddc7e51b741bf4d3f837fa9c4c4a6d843e8b54e"
+    },
+    {
+      "path": "docs/diagrams/erd-warehouse.svg",
+      "sha256": "e9b97105b3e15e3555cf387b67c7598d563fb8f4d6d2f6e346f1f8a604bb6141"
+    },
+    {
+      "path": "docs/diagrams/schema-catalog.json",
+      "sha256": "1408476d2bd660e6725373cc367fd8799d9318a99dfd579a3afa1b80752ba8eb"
+    }
+  ],
+  "self_hash_excluded": true,
+  "acceptance": "Local generation only; Airflow acceptance required separately"
+}
