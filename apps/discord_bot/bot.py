@@ -12,7 +12,10 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
+from dataclasses import replace
+from functools import wraps
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -33,15 +36,23 @@ from agent.llm.copilot import (
     build_quality_summary_copilot_note,
 )
 from apps.discord_bot.formatters import (
-    format_alert_list,
-    format_approval_recorded,
-    format_backfill_preview,
-    format_bot_online,
-    format_daily_summary,
-    format_operator_answer,
-    format_quality_summary,
-    format_triage_result,
+    render_alert_list_embed,
+    render_approval_embed,
+    render_daily_summary_embed,
+    render_debug_embed,
+    render_operator_answer_embed,
+    render_quality_summary_embed,
+    render_triage_embed,
     split_message,
+)
+from apps.discord_bot.contracts import DiscordRenderResult
+from apps.discord_bot.interactions import (
+    build_discord_view,
+    register_persistent_interactions,
+    validate_interaction_scope,
+    get_incident_workspace,
+    run_workspace_investigation,
+    send_render_to_thread,
 )
 from apps.discord_bot.service import (
     DEFAULT_ALERT_LIMIT,
@@ -49,15 +60,26 @@ from apps.discord_bot.service import (
     answer_discord_question,
     build_discord_triage_note,
     create_discord_backfill_approval_request,
-    decide_discord_approval_request,
     fetch_discord_daily_summary,
     fetch_discord_database_summary,
+    fetch_discord_debug_context,
+    fetch_discord_approval_request,
     fetch_discord_alerts,
     fetch_discord_table_summary,
     fetch_discord_weekly_summary,
     probe_control_plane_health,
     run_discord_triage,
 )
+from apps.discord_bot.delivery import synchronize_incident_message
+from apps.discord_bot.mentions import MentionAskHandler
+from apps.discord_bot.mention_store import MentionRequestState
+from apps.discord_bot.workspace import get_incident_workspace as workspace_runtime
+from apps.discord_bot.preferences import get_user_language, set_user_language
+from apps.common.i18n import language_context, translate as tr
+from apps.discord_bot.help import (
+    command_catalog, handle_help_mention, render_help, show_error, show_help,
+)
+from agent.tools.audit_log import build_llm_route_audit_payload
 from pipelines.common.logging import logger
 from pipelines.seeding.helpers import parse_date
 
@@ -75,15 +97,27 @@ REQUIRED_DISCORD_SETTINGS = (
     "DISCORD_GUILD_ID",
     "DISCORD_ALERTS_CHANNEL_ID",
     "DISCORD_TRIAGE_CHANNEL_ID",
+    "DISCORD_OPS_CHANNEL_ID",
 )
 
 
 # --- Creating Discord Client
 intents        = discord.Intents.none()
 intents.guilds = True
+intents.guild_messages = True
 
 client = discord.Client(intents=intents)
 tree   = app_commands.CommandTree(client)
+register_persistent_interactions(client)
+mention_ask = MentionAskHandler(client, GUILD_ID, TRIAGE_CHANNEL_ID)
+
+
+@client.event
+async def on_message(message: discord.Message) -> None:
+    """Accept explicit mentions without enabling privileged content access."""
+    if await handle_help_mention(client, message):
+        return
+    await mention_ask.handle(message)
 
 
 # --- Defining Configuration Helpers
@@ -125,6 +159,54 @@ def register_dq_command_group() -> app_commands.Group:
 
 # Register the group before child decorators are evaluated below.
 dq_group = register_dq_command_group()
+client.datasentry_help_catalog = lambda: command_catalog(tree, guild_object())
+
+
+HELP_CHOICES = [app_commands.Choice(name=name, value=value) for name, value in (
+    ("Quick Start", "start"), ("Commands", "commands"),
+    ("Button Guide", "buttons"), ("Safety & AI", "safety"),
+)]
+
+
+@tree.command(name="help", description="Learn how to use DataSentry", guild=guild_object())
+@app_commands.choices(topic=HELP_CHOICES)
+async def help_command(interaction: discord.Interaction, topic: str = "start") -> None:
+    await show_help(interaction, topic)
+
+
+@dq_group.command(name="help", description="Learn how to use DataSentry")
+@app_commands.choices(topic=HELP_CHOICES)
+async def dq_help(interaction: discord.Interaction, topic: str = "start") -> None:
+    await show_help(interaction, topic)
+
+
+def localized_command(callback):
+    """Resolve actor preference within the response deadline; isolate async locale."""
+    @wraps(callback)
+    async def wrapped(interaction, *args, **kwargs):
+        language = "en"
+        if getattr(interaction, "guild_id", None) and getattr(interaction, "user", None):
+            try:
+                language = await asyncio.wait_for(asyncio.to_thread(
+                    get_user_language, interaction.guild_id, interaction.user.id), timeout=1.0)
+            except asyncio.TimeoutError:
+                logger.warning("Discord language lookup timed out; defaulting to English")
+        with language_context(language):
+            return await callback(interaction, *args, **kwargs)
+    return wrapped
+
+
+@dq_group.command(name="language", description="Choose your response language; shared incident cards stay English")
+@app_commands.choices(language=[app_commands.Choice(name="English", value="en"), app_commands.Choice(name="Indonesia", value="id")])
+async def dq_language(interaction: discord.Interaction, language: app_commands.Choice[str]) -> None:
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    try:
+        validate_interaction_scope(interaction, allowed_channels={value for value in {ALERTS_CHANNEL_ID, TRIAGE_CHANNEL_ID, OPS_CHANNEL_ID} if value}, require_bot_authored_message=False)
+        selected = await asyncio.to_thread(set_user_language, interaction.guild_id, interaction.user.id, language.value)
+        text = "Your language is now English. Shared incident cards remain English." if selected == "en" else "Bahasa respons Anda sekarang Indonesia. Kartu incident bersama tetap menggunakan bahasa Inggris."
+        await interaction.followup.send(text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+    except Exception as exc:
+        await command_error(interaction, "Language preference", exc)
 
 
 def registered_command_names() -> list[str]:
@@ -258,6 +340,26 @@ async def send_text(channel_id: int, content: str) -> bool:
     return True
 
 
+async def send_render(channel_id: int, result: DiscordRenderResult) -> bool:
+    """Send one compact embed with mentions disabled."""
+    if not channel_id:
+        logger.info("Discord channel id is not configured; skipping embed send")
+        return False
+
+    channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
+    embeds  = [discord.Embed.from_dict(item) for item in result.payload.get("embeds", [])]
+    view    = build_discord_view(result)
+
+    await channel.send(
+        content=str(result.payload.get("content") or "") or None,
+        embeds=embeds,
+        view=view,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+    return True
+
+
 async def respond_with_message(
     interaction: discord.Interaction,
     content: str,
@@ -274,34 +376,46 @@ async def respond_with_message(
     Returns:
         None.
     """
-    for chunk in split_message(content):
-        await interaction.followup.send(chunk, ephemeral=ephemeral)
+    for chunk in split_message(tr(content)):
+        await interaction.followup.send(chunk, ephemeral=ephemeral, allowed_mentions=discord.AllowedMentions.none())
 
 
-async def publish_result(
+async def respond_with_render(
+    interaction: discord.Interaction,
+    result: DiscordRenderResult,
+    ephemeral: bool = True,
+) -> None:
+    """Return one compact embed directly to the command caller."""
+    embeds = [discord.Embed.from_dict(item) for item in result.payload.get("embeds", [])]
+    view   = build_discord_view(result)
+
+    send_kwargs: dict[str, Any] = {
+        "content": str(result.payload.get("content") or "") or None,
+        "embeds": embeds,
+        "ephemeral": ephemeral,
+        "allowed_mentions": discord.AllowedMentions.none(),
+    }
+    if view is not None:
+        send_kwargs["view"] = view
+
+    await interaction.followup.send(
+        **send_kwargs,
+    )
+
+
+async def publish_render(
     interaction: discord.Interaction,
     channel_id: int,
-    message: str,
+    result: DiscordRenderResult,
     acknowledgement: str,
 ) -> None:
-    """
-    Publish a command result and provide a concise interaction acknowledgement.
-
-    Args:
-        interaction: Initiating Discord interaction.
-        channel_id: Configured destination channel.
-        message: Formatted operator result.
-        acknowledgement: Short response shown to the command caller.
-
-    Returns:
-        None.
-    """
-    sent = await send_text(channel_id=channel_id, content=message)
+    """Publish a compact embed or return it ephemerally when no channel exists."""
+    sent = await send_render(channel_id=channel_id, result=result)
 
     if sent:
         await respond_with_message(interaction=interaction, content=acknowledgement)
     else:
-        await respond_with_message(interaction=interaction, content=message)
+        await respond_with_render(interaction=interaction, result=result)
 
 
 async def command_error(
@@ -320,22 +434,26 @@ async def command_error(
     Returns:
         None.
     """
-    logger.exception(
+    logger.warning(
         "Discord command failed | operation=%s error_type=%s",
         operation,
         type(exc).__name__,
     )
-    await respond_with_message(
-        interaction=interaction,
-        content=f"{operation} failed safely. Error type: {type(exc).__name__}.",
-    )
+    await show_error(interaction, operation, exc)
+
+
+@tree.error
+async def application_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+    """Handle delivered interaction errors, never raw unknown slash messages."""
+    operation = str(getattr(getattr(interaction, "command", None), "qualified_name", "Command"))
+    await command_error(interaction, operation, error)
 
 
 # --- Defining Discord Events
 @client.event
 async def on_ready() -> None:
     """
-    Synchronize slash commands and announce bot readiness.
+    Synchronize slash commands and retain readiness diagnostics in logs only.
 
     Returns:
         None.
@@ -355,7 +473,18 @@ async def on_ready() -> None:
         diagnostics["command_scope"],
         diagnostics["message_content_intent_enabled"],
     )
-    await send_text(channel_id=ALERTS_CHANNEL_ID, content=format_bot_online())
+    if os.getenv("DISCORD_WELCOME_ENABLED", "true").strip().lower() == "true":
+        try:
+            from apps.discord_bot.welcome import sync_welcome
+            with language_context("en"):
+                render = render_help(welcome=True)
+            result = await sync_welcome(client, GUILD_ID, TRIAGE_CHANNEL_ID, render,
+                                        view_factory=build_discord_view)
+            logger.info("Discord welcome synchronized | status=%s message_id=%s",
+                        result.get("status"), result.get("message_id", ""))
+        except Exception as exc:
+            logger.warning("Discord welcome unavailable; commands remain ready | error_type=%s", type(exc).__name__)
+    logger.info("Discord startup diagnostics retained in logs; no alert/ops startup message was created")
 
 
 # --- Defining Slash Commands
@@ -369,6 +498,7 @@ async def on_ready() -> None:
     status="Alert lifecycle status",
     limit="Maximum alerts to show",
 )
+@localized_command
 async def alerts(
     interaction: discord.Interaction,
     dt: str = "",
@@ -403,24 +533,28 @@ async def alerts(
             bounded_limit,
         )
         alert_rows = list(payload.get("alerts", []))
+        llm_responses: list[Any] = []
         note       = await asyncio.to_thread(
             build_alert_list_copilot_note,
             alert_rows,
             status,
             normalized_dt,
+            llm_responses,
         )
-        message = format_alert_list(
+        llm_runtime = build_llm_route_audit_payload(llm_responses[-1]) if llm_responses else {}
+        render_result = render_alert_list_embed(
             alerts=alert_rows,
             status=status,
             dt=normalized_dt,
             assistant_note=note,
             data_transport=data_transport,
+            llm_runtime=llm_runtime,
         )
-        await publish_result(
+        await publish_render(
             interaction=interaction,
-            channel_id=ALERTS_CHANNEL_ID,
-            message=message,
-            acknowledgement="Alert list posted to the configured alerts channel.",
+            channel_id=TRIAGE_CHANNEL_ID,
+            result=render_result,
+            acknowledgement="Alert list posted to the configured triage channel.",
         )
 
     except Exception as exc:
@@ -433,6 +567,7 @@ async def alerts(
     guild=guild_object(),
 )
 @app_commands.describe(dt="Business date in YYYY-MM-DD format")
+@localized_command
 async def daily_summary(interaction: discord.Interaction, dt: str) -> None:
     """
     Show daily DQ counts with a natural-language reliability readout.
@@ -454,24 +589,28 @@ async def daily_summary(interaction: discord.Interaction, dt: str) -> None:
         )
         check_rows = list(summary_payload.get("check_counts") or [])
         alert_rows = list(summary_payload.get("alert_counts") or [])
+        llm_responses: list[Any] = []
         note = await asyncio.to_thread(
             build_daily_summary_copilot_note,
             normalized_dt,
             check_rows,
             alert_rows,
+            llm_responses,
         )
-        message = format_daily_summary(
+        llm_runtime = build_llm_route_audit_payload(llm_responses[-1]) if llm_responses else {}
+        render_result = render_daily_summary_embed(
             dt=normalized_dt,
             check_rows=check_rows,
             alert_rows=alert_rows,
             assistant_note=note,
             data_transport=data_transport,
+            llm_runtime=llm_runtime,
         )
-        await publish_result(
+        await publish_render(
             interaction=interaction,
-            channel_id=ALERTS_CHANNEL_ID,
-            message=message,
-            acknowledgement="Daily summary posted to the configured alerts channel.",
+            channel_id=TRIAGE_CHANNEL_ID,
+            result=render_result,
+            acknowledgement="Daily summary posted to the configured triage channel.",
         )
 
     except Exception as exc:
@@ -485,16 +624,19 @@ async def publish_extended_quality_summary(
     acknowledgement: str,
 ) -> None:
     """Build a bounded Copilot note and publish one extended quality summary."""
-    note = await asyncio.to_thread(build_quality_summary_copilot_note, payload)
-    message = format_quality_summary(
+    llm_responses: list[Any] = []
+    note = await asyncio.to_thread(build_quality_summary_copilot_note, payload, llm_responses)
+    llm_runtime = build_llm_route_audit_payload(llm_responses[-1]) if llm_responses else {}
+    render_result = render_quality_summary_embed(
         payload=payload,
         assistant_note=note,
         data_transport=data_transport,
+        llm_runtime=llm_runtime,
     )
-    await publish_result(
+    await publish_render(
         interaction=interaction,
-        channel_id=ALERTS_CHANNEL_ID,
-        message=message,
+        channel_id=TRIAGE_CHANNEL_ID,
+        result=render_result,
         acknowledgement=acknowledgement,
     )
 
@@ -505,6 +647,7 @@ async def publish_extended_quality_summary(
     guild=guild_object(),
 )
 @app_commands.describe(end_date="Inclusive end date in YYYY-MM-DD format")
+@localized_command
 async def weekly_summary(interaction: discord.Interaction, end_date: str) -> None:
     """Show a deterministic seven-day summary with a bounded Copilot readout."""
     await interaction.response.defer(thinking=True, ephemeral=True)
@@ -519,7 +662,7 @@ async def weekly_summary(interaction: discord.Interaction, end_date: str) -> Non
             interaction=interaction,
             payload=payload,
             data_transport=transport,
-            acknowledgement="Weekly summary posted to the configured alerts channel.",
+            acknowledgement="Weekly summary posted to the configured triage channel.",
         )
 
     except Exception as exc:
@@ -536,6 +679,7 @@ async def weekly_summary(interaction: discord.Interaction, end_date: str) -> Non
     start_date="Inclusive start date in YYYY-MM-DD format",
     end_date="Inclusive end date in YYYY-MM-DD format",
 )
+@localized_command
 async def table_summary(
     interaction: discord.Interaction,
     table_name: str,
@@ -558,7 +702,7 @@ async def table_summary(
             interaction=interaction,
             payload=payload,
             data_transport=transport,
-            acknowledgement="Table summary posted to the configured alerts channel.",
+            acknowledgement="Table summary posted to the configured triage channel.",
         )
 
     except Exception as exc:
@@ -574,6 +718,7 @@ async def table_summary(
     start_date="Inclusive start date in YYYY-MM-DD format",
     end_date="Inclusive end date in YYYY-MM-DD format",
 )
+@localized_command
 async def db_summary(
     interaction: discord.Interaction,
     start_date: str,
@@ -594,7 +739,7 @@ async def db_summary(
             interaction=interaction,
             payload=payload,
             data_transport=transport,
-            acknowledgement="Warehouse summary posted to the configured alerts channel.",
+            acknowledgement="Warehouse summary posted to the configured triage channel.",
         )
 
     except Exception as exc:
@@ -607,6 +752,7 @@ async def db_summary(
     guild=guild_object(),
 )
 @app_commands.describe(alert_key="Alert Ref such as DQ-20260610-A1B2C3")
+@localized_command
 async def triage(interaction: discord.Interaction, alert_key: str) -> None:
     """
     Run evidence-driven triage for one alert.
@@ -621,26 +767,8 @@ async def triage(interaction: discord.Interaction, alert_key: str) -> None:
     await interaction.response.defer(thinking=True, ephemeral=True)
 
     try:
-        report, triage_transport = await asyncio.to_thread(
-            run_discord_triage,
-            alert_key.strip(),
-        )
-        assistant_note, narrative_transport = await asyncio.to_thread(
-            build_discord_triage_note,
-            report,
-        )
-        message = format_triage_result(
-            report=report,
-            assistant_note=assistant_note,
-            execution_transport=triage_transport,
-            narrative_transport=narrative_transport,
-        )
-        await publish_result(
-            interaction=interaction,
-            channel_id=TRIAGE_CHANNEL_ID,
-            message=message,
-            acknowledgement="Triage completed and posted to the configured triage channel.",
-        )
+        context = await asyncio.to_thread(fetch_discord_debug_context, alert_key.strip())
+        await run_workspace_investigation(interaction, context["alert_ref"])
 
     except Exception as exc:
         await command_error(interaction=interaction, operation="Triage", exc=exc)
@@ -655,6 +783,7 @@ async def triage(interaction: discord.Interaction, alert_key: str) -> None:
     question="Natural-language data reliability question",
     alert_key="Optional Alert Ref or system alert key for grounding",
 )
+@localized_command
 async def ask(
     interaction: discord.Interaction,
     question: str,
@@ -672,32 +801,111 @@ async def ask(
         None.
     """
     await interaction.response.defer(thinking=True, ephemeral=True)
-
+    state = None
+    answer_task = None
+    admitted = False
+    actor = getattr(getattr(interaction, "user", None), "id", 0)
+    thread_key = int(interaction.id)
     try:
-        result = await asyncio.to_thread(
+        validate_interaction_scope(interaction, {value for value in {ALERTS_CHANNEL_ID, TRIAGE_CHANNEL_ID} if value},
+                                   require_bot_authored_message=False)
+        question = question.strip()
+        if not 3 <= len(question) <= 1000:
+            raise ValueError("Question must contain 3-1,000 characters.")
+        runtime = workspace_runtime(client, GUILD_ID, TRIAGE_CHANNEL_ID)
+        explicit_refs = set(re.findall(r"DQ-[0-9]{8}-[A-Fa-f0-9]{6}", question))
+        if len(explicit_refs) > 1:
+            raise ValueError("Select one incident for this question.")
+        if not alert_key.strip() and explicit_refs:
+            alert_key = next(iter(explicit_refs)).upper()
+        selected = await asyncio.to_thread(fetch_discord_debug_context, alert_key.strip()) if alert_key.strip() else None
+        alert_ref = str((selected or {}).get("alert_ref") or "")
+        bound = await runtime.bind_thread(interaction.channel, alert_ref)
+        if bound:
+            alert_ref = bound.alert_ref
+        if alert_ref and explicit_refs and {ref.upper() for ref in explicit_refs} != {alert_ref.upper()}:
+            raise ValueError("Question targets a different incident. Open that incident workspace instead.")
+        thread = await get_incident_workspace(interaction, alert_ref) if alert_ref else None
+        if thread is None and getattr(interaction.channel, "type", None) == discord.ChannelType.public_thread:
+            root = await asyncio.to_thread(mention_ask.store.find_thread, str(interaction.channel.id))
+            if (root is None or root.guild_id != str(interaction.guild_id)
+                    or root.channel_id != str(TRIAGE_CHANNEL_ID)):
+                raise ValueError("Start the question in dq-triage or a registered DataSentry thread.")
+            if root.alert_ref:
+                alert_ref = root.alert_ref
+            thread = await runtime.usable(interaction.channel)
+        if thread:
+            thread_key = thread.id
+        admitted = mention_ask.admit(actor, thread_key)
+        if not admitted:
+            await respond_with_message(interaction, "Another question is running or your cooldown is active. Please wait and try again.")
+            return
+        state = MentionRequestState(str(interaction.id), str(interaction.id), str(interaction.guild_id),
+                                    str(TRIAGE_CHANNEL_ID), str(actor), thread_id=str(thread.id) if thread else "",
+                                    alert_ref=alert_ref, source_kind="command")
+        if not await asyncio.to_thread(mention_ask.store.claim, state):
+            await respond_with_message(interaction, "This question was already submitted; no model call was repeated.")
+            return
+        mention_ask.last_request[actor] = mention_ask.clock()
+        await asyncio.to_thread(mention_ask.audit, state, "started")
+        if thread is None:
+            channel = client.get_channel(TRIAGE_CHANNEL_ID) or await client.fetch_channel(TRIAGE_CHANNEL_ID)
+            starter = await channel.send(embed=discord.Embed(title="Question workspace", description="A read-only question. Answers and follow-ups stay in this thread."),
+                                         allowed_mentions=discord.AllowedMentions.none(), nonce=str(interaction.id))
+            thread = await starter.create_thread(name="DataSentry question", auto_archive_duration=60)
+            state = replace(state, root_message_id=str(starter.id), thread_id=str(thread.id))
+            await asyncio.to_thread(mention_ask.store.save, state)
+        history = await asyncio.to_thread(mention_ask.store.history, str(thread.id), str(actor), alert_ref,
+                                         str(interaction.guild_id), str(TRIAGE_CHANNEL_ID))
+        turns = await mention_ask.conversation(thread, history, alert_ref, str(actor))
+        answer_task = asyncio.create_task(asyncio.to_thread(
             answer_discord_question,
-            question.strip(),
-            alert_key.strip(),
-        )
-        message = format_operator_answer(
-            question=question.strip(),
+            question,
+            alert_ref,
+            conversation_context=turns,
+            mention_mode=True,
+        ))
+        result = await asyncio.wait_for(asyncio.shield(answer_task), timeout=65)
+        if alert_ref:
+            authority = selected or await asyncio.to_thread(fetch_discord_debug_context, alert_ref)
+            allowed_keys = {alert_ref, str(authority.get("alert_key") or alert_ref)}
+            if (str(result.get("alert_ref") or alert_ref) != alert_ref
+                    or str(result.get("alert_key") or "") not in allowed_keys):
+                raise ValueError("Copilot returned a different incident reference.")
+        render_result = render_operator_answer_embed(
             answer=result["answer"],
-            alert_key=result["alert_key"],
+            alert_key=alert_ref or result["alert_key"],
             transport=result["transport"],
             agent_run_id=result["agent_run_id"],
-            incident_history_count=int(
-                result.get("incident_history_count") or 0
-            ),
+            llm_runtime=result.get("llm_runtime"),
         )
-        await publish_result(
-            interaction=interaction,
-            channel_id=TRIAGE_CHANNEL_ID,
-            message=message,
-            acknowledgement="Copilot answer posted to the configured triage channel.",
-        )
-
+        payload = dict(render_result.payload)
+        embeds = [dict(item) for item in payload.get("embeds", [])]
+        if embeds:
+            embeds[0]["fields"] = list(embeds[0].get("fields", [])) + [{"name": tr("Follow-up question"), "value": question, "inline": False}]
+        payload["embeds"] = embeds
+        sent = await send_render_to_thread(thread, replace(render_result, payload=payload))
+        state = replace(state, status="answered", answer_message_id=str(sent.id), agent_run_id=str(result.get("agent_run_id") or ""))
+        await asyncio.to_thread(mention_ask.store.save, state)
+        await asyncio.to_thread(mention_ask.audit, state, "answered", {"llm_runtime": result.get("llm_runtime")})
+        await respond_with_message(interaction, tr("Answer posted in your workspace: https://discord.com/channels/{v0}/{v1}", v0=interaction.guild_id, v1=thread.id))
     except Exception as exc:
+        if state is not None:
+            try:
+                await asyncio.to_thread(mention_ask.store.save, replace(state, status="failed", error_type=type(exc).__name__))
+            except Exception:
+                logger.warning("Question claim retained; no automatic provider replay")
         await command_error(interaction=interaction, operation="Copilot answer", exc=exc)
+    except asyncio.CancelledError:
+        if state is not None:
+            await asyncio.shield(asyncio.to_thread(mention_ask.store.save, replace(state, status="failed", error_type="CancelledError")))
+        raise
+    finally:
+        if admitted:
+            if answer_task is not None and not answer_task.done():
+                answer_task.add_done_callback(lambda task: mention_ask.release_after_completion(task, actor, thread_key))
+            else:
+                mention_ask.release(actor, thread_key)
 
 
 @tree.command(
@@ -711,6 +919,7 @@ async def ask(
     target_dag_id="Allowlisted operational DAG",
     reason="Reason for the requested backfill",
 )
+@localized_command
 async def backfill_preview(
     interaction: discord.Interaction,
     start_date: str,
@@ -748,21 +957,42 @@ async def backfill_preview(
             reason.strip(),
             operator_identity(interaction),
         )
-        message = format_backfill_preview(
-            request_id=str(payload["request_id"]),
-            start_date=parsed_start.isoformat(),
-            end_date=parsed_end.isoformat(),
-            target_dag_id=target_dag_id.strip(),
-            reason=reason.strip(),
-            status=str(payload["status"]),
-            created_new=bool(payload.get("created_new")),
+        request_id = str(payload["request_id"])
+        status     = str(payload["status"])
+        render_result = render_approval_embed(
+            request_id=request_id,
+            status=status,
+            summary=(
+                f"Backfill request for `{target_dag_id.strip()}` covering "
+                f"`{parsed_start.isoformat()}` to `{parsed_end.isoformat()}`. {reason.strip()}"
+            ),
+            next_step="Review the exact scope, then use Approve or Reject.",
+            target_dag_id=str(payload.get("target_dag_id") or target_dag_id.strip()),
+            start_date=str(payload.get("start_date") or parsed_start.isoformat()),
+            end_date=str(payload.get("end_date") or parsed_end.isoformat()),
+            risk_level=str(payload.get("risk_level") or "HIGH"),
         )
-        await publish_result(
+        await publish_render(
             interaction=interaction,
-            channel_id=OPS_CHANNEL_ID or TRIAGE_CHANNEL_ID,
-            message=message,
+            channel_id=OPS_CHANNEL_ID,
+            result=render_result,
             acknowledgement=f"Backfill approval request {payload['request_id']} recorded.",
         )
+
+        if payload.get("alert_key"):
+            try:
+                await asyncio.to_thread(
+                    synchronize_incident_message,
+                    alert_key=str(payload["alert_key"]),
+                    approval_state=str(payload.get("status") or "pending"),
+                )
+            except Exception as notification_exc:
+                logger.warning(
+                    "Discord incident approval synchronization failed safely | "
+                    "request_id=%s error_type=%s",
+                    payload.get("request_id"),
+                    type(notification_exc).__name__,
+                )
 
     except Exception as exc:
         await command_error(interaction=interaction, operation="Backfill preview", exc=exc)
@@ -775,7 +1005,7 @@ async def decide_approval(
     comment: str,
 ) -> None:
     """
-    Persist one approval decision without executing remediation.
+    Present authoritative approval controls without mutating approval state.
 
     Args:
         interaction: Discord interaction context.
@@ -786,32 +1016,35 @@ async def decide_approval(
     Returns:
         None.
     """
-    await interaction.response.defer(thinking=True, ephemeral=True)
-
     try:
-        payload = await asyncio.to_thread(
-            decide_discord_approval_request,
-            request_id.strip(),
-            decision,
-            operator_identity(interaction),
-            comment.strip(),
+        validate_interaction_scope(
+            interaction,
+            allowed_channels={OPS_CHANNEL_ID} if OPS_CHANNEL_ID else set(),
+            require_approver=True,
+            require_bot_authored_message=False,
         )
-        message = format_approval_recorded(
-            request_id=str(payload["request_id"]),
-            approved_by=str(payload["decided_by"]),
-            status=str(payload["status"]),
-            decision=decision,
-        )
-        await publish_result(
-            interaction=interaction,
-            channel_id=OPS_CHANNEL_ID or TRIAGE_CHANNEL_ID,
-            message=message,
-            acknowledgement=(
-                "Durable approval recorded. No Airflow DAG was triggered."
-                if decision == "approve"
-                else "Durable rejection recorded."
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        payload = await asyncio.to_thread(fetch_discord_approval_request, request_id.strip())
+        request_id = str(payload["request_id"])
+        status     = str(payload["status"])
+        render_result = render_approval_embed(
+            request_id=request_id,
+            status=status,
+            summary=(
+                f"Review the authoritative request before recording a {decision} decision. "
+                f"Operator note: {comment.strip()}"
             ),
+            next_step=(
+                "Use the card controls below. Approve requires confirmation; Reject requires a reason."
+                if status == "pending"
+                else "This request is no longer pending. View Plan remains read-only."
+            ),
+            target_dag_id=str(payload.get("target_dag_id") or ""),
+            start_date=str(payload.get("start_date") or ""),
+            end_date=str(payload.get("end_date") or ""),
+            risk_level=str(payload.get("risk_level") or "HIGH"),
         )
+        await respond_with_render(interaction, render_result, ephemeral=True)
 
     except Exception as exc:
         await command_error(interaction=interaction, operation=decision.title(), exc=exc)
@@ -826,6 +1059,7 @@ async def decide_approval(
     request_id="APR identifier from a backfill preview",
     comment="Review rationale stored in the audit trail",
 )
+@localized_command
 async def approve(
     interaction: discord.Interaction,
     request_id: str,
@@ -849,6 +1083,7 @@ async def approve(
     request_id="APR identifier from a backfill preview",
     comment="Rejection rationale stored in the audit trail",
 )
+@localized_command
 async def reject(
     interaction: discord.Interaction,
     request_id: str,
@@ -943,6 +1178,28 @@ async def dq_ask(
 ) -> None:
     """Route the canonical grouped Copilot question to the existing handler."""
     await ask.callback(interaction, question, alert_key)
+
+
+@dq_group.command(name="debug", description="Show ephemeral technical correlation for one alert")
+@app_commands.describe(alert_key="Alert Ref or system alert key")
+@localized_command
+async def dq_debug(interaction: discord.Interaction, alert_key: str) -> None:
+    """Return read-only technical identifiers without posting to an operations channel."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    try:
+        debug_context = await asyncio.to_thread(
+            fetch_discord_debug_context,
+            alert_key.strip(),
+        )
+        await respond_with_render(
+            interaction=interaction,
+            result=render_debug_embed(debug_context),
+            ephemeral=True,
+        )
+
+    except Exception as exc:
+        await command_error(interaction=interaction, operation="Debug lookup", exc=exc)
 
 
 @dq_group.command(name="backfill_preview", description="Create an approval-gated backfill request")

@@ -12,11 +12,15 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from agent.resolution_contracts import IncidentResolve, RevalidationCreate, RevalidationRequest, ResolutionPreview, ResolutionDecision
+from agent.tools.incident_resolution import resolution_preview, create_revalidation, get_revalidation, confirm_resolution
+from agent.tools.incident_resolution_store import ResolutionConflict, ResolutionUnavailable
 
 
 # --- Configuring Project Path
@@ -32,8 +36,10 @@ from agent.checkpoint_operations import build_checkpoint_replay_preview
 from agent.checkpointing import CHECKPOINT_MODE_SQLITE
 from agent.context.models import IncidentMemoryRecord
 from agent.context.store import fetch_incident_memory
+from agent.llm.client import LlmResponse
 from agent.llm.copilot import (
     MAX_CONTEXT_AUDIT,
+    MAX_CONTEXT_ALERTS,
     MAX_CONTEXT_EVIDENCE,
     MAX_CONTEXT_INCIDENT_HISTORY,
     build_operator_answer,
@@ -49,7 +55,11 @@ from agent.tools.approval_queue import (
     get_approval_request,
     list_approval_requests,
 )
-from agent.tools.audit_log import write_agent_audit_event
+from agent.tools.audit_log import (
+    build_llm_route_audit_payload,
+    write_agent_audit_event,
+    write_llm_route_audit_event,
+)
 from agent.tools.dbt_lineage import fetch_dbt_blast_radius, fetch_dbt_lineage
 from agent.tools.daily_summary import fetch_daily_quality_summary
 from agent.tools.dq_history import fetch_dq_history
@@ -81,6 +91,7 @@ from apps.api.schemas import (
     HealthResponse,
     IncidentHistoryItemResponse,
     IncidentHistoryResponse,
+    LlmRouteResponse,
     MessageResponse,
     MetadataAssetListResponse,
     MetadataAssetResponse,
@@ -90,7 +101,7 @@ from apps.api.schemas import (
     TriageRunRequest,
     TriageRunResponse,
 )
-from apps.common.llm_observability import enrich_audit_rows
+from apps.common.llm_observability import build_llm_route_observation, enrich_audit_rows
 from agent.tools.clickhouse_sql import rows_to_dicts
 from pipelines.common.clickhouse import build_clickhouse_client, quote_sql_literal
 from pipelines.common.logging import logger
@@ -461,7 +472,10 @@ def read_report_artifact(s3_uri: str, max_bytes: int) -> dict[str, Any]:
     bucket, key       = ensure_report_s3_uri_allowed(s3_uri)
     client            = build_s3_client()
     response          = client.get_object(Bucket=bucket, Key=key)
-    payload           = response["Body"].read()
+    try:
+        payload = response["Body"].read(max_bytes + 1)
+    finally:
+        response["Body"].close()
     text, is_truncated = bounded_text(payload=payload, max_bytes=max_bytes)
 
     logger.info(
@@ -629,25 +643,30 @@ def load_copilot_report_context(
 
 def write_copilot_api_audit_event(
     agent_run_id: UUID,
-    alert: Any,
+    alert: Any | None,
     request: CopilotAnswerRequest,
     response: CopilotAnswerResponse,
     report_json_s3_uri: str | None,
+    llm_response: LlmResponse | None = None,
 ) -> None:
     """
     Persist one bounded API Copilot interaction to the agent audit log.
 
     Args:
         agent_run_id: Correlation UUID shared with the LLM route.
-        alert: Source-of-truth alert model.
+        alert: Optional source-of-truth alert model. Platform-level questions
+            do not bind the audit row to one alert.
         request: Validated Copilot request.
         response: Copilot response returned to the caller.
         report_json_s3_uri: Resolved report artifact used for context.
+        llm_response: Optional normalized route response used to generate the answer.
 
     Returns:
         None.
     """
     client = build_clickhouse_client()
+
+    llm_runtime = build_llm_route_audit_payload(llm_response) if llm_response else {}
 
     # Store metadata rather than full question/answer text to reduce audit exposure.
     write_agent_audit_event(
@@ -655,16 +674,20 @@ def write_copilot_api_audit_event(
         action="copilot_answer",
         status="success",
         agent_run_id=agent_run_id,
-        alert_id=alert.alert_id,
-        alert_key=alert.alert_key,
+        alert_id=getattr(alert, "alert_id", None),
+        alert_key=str(getattr(alert, "alert_key", "") or ""),
         actor="api_client",
         tool_name="llm_copilot",
         input_payload={
             "question_length": len(request.question),
+            "language": request.language,
+            "conversation_turns": len(request.conversation_context),
+            "conversation_characters": sum(len(turn.question) + len(turn.answer) for turn in request.conversation_context),
             "report_json_s3_uri": report_json_s3_uri or "",
             "audit_limit": request.audit_limit,
             "incident_history_lookback_days": COPILOT_HISTORY_LOOKBACK_DAYS,
             "incident_history_limit": MAX_CONTEXT_INCIDENT_HISTORY,
+            "active_alert_count": response.active_alert_count,
         },
         output_payload={
             "answer_length": len(response.answer),
@@ -674,6 +697,7 @@ def write_copilot_api_audit_event(
             "audit_count": response.audit_count,
             "incident_history_count": response.incident_history_count,
             "approval_required": response.approval_required,
+            "llm_runtime": llm_runtime,
         },
         row_count=1,
         report_s3_uri=report_json_s3_uri or "",
@@ -775,13 +799,16 @@ def api_list_alerts(
 
 @app.get("/api/v1/summaries/daily", response_model=DailySummaryResponse)
 def api_get_daily_summary(
-    dt: str = Query(description="Business date in YYYY-MM-DD format."),
+    dt: str | None = Query(
+        default=None,
+        description="Optional business date in YYYY-MM-DD format. Omit it to use the latest available DQ date.",
+    ),
 ) -> DailySummaryResponse:
     """
     Return deterministic DQ check and open-alert counts for one business date.
 
     Args:
-        dt: Exact business date to summarize.
+        dt: Optional exact business date to summarize.
 
     Returns:
         Typed daily summary without internal SQL metadata.
@@ -1374,6 +1401,51 @@ def api_read_report(
         raise_api_error(exc)
 
 
+def copilot_revalidation_context(alert_key: str) -> dict[str, Any]:
+    """Expose check freshness without granting the model closure authority."""
+    if os.getenv("INCIDENT_CONTROL_ENABLED", "false").lower() != "true":
+        return {}
+    try:
+        preview = resolution_preview(alert_key)
+        check = preview.get("request") or {}
+        result = check.get("result") or {}
+        current_time = datetime.now(timezone.utc)
+        expires_at = check.get("expires_at")
+        expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00")) if expires_at else None
+        if expiry is not None and expiry.tzinfo is None:
+            expiry = None
+        evidence_state = "unverified"
+        if check.get("status") == "pass" and expiry is not None:
+            evidence_state = "fresh" if current_time < expiry else "expired"
+        closed = preview.get("status") == "resolved"
+        decision = preview.get("resolution") or {}
+        return {
+            "available": True,
+            "incident_status": preview.get("status"),
+            "validation_status": check.get("status"),
+            "evidence_state": evidence_state,
+            "finished_at": check.get("finished_at"),
+            "expires_at": expires_at,
+            "current_time_utc": current_time.isoformat(),
+            "expected": result.get("expected"), "observed": result.get("observed"),
+            "summary": result.get("summary"), "mutations_performed": False,
+            "check_metric": (preview.get("scope") or {}).get("metric"),
+            "recorded_resolution": {
+                field: decision.get(field)
+                for field in ("resolved_at", "incident_revision", "expected", "observed")
+            } if closed else {},
+            "expiry_invalidates_recorded_closure": False,
+            "revalidation_action": (
+                "View the recorded closure evidence and continue normal monitoring; this incident is already resolved."
+                if closed else "Open Resolve, then Check Again; this runs a new read-only Airflow check."
+            ),
+            "closure_requires_backend_validation_and_human_confirmation": True,
+        }
+    except Exception as exc:
+        logger.warning("Copilot revalidation context unavailable | error_type=%s", type(exc).__name__)
+        return {"available": False, "evidence_state": "unverified", "current_condition": "unverified"}
+
+
 @app.post("/api/v1/copilot/answer", response_model=CopilotAnswerResponse)
 def api_answer_copilot(request: CopilotAnswerRequest) -> CopilotAnswerResponse:
     """
@@ -1388,17 +1460,12 @@ def api_answer_copilot(request: CopilotAnswerRequest) -> CopilotAnswerResponse:
     agent_run_id = uuid4()
 
     try:
-        alert         = load_alert(alert_key=request.alert_key)
-        audit_payload = fetch_audit_log_rows(
-            alert_key=alert.alert_key,
-            limit=request.audit_limit,
-        )
-        audit_rows = audit_payload["rows"]
-        report_uri = resolve_copilot_report_json_uri(
-            explicit_uri=request.report_json_s3_uri,
-            alert=alert,
-            audit_rows=audit_rows,
-        )
+        normalized_alert_key = request.alert_key.strip()
+        alert                = None
+        audit_rows: list[dict[str, Any]] = []
+        report_uri           = None
+        history_rows: list[dict[str, Any]] = []
+        active_alerts: list[dict[str, Any]] = []
         report_data = {
             "report_context": {},
             "evidence_rows": [],
@@ -1406,44 +1473,109 @@ def api_answer_copilot(request: CopilotAnswerRequest) -> CopilotAnswerResponse:
             "approval_required": False,
         }
 
-        if report_uri:
-            report_data = load_copilot_report_context(
-                report_json_s3_uri=report_uri,
-                expected_alert_key=alert.alert_key,
+        if normalized_alert_key:
+            alert         = load_alert(alert_key=normalized_alert_key)
+            audit_payload = fetch_audit_log_rows(
+                alert_key=alert.alert_key,
+                limit=request.audit_limit,
+            )
+            audit_rows = audit_payload["rows"]
+            report_uri = resolve_copilot_report_json_uri(
+                explicit_uri=request.report_json_s3_uri,
+                alert=alert,
+                audit_rows=audit_rows,
             )
 
-        history_records = fetch_incident_memory(
-            client=build_clickhouse_client(),
-            alert_reference=alert.alert_key,
-            lookback_days=COPILOT_HISTORY_LOOKBACK_DAYS,
-            limit=MAX_CONTEXT_INCIDENT_HISTORY,
-        )
-        history_rows = copilot_incident_history_context(
-            records=history_records,
-            current_report_id=report_data["report_id"],
-        )
+            if report_uri:
+                report_data = load_copilot_report_context(
+                    report_json_s3_uri=report_uri,
+                    expected_alert_key=alert.alert_key,
+                )
 
+            history_records = fetch_incident_memory(
+                client=build_clickhouse_client(),
+                alert_reference=alert.alert_key,
+                lookback_days=COPILOT_HISTORY_LOOKBACK_DAYS,
+                limit=MAX_CONTEXT_INCIDENT_HISTORY,
+            )
+            history_rows = copilot_incident_history_context(
+                records=history_records,
+                current_report_id=report_data["report_id"],
+            )
+
+        else:
+            if request.report_json_s3_uri:
+                raise ValueError("A Copilot report request requires an Alert Ref or alert key.")
+
+            for status in ("open", "triaged"):
+                payload = list_alerts(
+                    status=status,
+                    limit=MAX_CONTEXT_ALERTS,
+                    agent_run_id=agent_run_id,
+                )
+                active_alerts.extend(list(payload.get("alerts") or []))
+
+            active_alerts = list(
+                {
+                    str(row.get("alert_key") or row.get("alert_display_id") or index): row
+                    for index, row in enumerate(active_alerts)
+                }.values()
+            )[:MAX_CONTEXT_ALERTS]
+
+        llm_responses: list[LlmResponse] = []
+        revalidation_context = copilot_revalidation_context(alert.alert_key) if alert is not None else {}
         answer = build_operator_answer(
             question=request.question,
+            language=request.language,
+            resolution_context=revalidation_context,
             alert=alert,
+            platform_alerts=active_alerts,
+            conversation_context=[turn.model_dump() for turn in request.conversation_context],
             report_context=report_data["report_context"],
             evidence_rows=report_data["evidence_rows"],
             audit_rows=audit_rows,
             incident_history_rows=history_rows,
             agent_run_id=agent_run_id,
+            response_sink=llm_responses,
         )
-        context_source = "alert_report_audit" if report_uri else "alert_audit"
+        llm_response = llm_responses[-1] if llm_responses else None
+
+        if llm_response is not None:
+            write_llm_route_audit_event(
+                client=build_clickhouse_client(),
+                response=llm_response,
+                agent_run_id=agent_run_id,
+                alert_id=getattr(alert, "alert_id", None),
+                alert_key=str(getattr(alert, "alert_key", "") or ""),
+            )
+        llm_runtime = None
+
+        if llm_response is not None:
+            llm_observation = build_llm_route_observation(
+                payload=build_llm_route_audit_payload(llm_response),
+                agent_run_id=agent_run_id,
+            )
+            llm_runtime = LlmRouteResponse.model_validate(llm_observation.to_public_dict())
+
+        context_source = (
+            "active_alerts"
+            if alert is None
+            else "alert_report_audit" if report_uri else "alert_audit"
+        )
         response       = CopilotAnswerResponse(
             agent_run_id=str(agent_run_id),
-            alert_key=alert.alert_key,
-            alert_display_id=alert.alert_display_id,
+            alert_key=str(getattr(alert, "alert_key", "") or ""),
+            alert_display_id=str(getattr(alert, "alert_display_id", "") or ""),
             answer=answer,
+            language=request.language,
             context_source=context_source,
             report_id=report_data["report_id"],
             evidence_count=min(len(report_data["evidence_rows"]), MAX_CONTEXT_EVIDENCE),
             audit_count=min(len(audit_rows), MAX_CONTEXT_AUDIT),
             incident_history_count=len(history_rows),
             approval_required=report_data["approval_required"],
+            active_alert_count=len(active_alerts),
+            llm_runtime=llm_runtime,
         )
 
         write_copilot_api_audit_event(
@@ -1452,13 +1584,15 @@ def api_answer_copilot(request: CopilotAnswerRequest) -> CopilotAnswerResponse:
             request=request,
             response=response,
             report_json_s3_uri=report_uri,
+            llm_response=llm_response,
         )
 
         logger.info(
-            "API Copilot answer completed | agent_run_id=%s alert_ref=%s source=%s evidence=%d audit=%d history=%d",
+            "API Copilot answer completed | agent_run_id=%s alert_ref=%s source=%s active_alerts=%d evidence=%d audit=%d history=%d",
             agent_run_id,
-            alert.alert_display_id,
+            response.alert_display_id or "none",
             context_source,
+            response.active_alert_count,
             response.evidence_count,
             response.audit_count,
             response.incident_history_count,
@@ -1645,6 +1779,50 @@ def api_cancel_approval_request(
 
     except Exception as exc:
         raise_api_error(exc)
+
+
+def resolution_api_error(exc: Exception) -> None:
+    if isinstance(exc, LookupError):
+        raise HTTPException(404, detail=str(exc)) from None
+    if isinstance(exc, ResolutionConflict):
+        raise HTTPException(409, detail=str(exc)) from None
+    if isinstance(exc, ValueError):
+        raise HTTPException(422, detail="Input pemeriksaan tidak valid.") from None
+    # Never put connection strings, provider errors, or database SQL in an API error.
+    raise HTTPException(503, detail="Pemeriksaan belum tersedia. Incident tetap aktif.") from None
+
+
+@app.get("/api/v1/alerts/{alert_ref}/resolution-preview", response_model=ResolutionPreview)
+def api_resolution_preview(alert_ref: str):
+    try:
+        return resolution_preview(alert_ref)
+    except Exception as exc:
+        resolution_api_error(exc)
+
+
+@app.post("/api/v1/alerts/{alert_ref}/revalidations", status_code=202,
+          response_model=RevalidationRequest, dependencies=[Depends(require_approval_authorization)])
+def api_incident_revalidation(alert_ref: str, request: RevalidationCreate):
+    try:
+        return create_revalidation(alert_ref, request)
+    except Exception as exc:
+        resolution_api_error(exc)
+
+
+@app.get("/api/v1/incident-revalidations/{request_id}", response_model=RevalidationRequest)
+def api_incident_revalidation_status(request_id: UUID):
+    try:
+        return get_revalidation(str(request_id))
+    except Exception as exc:
+        resolution_api_error(exc)
+
+
+@app.post("/api/v1/alerts/{alert_ref}/resolve", response_model=ResolutionDecision, dependencies=[Depends(require_approval_authorization)])
+def api_resolve_incident(alert_ref: str, request: IncidentResolve):
+    try:
+        return confirm_resolution(alert_ref, request)
+    except Exception as exc:
+        resolution_api_error(exc)
 
 
 # --- Defining CLI Helpers

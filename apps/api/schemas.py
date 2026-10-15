@@ -7,10 +7,11 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from agent.llm.conversation import CopilotConversationTurn
 
 
 # --- Defining Response Schemas
@@ -710,16 +711,25 @@ class CopilotAnswerRequest(BaseModel):
     Request body for an evidence-aware Copilot answer.
 
     Attributes:
-        alert_key: Stable alert key used to load source-of-truth alert context.
+        alert_key: Optional stable alert key. When omitted, the API supplies a
+            bounded list of active platform alerts.
         question: Operator question bounded for safe prompt construction.
         report_json_s3_uri: Optional approved JSON triage report artifact.
         audit_limit: Maximum recent audit events supplied to the narrative layer.
     """
 
-    alert_key: str
+    alert_key: str                        = Field(default="", max_length=500)
     question: str                        = Field(min_length=3, max_length=1000)
+    language: Literal["en", "id"]       = "en"
+    conversation_context: list[CopilotConversationTurn] = Field(default_factory=list, max_length=2)
     report_json_s3_uri: str | None       = None
     audit_limit: int                     = Field(default=10, ge=1, le=25)
+
+    @model_validator(mode="after")
+    def validate_conversation_size(self) -> "CopilotAnswerRequest":
+        if sum(len(turn.question) + len(turn.answer) for turn in self.conversation_context) > 4000:
+            raise ValueError("Conversation context cannot exceed 4,000 characters.")
+        return self
 
 
 class CopilotAnswerResponse(BaseModel):
@@ -738,6 +748,9 @@ class CopilotAnswerResponse(BaseModel):
         audit_count: Number of recent audit events used.
         incident_history_count: Number of earlier exact-match investigations used.
         approval_required: Whether the report proposes approval-gated actions.
+        active_alert_count: Number of bounded open and triaged alerts supplied
+            for a platform-level question.
+        llm_runtime: Sanitized provider/model/usage proof for the generated answer.
     """
 
     status: str                         = "success"
@@ -745,12 +758,15 @@ class CopilotAnswerResponse(BaseModel):
     alert_key: str
     alert_display_id: str              = ""
     answer: str
+    language: Literal["en", "id"]       = "en"
     context_source: str
     report_id: str                     = ""
     evidence_count: int                = 0
     audit_count: int                   = 0
     incident_history_count: int        = Field(default=0, ge=0, le=5)
     approval_required: bool            = False
+    active_alert_count: int            = Field(default=0, ge=0, le=10)
+    llm_runtime: LlmRouteResponse | None = None
 
 
 class TriageRunRequest(BaseModel):

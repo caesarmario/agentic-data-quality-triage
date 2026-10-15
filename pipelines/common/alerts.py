@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -117,6 +118,10 @@ def insert_alert_rows(client: Any, candidates: list[AlertCandidate]) -> int:
         logger.info("No alert rows selected for insertion")
 
         return 0
+
+    if os.getenv("INCIDENT_CONTROL_ENABLED", "false").lower() == "true":
+        from agent.tools.incident_resolution import publish_candidates
+        return publish_candidates(client, candidates)
 
     rows = [candidate.as_insert_row() for candidate in candidates]
 

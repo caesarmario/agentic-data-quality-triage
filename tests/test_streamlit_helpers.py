@@ -6,6 +6,7 @@
 # --- Importing Libraries
 from __future__ import annotations
 
+import inspect
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +20,10 @@ from apps.streamlit.app import (
     answer_ui_copilot_question,
     build_blast_radius_display_rows,
     build_checkpoint_history_display_rows,
+    build_copilot_presentation,
+    build_incident_option_rows,
     build_incident_history_display_rows,
+    build_reliability_kpis,
     build_streamlit_control_plane_client,
     build_ui_backfill_approval_payload,
     build_llm_runtime_summary,
@@ -40,12 +44,14 @@ from apps.streamlit.app import (
     request_ui_checkpoint_replay_preview,
     request_ui_copilot_api,
     read_report_text,
+    resolve_alert_date_filter,
     run_selected_alert_triage,
     summarize_alert_rows,
     summarize_approval_queue_rows,
     summarize_daily_quality_payload,
     summarize_incident_history_rows,
     summarize_life_evaluation_rows,
+    synchronize_ui_incident_card,
 )
 
 
@@ -177,16 +183,107 @@ def test_page_style_uses_semantic_theme_tokens_for_operator_surfaces() -> None:
     Returns:
         None.
     """
-    css = streamlit_app.build_page_style_css()
+    light_css = streamlit_app.build_page_style_css("light")
+    dark_css = streamlit_app.build_page_style_css("dark")
 
-    assert "var(--st-background-color" in css
-    assert "var(--st-red-background-color" in css
-    assert "var(--st-green-text-color" in css
-    assert ".st-key-triage_report_document" in css
-    assert ".st-key-artifact_report_document" in css
-    assert "@media (max-width: 768px)" in css
-    assert "linear-gradient" not in css
-    assert "#65758b" not in css.lower()
+    assert "var(--st-background-color" in light_css
+    assert "var(--st-red-background-color" in light_css
+    assert "var(--st-green-text-color" in light_css
+    assert "#F6F8F5" in light_css
+    assert "#0B1210" in dark_css
+    assert "#EBF4EF" in dark_css
+    assert light_css != dark_css
+
+    for css in (light_css, dark_css):
+        assert ".st-key-triage_report_document" in css
+        assert ".st-key-artifact_report_document" in css
+        assert 'label[data-testid="stMetricLabel"] *' in css
+        assert 'div[data-testid="stTab"]' in css
+        assert 'div[data-testid="stTab"][aria-selected="true"]' in css
+        assert 'section[data-testid="stMain"] label[data-testid="stWidgetLabel"] *' in css
+        assert "@media (max-width: 768px)" in css
+        assert "linear-gradient" not in css
+        assert "#65758b" not in css.lower()
+
+
+def test_live_theme_colors_follow_native_scheme_without_overriding_canvas() -> None:
+    for mode in ("light", "dark"):
+        css = streamlit_app.build_page_style_css(mode)
+        assert '@supports (color: light-dark(white, black))' in css
+        assert '[data-testid="stApp"] {' in css
+        assert '--dq-surface: light-dark(#FFFFFF, #141D19);' in css
+        assert '--dq-text: light-dark(#18211B, #EBF4EF);' in css
+        assert '--dq-info-text: light-dark(#1F477F, #BED4FA);' in css
+        assert 'color-scheme:' not in css
+        assert '.stApp {' not in css
+
+
+def test_streamlit_workspace_defines_incident_first_tracked_tab_hierarchy() -> None:
+    """
+    Ensure primary and incident tabs remain stable and lazily rendered.
+
+    Returns:
+        None.
+    """
+    main_source     = inspect.getsource(streamlit_app.main)
+    incident_source = inspect.getsource(streamlit_app.render_incident_workspace)
+
+    assert streamlit_app.PRIMARY_WORKSPACE_TABS == (
+        "Incidents",
+        "Approvals",
+        "Agent Reliability",
+    )
+    assert streamlit_app.INCIDENT_DETAIL_TABS == (
+        "Overview",
+        "Evidence",
+        "AI Analysis",
+        "Lineage",
+        "Approval",
+        "Audit & Recovery",
+    )
+    assert 'key="primary_workspace_tabs"' in main_source
+    assert 'key="incident_detail_tabs"' in incident_source
+    assert 'on_change="rerun"' in main_source
+    assert 'on_change="rerun"' in incident_source
+    assert ".open" in main_source
+    assert ".open" in incident_source
+    assert incident_source.index("render_alert_table") < incident_source.index("workspace_tabs")
+
+
+def test_streamlit_incident_defaults_use_active_status_and_latest_snapshot() -> None:
+    """
+    Validate the default scope does not hide triaged incidents or stale dates.
+
+    Returns:
+        None.
+    """
+    sidebar_source = inspect.getsource(streamlit_app.render_sidebar_filters)
+
+    assert streamlit_app.DEFAULT_ALERT_STATUS == "active"
+    assert 'options=[DEFAULT_ALERT_STATUS, "open", "acknowledged", "triaged", "resolved"]' in sidebar_source
+    assert 'options=["Latest available", "Choose date"]' in sidebar_source
+    assert "with st.expander(tr('Advanced triage settings'), expanded=False)" in sidebar_source
+
+
+def test_streamlit_empty_states_cover_incident_summary_report_and_ai_fallback() -> None:
+    """
+    Ensure each operator dead-end has a specific recovery-oriented message.
+
+    Returns:
+        None.
+    """
+    messages = streamlit_app.EMPTY_STATE_MESSAGES
+
+    assert set(messages) == {
+        "no_active_incidents",
+        "no_daily_summary",
+        "no_triage_report",
+        "ai_fallback",
+    }
+    assert "active incidents" in messages["no_active_incidents"].lower()
+    assert "daily quality snapshot" in messages["no_daily_summary"].lower()
+    assert "run triage" in messages["no_triage_report"].lower()
+    assert "fallback" in messages["ai_fallback"].lower()
 
 
 @pytest.mark.parametrize(
@@ -456,6 +553,48 @@ def test_fetch_streamlit_daily_summary_prefers_control_plane_api(monkeypatch) ->
     assert transport == "api"
 
 
+def test_fetch_streamlit_daily_summary_requests_latest_when_date_is_omitted(monkeypatch) -> None:
+    """
+    Ensure latest snapshot mode passes an explicit None through the shared API.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    expected = {
+        "status": "success",
+        "dt": "2026-06-10",
+        "check_counts": [],
+        "alert_counts": [],
+        "total_checks": 0,
+        "total_open_alerts": 0,
+        "duration_ms": 1,
+        "summary": "Latest daily quality summary.",
+    }
+
+    class ApiClient:
+        """Latest-summary API test double."""
+
+        def get_daily_summary(self, **kwargs) -> dict[str, object]:
+            """Return the latest summary for a None date."""
+            assert kwargs == {"dt": None}
+
+            return expected
+
+    monkeypatch.setattr(
+        streamlit_app,
+        "build_streamlit_control_plane_client",
+        lambda **kwargs: ApiClient(),
+    )
+
+    payload, transport = fetch_streamlit_daily_summary(dt=None)
+
+    assert payload == expected
+    assert transport == "api"
+
+
 def test_fetch_streamlit_daily_summary_falls_back_only_on_transport_failure(monkeypatch) -> None:
     """
     Ensure a network outage uses the audited local tool without exposing SQL.
@@ -704,7 +843,7 @@ def test_read_report_text_prefers_bounded_control_plane_api(monkeypatch) -> None
             """
             assert kwargs == {"s3_uri": report_uri, "max_bytes": 125}
 
-            return {"text": "# Report"}
+            return {"text": "# Report", "truncated": False, "bytes_read": 8, "returned_bytes": 8}
 
     monkeypatch.setattr(
         streamlit_app,
@@ -1038,7 +1177,9 @@ def test_build_llm_runtime_summary_returns_operator_friendly_metrics() -> None:
         audit_rows=[
             {
                 "action": "llm_route_completed",
+                "agent_run_id": "run-current",
                 "llm_route": {
+                    "agent_run_id": "run-current",
                     "runtime_mode": "heuristic_fallback",
                     "provider": "heuristic",
                     "model": "heuristic-v1",
@@ -1059,6 +1200,85 @@ def test_build_llm_runtime_summary_returns_operator_friendly_metrics() -> None:
     assert summary["provider_model"] == "heuristic / heuristic-v1"
     assert summary["route_label"] == "triage_reasoning -> evidence_summary"
     assert summary["token_label"] == "720 in / 407 out"
+    assert summary["route_count"] == 1
+    assert summary["total_tokens"] == 1127
+    assert summary["fallback_summaries"] == ["OpenAI quota was unavailable."]
+
+
+def test_build_llm_runtime_summary_aggregates_only_latest_agent_run() -> None:
+    """
+    Ensure the operator summary combines route events without mixing runs.
+
+    Returns:
+        None.
+    """
+    summary = build_llm_runtime_summary(
+        audit_rows=[
+            {
+                "action": "llm_route_completed",
+                "agent_run_id": "run-new",
+                "llm_route": {
+                    "agent_run_id": "run-new",
+                    "requested_route": "deep_reasoning",
+                    "executed_route": "gemini_reasoning",
+                    "provider": "gemini",
+                    "model": "gemini-flash",
+                    "input_tokens": 30,
+                    "output_tokens": 12,
+                    "estimated_cost_usd": 0.0002,
+                    "duration_ms": 500,
+                    "used_heuristic": False,
+                },
+            },
+            {
+                "action": "llm_route_completed",
+                "agent_run_id": "run-new",
+                "llm_route": {
+                    "agent_run_id": "run-new",
+                    "requested_route": "evidence_planning",
+                    "executed_route": "gemini_reasoning",
+                    "provider": "gemini",
+                    "model": "gemini-flash",
+                    "input_tokens": 20,
+                    "output_tokens": 8,
+                    "estimated_cost_usd": 0.0001,
+                    "duration_ms": 300,
+                    "used_heuristic": False,
+                },
+            },
+            {
+                "action": "llm_route_completed",
+                "agent_run_id": "run-old",
+                "llm_route": {
+                    "agent_run_id": "run-old",
+                    "requested_route": "old_route",
+                    "executed_route": "old_route",
+                    "provider": "openai",
+                    "model": "old-model",
+                    "input_tokens": 900,
+                    "output_tokens": 500,
+                    "estimated_cost_usd": 1.0,
+                    "duration_ms": 9000,
+                    "used_heuristic": False,
+                },
+            },
+        ]
+    )
+
+    assert summary is not None
+    assert summary["route_count"] == 2
+    assert summary["requested_routes"] == ["deep_reasoning", "evidence_planning"]
+    assert summary["executed_routes"] == ["gemini_reasoning"]
+    assert summary["providers"] == ["gemini"]
+    assert summary["models"] == ["gemini-flash"]
+    assert summary["has_external_model"] is True
+    assert summary["has_heuristic"] is False
+    assert summary["total_input_tokens"] == 50
+    assert summary["total_output_tokens"] == 20
+    assert summary["total_tokens"] == 70
+    assert summary["total_estimated_cost_usd"] == pytest.approx(0.0003)
+    assert summary["total_duration_ms"] == 800
+    assert summary["estimated_cost_display"] == "$0.000300"
 
 
 def test_summarize_alert_rows_counts_status_severity_and_reports() -> None:
@@ -1133,6 +1353,94 @@ def test_summarize_daily_quality_payload_normalizes_operator_metrics() -> None:
     }
 
 
+def test_build_reliability_kpis_returns_exactly_four_incident_first_metrics() -> None:
+    """
+    Validate the header stays compact and prioritizes failure and incident load.
+
+    Returns:
+        None.
+    """
+    metrics = build_reliability_kpis(
+        alerts=[
+            {"severity": "critical", "status": "open"},
+            {"severity": "warning", "status": "triaged"},
+        ],
+        daily_summary={
+            "check_counts": [
+                {"status": "pass", "count": 8},
+                {"status": "fail", "count": 2},
+            ],
+            "alert_counts": [{"severity": "critical", "count": 1}],
+            "total_checks": 10,
+            "total_open_alerts": 1,
+        },
+    )
+
+    assert metrics == [
+        {"label": "Daily Checks", "value": 10},
+        {"label": "Failed Checks", "value": 2},
+        {"label": "Active Incidents", "value": 2},
+        {"label": "Critical Incidents", "value": 1},
+    ]
+
+
+def test_build_reliability_kpis_marks_missing_snapshot_unavailable() -> None:
+    """
+    Ensure missing daily data is not rendered as a healthy zero.
+
+    Returns:
+        None.
+    """
+    metrics = build_reliability_kpis(alerts=[], daily_summary=None)
+
+    assert metrics[0]["value"] == "Unavailable"
+    assert metrics[1]["value"] == "Unavailable"
+    assert len(metrics) == 4
+
+
+def test_resolve_alert_date_filter_uses_latest_resolved_business_date() -> None:
+    """
+    Ensure latest-date mode can still constrain incidents after resolution.
+
+    Returns:
+        None.
+    """
+    assert resolve_alert_date_filter(
+        restrict_to_summary_date=True,
+        requested_summary_dt=None,
+        daily_summary={"dt": "2026-06-10"},
+    ) == "2026-06-10"
+    assert resolve_alert_date_filter(
+        restrict_to_summary_date=False,
+        requested_summary_dt="2026-06-09",
+        daily_summary={"dt": "2026-06-10"},
+    ) is None
+
+
+def test_build_incident_option_rows_hides_system_alert_key() -> None:
+    """
+    Validate operator selectors prefer Alert Ref over long system identities.
+
+    Returns:
+        None.
+    """
+    alert = {
+        "alert_display_id": "DQ-20260610-A1B2C3",
+        "alert_key": "orders|dq_failure|long-system-key",
+        "severity": "critical",
+        "table_name": "dq.raw_orders",
+        "metric": "row_count",
+        "dt": "2026-06-10",
+    }
+    options = build_incident_option_rows([alert])
+    label   = next(iter(options))
+
+    assert "DQ-20260610-A1B2C3" in label
+    assert "CRITICAL" in label
+    assert "long-system-key" not in label
+    assert options[label] is alert
+
+
 def test_classify_reliability_state_marks_critical_attention() -> None:
     """
     Validate critical alert classification for the reliability overview.
@@ -1187,6 +1495,23 @@ def test_classify_reliability_state_marks_warning_watchlist() -> None:
             "warning_count": 1,
             "open_count": 1,
         }
+    )
+
+    assert state["label"] == "Warning watchlist"
+    assert state["css_class"] == "dq-health-warning"
+
+
+def test_classify_reliability_state_keeps_triaged_info_incident_visible() -> None:
+    """
+    Ensure active non-warning incidents do not make the header look stable.
+
+    Returns:
+        None.
+    """
+    state = classify_reliability_state(
+        summarize_alert_rows(
+            [{"severity": "info", "status": "triaged"}]
+        )
     )
 
     assert state["label"] == "Warning watchlist"
@@ -1362,6 +1687,72 @@ def test_answer_ui_copilot_question_delegates_to_shared_service(monkeypatch) -> 
     assert len(captured["audit_rows"]) == 1
     assert result["transport"] == "local"
 
+
+def test_build_copilot_presentation_prioritizes_answer_and_compact_provenance() -> None:
+    """
+    Validate successful external AI output stays concise and warning-free.
+
+    Returns:
+        None.
+    """
+    presentation = build_copilot_presentation(
+        {
+            "answer": "The raw partition is empty, so the daily mart may be incomplete.",
+            "has_report": True,
+            "evidence_count": 3,
+            "incident_history_count": 1,
+            "transport": "api",
+            "fallback_reason": "",
+            "llm_runtime": {
+                "provider": "gemini",
+                "model": "gemini-flash",
+                "runtime_mode": "external_model",
+                "used_heuristic": False,
+            },
+        }
+    )
+
+    assert presentation["answer"].startswith("The raw partition")
+    assert presentation["provenance"] == "gemini / gemini-flash | 3 evidence | 1 prior investigations"
+    assert presentation["show_fallback"] is False
+    assert presentation["fallback_message"] == ""
+    assert presentation["has_report"] is True
+
+
+def test_build_copilot_presentation_warns_only_for_actual_fallback() -> None:
+    """
+    Validate heuristic or transport fallback is explicit without repeating guardrails.
+
+    Returns:
+        None.
+    """
+    heuristic = build_copilot_presentation(
+        {
+            "answer": "Bounded fallback answer.",
+            "transport": "api",
+            "llm_runtime": {
+                "provider": "heuristic",
+                "model": "heuristic-v1",
+                "runtime_mode": "heuristic_fallback",
+                "used_heuristic": True,
+                "fallback_summary": "Gemini was unavailable.",
+            },
+        }
+    )
+    normal_local = build_copilot_presentation(
+        {
+            "answer": "Local answer.",
+            "transport": "local",
+            "fallback_reason": "",
+            "llm_runtime": {},
+        }
+    )
+
+    assert heuristic["show_fallback"] is True
+    assert heuristic["fallback_message"] == "Gemini was unavailable."
+    assert normal_local["show_fallback"] is False
+    assert normal_local["fallback_message"] == ""
+
 def test_request_ui_copilot_api_sends_only_alert_key_question_and_report_uri(monkeypatch) -> None:
     """
     Validate Streamlit sends references through the reusable control-plane client.
@@ -1430,6 +1821,7 @@ def test_request_ui_copilot_api_sends_only_alert_key_question_and_report_uri(mon
         "alert_key": alert_key,
         "report_json_s3_uri": "s3://dq-artifacts/agent-reports/report.json",
         "audit_limit": 10,
+        "language": "en",
     }
 
 
@@ -1937,6 +2329,41 @@ def test_decide_ui_approval_uses_shared_client(monkeypatch) -> None:
     assert result["status"] == "approved"
     assert captured["decision"] == "approve"
     assert captured["decided_by"] == "streamlit_operator"
+
+
+def test_synchronize_ui_incident_card_is_bounded_and_best_effort(monkeypatch) -> None:
+    """Refresh the Discord card from approval state without raising into the UI."""
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        streamlit_app,
+        "synchronize_incident_message",
+        lambda **kwargs: captured.update(kwargs),
+    )
+
+    synchronize_ui_incident_card(
+        {
+            "request_id": "APR-20260610-A1B2C3D4",
+            "alert_key": "orders|matching-alert",
+            "status": "approved",
+        }
+    )
+
+    assert captured == {
+        "alert_key": "orders|matching-alert",
+        "approval_state": "approved",
+    }
+
+
+def test_synchronize_ui_incident_card_skips_unlinked_approval(monkeypatch) -> None:
+    """A standalone approval must not invent an incident relationship."""
+    monkeypatch.setattr(
+        streamlit_app,
+        "synchronize_incident_message",
+        lambda **kwargs: pytest.fail("Unlinked approvals must not call Discord."),
+    )
+
+    synchronize_ui_incident_card({"request_id": "APR-STANDALONE", "status": "pending"})
 
 def test_summarize_approval_queue_rows_reports_decision_and_execution_counts() -> None:
     """

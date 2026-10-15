@@ -66,6 +66,36 @@ class FakeClickHouseClient:
         )
 
 
+class FakeLatestDateClickHouseClient(FakeClickHouseClient):
+    """Resolve fixture dates using the latest-date query's alert filter."""
+
+    def __init__(
+        self,
+        check_dates: tuple[str, ...] = ("2026-06-10",),
+        alerts: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        """Store check dates and (date, alert_type) detection-history rows."""
+        super().__init__()
+        self.check_dates = check_dates
+        self.alerts = alerts
+
+    def query(self, sql: str) -> FakeQueryResult:
+        if "SELECT maxOrNull(dt)" in sql:
+            self.queries.append(sql)
+            dates = list(self.check_dates)
+            dates.extend(
+                dt for dt, alert_type in self.alerts
+                if "AND alert_type = 'dq_failure'" not in sql or alert_type == "dq_failure"
+            )
+
+            return FakeQueryResult(
+                column_names=["maxOrNull(dt)"],
+                result_rows=[(max(dates) if dates else None,)],
+            )
+
+        return super().query(sql)
+
+
 # --- Defining SQL Tests
 def test_daily_summary_sql_is_date_filtered_open_only_and_bounded() -> None:
     """
@@ -83,6 +113,22 @@ def test_daily_summary_sql_is_date_filtered_open_only_and_bounded() -> None:
     assert "AND status = 'open'" in sql
     assert "GROUP BY severity" in sql
     assert "LIMIT 100" in sql
+    assert "alert_type" not in sql
+
+
+def test_latest_summary_date_sql_excludes_schema_dates_and_preserves_empty_data() -> None:
+    """Only DQ alert business dates can augment check dates; empty input stays null."""
+    sql = daily_summary.LATEST_SUMMARY_DATE_SQL
+    check_sql, alert_sql = sql.split("UNION ALL")
+
+    assert "SELECT maxOrNull(dt)" in check_sql
+    assert "SELECT max(dt)" not in sql
+    assert "FROM dq.dq_check_results" in check_sql
+    assert "alert_type" not in check_sql
+    assert "FROM dq.alerts FINAL" in alert_sql
+    assert "AND alert_type = 'dq_failure'" in alert_sql
+    assert sql.count("WHERE dt IS NOT NULL") == 2
+    assert "status" not in sql
 
 
 # --- Defining Aggregation Tests
@@ -149,3 +195,154 @@ def test_fetch_daily_quality_summary_aggregates_and_audits(monkeypatch) -> None:
     assert captured_audit["status"] == "success"
     assert captured_audit["row_count"] == 4
     assert captured_audit["sql"] == payload["sql"]
+
+
+def test_fetch_daily_quality_summary_resolves_latest_available_date(monkeypatch) -> None:
+    """An omitted date should resolve deterministically before aggregation."""
+    client = FakeLatestDateClickHouseClient()
+    monkeypatch.setattr(daily_summary, "write_agent_audit_event", lambda **kwargs: None)
+
+    payload = daily_summary.fetch_daily_quality_summary(
+        client=client,
+        agent_run_id="11111111-1111-1111-1111-111111111111",
+    )
+
+    assert payload["dt"] == "2026-06-10"
+    assert len(client.queries) == 2
+    assert "SELECT maxOrNull(dt)" in client.queries[0]
+    assert "toDate('2026-06-10')" in client.queries[1]
+
+
+@pytest.mark.parametrize("requested_dt", [None, "", "   "])
+def test_latest_summary_ignores_newer_schema_detection_date(monkeypatch, requested_dt) -> None:
+    """The October 13 schema fixture must not replace October 11 DQ evidence."""
+    client = FakeLatestDateClickHouseClient(
+        check_dates=("2026-10-11",),
+        alerts=(("2026-10-13", "schema_drift"), ("2026-10-10", "dq_failure")),
+    )
+    audits = []
+    monkeypatch.setattr(daily_summary, "write_agent_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    payload = daily_summary.fetch_daily_quality_summary(dt=requested_dt, client=client)
+
+    assert payload["dt"] == "2026-10-11"
+    assert len(client.queries) == 2
+    assert client.queries[0] == daily_summary.LATEST_SUMMARY_DATE_SQL
+    assert payload["sql"] == client.queries[1]
+    assert payload["sql"].count("toDate('2026-10-11')") == 2
+    assert len(audits) == 1
+    assert audits[0]["status"] == "success"
+    assert audits[0]["input_payload"]["requested_dt"] == requested_dt
+    assert audits[0]["input_payload"]["resolved_dt"] == "2026-10-11"
+
+
+@pytest.mark.parametrize("check_dates", [(), ("2026-10-10",)])
+def test_latest_summary_uses_exact_dq_failure_alert_date(check_dates) -> None:
+    """Exact DQ failures provide a latest date even without any check results."""
+    client = FakeLatestDateClickHouseClient(
+        check_dates=check_dates,
+        alerts=(
+            ("2026-10-11", "dq_failure"),
+            ("2026-10-13", "schema_drift"),
+            ("2026-10-14", "dq_failure_extra"),
+        ),
+    )
+
+    assert daily_summary.resolve_daily_summary_date(client) == "2026-10-11"
+    assert client.queries == [daily_summary.LATEST_SUMMARY_DATE_SQL]
+
+
+def test_explicit_schema_date_bypasses_latest_lookup_and_keeps_alert_scope(monkeypatch) -> None:
+    """An explicit detection date still counts all open alert types for that date."""
+    client = FakeLatestDateClickHouseClient(check_dates=("2026-10-11",))
+    audits = []
+    monkeypatch.setattr(daily_summary, "write_agent_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    payload = daily_summary.fetch_daily_quality_summary(dt="2026-10-13", client=client)
+
+    assert payload["dt"] == "2026-10-13"
+    assert len(client.queries) == 1
+    assert payload["sql"] == client.queries[0]
+    assert payload["sql"].count("toDate('2026-10-13')") == 2
+    assert "alert_type" not in payload["sql"]
+    assert payload["total_open_alerts"] == 3
+    assert audits[0]["input_payload"]["resolved_dt"] == "2026-10-13"
+
+
+@pytest.mark.parametrize("alerts", [(), (("2026-10-13", "schema_drift"),)])
+def test_latest_summary_without_dq_data_raises_and_audits_failure(monkeypatch, alerts) -> None:
+    """Empty and schema-only datasets cannot yield an epoch or schema summary date."""
+    client = FakeLatestDateClickHouseClient(check_dates=(), alerts=alerts)
+    audits = []
+    monkeypatch.setattr(daily_summary, "write_agent_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    with pytest.raises(ValueError, match="No daily DQ data is available yet"):
+        daily_summary.fetch_daily_quality_summary(client=client)
+
+    assert client.queries == [daily_summary.LATEST_SUMMARY_DATE_SQL]
+    assert len(audits) == 1
+    assert audits[0]["status"] == "failed"
+    assert audits[0]["input_payload"]["resolved_dt"] == ""
+    assert audits[0]["output_payload"] == {"error_type": "ValueError"}
+
+
+def test_latest_summary_with_no_scalar_rows_raises() -> None:
+    """A missing scalar result follows the same no-data path as a null maximum."""
+    class EmptyClient:
+        def query(self, sql: str) -> FakeQueryResult:
+            return FakeQueryResult(column_names=["maxOrNull(dt)"], result_rows=[])
+
+    with pytest.raises(ValueError, match="No daily DQ data is available yet"):
+        daily_summary.resolve_daily_summary_date(EmptyClient())
+
+
+def test_explicit_date_without_rows_returns_zero_totals_and_audits(monkeypatch) -> None:
+    """Explicit dates remain valid even when neither table has rows on that date."""
+    client = FakeClickHouseClient()
+    audits = []
+
+    def empty_query(sql: str) -> FakeQueryResult:
+        client.queries.append(sql)
+        return FakeQueryResult(column_names=["category", "label", "count"], result_rows=[])
+
+    monkeypatch.setattr(client, "query", empty_query)
+    monkeypatch.setattr(daily_summary, "write_agent_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    payload = daily_summary.fetch_daily_quality_summary(dt="2026-10-13", client=client)
+
+    assert payload["status"] == "success"
+    assert payload["dt"] == "2026-10-13"
+    assert payload["check_counts"] == payload["alert_counts"] == []
+    assert payload["total_checks"] == payload["total_open_alerts"] == 0
+    assert len(client.queries) == 1
+    assert audits[0]["status"] == "success"
+    assert audits[0]["row_count"] == 0
+
+
+@pytest.mark.parametrize("fail_latest", [True, False])
+def test_summary_query_errors_propagate_and_audit_failure(monkeypatch, fail_latest) -> None:
+    """Latest-date and aggregation query errors retain the existing failure audit."""
+    client = FakeLatestDateClickHouseClient()
+    audits = []
+    original_query = client.query
+    error = RuntimeError("ClickHouse query failed")
+
+    def failing_query(sql: str) -> FakeQueryResult:
+        if (sql == daily_summary.LATEST_SUMMARY_DATE_SQL) == fail_latest:
+            client.queries.append(sql)
+            raise error
+        return original_query(sql)
+
+    monkeypatch.setattr(client, "query", failing_query)
+    monkeypatch.setattr(daily_summary, "write_agent_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    with pytest.raises(RuntimeError, match="ClickHouse query failed") as raised:
+        daily_summary.fetch_daily_quality_summary(client=client)
+
+    assert raised.value is error
+    assert len(client.queries) == (1 if fail_latest else 2)
+    assert len(audits) == 1
+    assert audits[0]["status"] == "failed"
+    assert audits[0]["input_payload"]["resolved_dt"] == ("" if fail_latest else "2026-06-10")
+    assert audits[0]["output_payload"] == {"error_type": "RuntimeError"}
+    assert audits[0]["error_message"] == str(error)

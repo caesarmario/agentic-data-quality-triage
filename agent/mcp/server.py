@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -19,6 +20,10 @@ from uuid import UUID, uuid4
 
 # --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# MCP stdio reserves stdout for JSON-RPC frames. Route project logs to stderr
+# before importing modules that initialize the shared application logger.
+os.environ.setdefault("AGENT_LOG_STREAM", "stderr")
 
 # Add repo root before importing project packages when this file is executed by path.
 if str(PROJECT_ROOT) not in sys.path:
@@ -225,7 +230,7 @@ def bounded_text(payload: bytes, max_bytes: int) -> tuple[str, bool]:
     """
     safe_limit = max(1, min(max_bytes, DEFAULT_ARTIFACT_READ_LIMIT_BYTES))
     truncated  = len(payload) > safe_limit
-    text       = payload[:safe_limit].decode("utf-8", errors="replace")
+    text       = payload[:safe_limit].decode("utf-8", errors="ignore")
 
     return text, truncated
 

@@ -159,6 +159,8 @@ class ApprovalControlStore:
         try:
             cursor = connection.cursor()
             try:
+                from agent.tools.incident_resolution_store import LIFECYCLE_LOCK
+                cursor.execute("SELECT pg_advisory_xact_lock(%s)", (LIFECYCLE_LOCK,))
                 yield cursor
                 connection.commit()
             finally:

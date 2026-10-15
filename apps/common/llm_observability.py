@@ -293,6 +293,113 @@ def latest_llm_route_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any] | N
     return None
 
 
+def aggregate_latest_llm_run_observations(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """
+    Aggregate every LLM route observation belonging to the latest agent run.
+
+    Args:
+        rows: Audit rows ordered newest first, enriched or raw.
+
+    Returns:
+        Latest route metadata plus aggregate metrics, or None when no LLM route exists.
+    """
+    observations: list[LlmRouteObservation] = []
+    provided_fallback_summaries: dict[str, str] = {}
+
+    for row in rows:
+        route_payload = row.get("llm_route")
+
+        if isinstance(route_payload, dict):
+            normalized_payload = dict(route_payload)
+            route_agent_run_id = str(normalized_payload.get("agent_run_id") or row.get("agent_run_id") or "")
+            provided_summary = str(normalized_payload.get("fallback_summary") or "").strip()
+
+            if provided_summary:
+                provided_fallback_summaries[route_agent_run_id] = provided_summary
+
+            normalized_payload.setdefault(
+                "used_heuristic",
+                normalized_payload.get("runtime_mode") == "heuristic_fallback",
+            )
+            normalized_payload.setdefault(
+                "fallback_reason",
+                normalized_payload.get("fallback_summary", ""),
+            )
+            observation = build_llm_route_observation(
+                normalized_payload,
+                agent_run_id=route_agent_run_id,
+                timestamp=normalized_payload.get("timestamp") or row.get("ts"),
+                event_action=normalized_payload.get("event_action") or row.get("action"),
+                status=normalized_payload.get("status") or row.get("status"),
+                duration_ms=normalized_payload.get("duration_ms", row.get("duration_ms")),
+            )
+
+        else:
+            observation = llm_route_from_audit_row(row)
+
+        if observation:
+            observations.append(observation)
+
+    if not observations:
+        return None
+
+    latest_run_id = observations[0].agent_run_id
+    run_observations = [
+        observation
+        for observation in observations
+        if observation.agent_run_id == latest_run_id
+    ]
+
+    # Older audit rows may omit run identity; do not merge them across runs.
+    if not latest_run_id:
+        run_observations = observations[:1]
+
+    latest = run_observations[0].to_public_dict()
+    requested_routes = list(dict.fromkeys(
+        item.requested_route for item in run_observations if item.requested_route
+    ))
+    executed_routes = list(dict.fromkeys(
+        item.executed_route for item in run_observations if item.executed_route
+    ))
+    providers = list(dict.fromkeys(item.provider for item in run_observations if item.provider))
+    models = list(dict.fromkeys(item.model for item in run_observations if item.model))
+    fallback_summaries = list(dict.fromkeys(
+        provided_fallback_summaries.get(item.agent_run_id) or summary
+        for item in run_observations
+        if (summary := humanize_fallback_reason(item.fallback_reason))
+    ))
+    has_external_model = any(resolve_runtime_mode(item) == "external_model" for item in run_observations)
+    has_heuristic = any(item.used_heuristic for item in run_observations)
+    has_failed = any(resolve_runtime_mode(item) == "failed" for item in run_observations)
+    total_input_tokens = sum(item.input_tokens for item in run_observations)
+    total_output_tokens = sum(item.output_tokens for item in run_observations)
+    total_cost = sum(item.estimated_cost_usd for item in run_observations)
+    total_duration_ms = sum(item.duration_ms for item in run_observations)
+
+    latest.update(
+        {
+            "agent_run_id": latest_run_id,
+            "route_count": len(run_observations),
+            "requested_routes": requested_routes,
+            "executed_routes": executed_routes,
+            "providers": providers,
+            "models": models,
+            "has_external_model": has_external_model,
+            "has_heuristic": has_heuristic,
+            "has_failed": has_failed,
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
+            "total_tokens": total_input_tokens + total_output_tokens,
+            "total_estimated_cost_usd": total_cost,
+            "total_duration_ms": total_duration_ms,
+            "estimated_cost_display": format_estimated_cost(total_cost),
+            "fallback_summaries": fallback_summaries,
+        }
+    )
+
+    return latest
+
+
 # --- Defining Presentation Helpers
 def resolve_runtime_mode(observation: LlmRouteObservation) -> str:
     """

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -35,12 +36,23 @@ from agent.checkpointing import (
     load_checkpoint_settings,
 )
 from agent.tools.alerts import list_alerts
+from agent.specialists.incident_triage import (
+    DEFAULT_TRIAGE_COST_BUDGET_USD,
+    DEFAULT_TRIAGE_MODEL_CALL_BUDGET,
+    DEFAULT_TRIAGE_TOKEN_BUDGET,
+)
+from agent.supervisor.budgets import supervisor_llm_budget_scope
 from pipelines.common.logging import logger
 from pipelines.seeding.helpers import iter_dates, parse_date
 
 
 # --- Defining Constants
 DEFAULT_MANIFEST_S3_URI = "s3://dq-artifacts/dbt-artifacts/orders/latest/manifest.json"
+DEFAULT_TRIAGE_LATENCY_BUDGET_MS = 300_000
+MAX_TRIAGE_MODEL_CALLS           = 10
+MAX_TRIAGE_TOKEN_BUDGET          = 64_000
+MAX_TRIAGE_COST_BUDGET_USD       = 0.15
+MAX_TRIAGE_LATENCY_BUDGET_MS     = 900_000
 
 
 # --- Defining Functions
@@ -91,6 +103,28 @@ def clean_optional(value: str | None) -> str | None:
     cleaned = value.strip()
 
     return cleaned or None
+
+
+def validate_llm_budget_args(args: argparse.Namespace) -> None:
+    """Validate standalone triage budgets before any provider call can occur."""
+    if not 0 <= args.max_model_calls <= MAX_TRIAGE_MODEL_CALLS:
+        raise ValueError(f"max_model_calls must be between 0 and {MAX_TRIAGE_MODEL_CALLS}.")
+
+    if not 0 <= args.token_budget <= MAX_TRIAGE_TOKEN_BUDGET:
+        raise ValueError(f"token_budget must be between 0 and {MAX_TRIAGE_TOKEN_BUDGET}.")
+
+    if not 0.0 <= args.estimated_cost_budget_usd <= MAX_TRIAGE_COST_BUDGET_USD:
+        raise ValueError(
+            f"estimated_cost_budget_usd must be between 0 and {MAX_TRIAGE_COST_BUDGET_USD}."
+        )
+
+    if not 1_000 <= args.latency_budget_ms <= MAX_TRIAGE_LATENCY_BUDGET_MS:
+        raise ValueError(
+            f"latency_budget_ms must be between 1000 and {MAX_TRIAGE_LATENCY_BUDGET_MS}."
+        )
+
+    if not 0 <= args.max_evidence_iterations <= 5:
+        raise ValueError("max_evidence_iterations must be between 0 and 5.")
 
 
 def resolve_run_dates(
@@ -333,17 +367,38 @@ def run_batch_triage(args: argparse.Namespace) -> dict[str, Any]:
         if bool(alert_id) == bool(alert_key):
             raise ValueError("Historical checkpoint replay requires exactly one explicit alert_id or alert_key.")
 
-    if alert_id or alert_key:
-        results = [run_single_alert_triage(alert_id=alert_id, alert_key=alert_key, args=args, config=config)]
+    validate_llm_budget_args(args)
+    started_monotonic = time.monotonic()
 
-    else:
-        dates   = resolve_run_dates(dt=args.dt, start=args.start, end=args.end)
-        results = run_alert_list_triage(dates=dates, args=args, config=config)
+    with supervisor_llm_budget_scope(
+        max_model_calls=args.max_model_calls,
+        token_budget=args.token_budget,
+        estimated_cost_budget_usd=args.estimated_cost_budget_usd,
+        deadline_monotonic=started_monotonic + (args.latency_budget_ms / 1_000),
+    ) as llm_budget:
+        if alert_id or alert_key:
+            results = [run_single_alert_triage(alert_id=alert_id, alert_key=alert_key, args=args, config=config)]
+
+        else:
+            dates   = resolve_run_dates(dt=args.dt, start=args.start, end=args.end)
+            results = run_alert_list_triage(dates=dates, args=args, config=config)
+
+        elapsed_ms = int((time.monotonic() - started_monotonic) * 1_000)
+        usage      = llm_budget.snapshot(latency_ms=elapsed_ms)
 
     summary = {
         "status": "success",
         "triaged_count": len(results),
         "results": results,
+        "llm_budget": {
+            "limits": {
+                "model_calls": args.max_model_calls,
+                "tokens": args.token_budget,
+                "estimated_cost_usd": args.estimated_cost_budget_usd,
+                "latency_ms": args.latency_budget_ms,
+            },
+            "usage": usage.model_dump(mode="json"),
+        },
     }
 
     logger.info("Batch triage completed | summary=%s", summary)
@@ -370,6 +425,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=5, help="Maximum alerts to triage across the date window.")
     parser.add_argument("--confidence-threshold", type=float, default=DEFAULT_CONFIDENCE_TARGET, help="Confidence threshold.")
     parser.add_argument("--max-evidence-iterations", type=int, default=DEFAULT_MAX_EVIDENCE_LOOP, help="Maximum evidence loops.")
+    parser.add_argument(
+        "--max-model-calls",
+        type=int,
+        default=DEFAULT_TRIAGE_MODEL_CALL_BUDGET,
+        help="Maximum external provider calls shared by the complete triage batch.",
+    )
+    parser.add_argument(
+        "--token-budget",
+        type=int,
+        default=DEFAULT_TRIAGE_TOKEN_BUDGET,
+        help="Maximum projected or actual external tokens shared by the triage batch.",
+    )
+    parser.add_argument(
+        "--estimated-cost-budget-usd",
+        type=float,
+        default=DEFAULT_TRIAGE_COST_BUDGET_USD,
+        help="Maximum estimated external model cost shared by the triage batch.",
+    )
+    parser.add_argument(
+        "--latency-budget-ms",
+        type=int,
+        default=DEFAULT_TRIAGE_LATENCY_BUDGET_MS,
+        help="Maximum wall-clock budget used to clamp provider timeouts.",
+    )
     parser.add_argument("--manifest-path", default=None, help="Optional local dbt manifest.json path.")
     parser.add_argument("--manifest-s3-uri", default=DEFAULT_MANIFEST_S3_URI, help="Optional S3 URI for dbt manifest.json.")
     parser.add_argument("--endpoint-url", default=None, help="Optional S3 endpoint URL override.")

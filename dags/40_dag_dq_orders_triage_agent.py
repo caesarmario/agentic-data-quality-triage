@@ -37,6 +37,9 @@ Run the LangGraph triage agent for one alert or a bounded list of open alerts.
 
 This DAG does not mutate data or trigger remediation. It collects evidence through guarded tools,
 stores Markdown/JSON reports in `dq-artifacts`, and writes audit events to ClickHouse.
+After triage, a separate optional notification task synchronizes the existing Discord incident
+card through the DataSentry bot. Missing bot configuration is a successful no-op; notification failures never roll back
+the persisted triage report or alert lifecycle.
 
 Persistent LangGraph checkpoints are optional and default to `off`. When SQLite mode is enabled,
 the DAG derives one stable thread per alert from the DagRun namespace. Airflow task retries resume
@@ -131,6 +134,48 @@ def triage_dag_params() -> dict[str, Param]:
                 minimum=1,
                 maximum=20,
                 description="Maximum alerts to triage for a date/date range.",
+            ),
+            "confidence_threshold": Param(
+                0.70,
+                type="number",
+                minimum=0.10,
+                maximum=0.95,
+                description="Confidence target used by deterministic evidence-loop policy.",
+            ),
+            "max_evidence_iterations": Param(
+                2,
+                type="integer",
+                minimum=0,
+                maximum=5,
+                description="Maximum additional evidence loops after the initial collection pass.",
+            ),
+            "max_model_calls": Param(
+                3,
+                type="integer",
+                minimum=0,
+                maximum=10,
+                description="Shared external provider-call ceiling for this complete triage run.",
+            ),
+            "token_budget": Param(
+                16_384,
+                type="integer",
+                minimum=0,
+                maximum=64_000,
+                description="Shared projected or actual external-token ceiling.",
+            ),
+            "estimated_cost_budget_usd": Param(
+                0.05,
+                type="number",
+                minimum=0.0,
+                maximum=0.15,
+                description="Shared estimated external model cost ceiling in USD.",
+            ),
+            "latency_budget_ms": Param(
+                300_000,
+                type="integer",
+                minimum=1_000,
+                maximum=900_000,
+                description="Shared wall-clock deadline used to clamp provider timeouts.",
             ),
             "checkpoint_mode": Param(
                 "off",
@@ -243,6 +288,13 @@ with DAG(
             "--alert-id '{{ dag_run.conf.get(\"alert_id\", \"\") }}' "
             "--status '{{ dag_run.conf.get(\"alert_status\", \"open\") }}' "
             "--limit '{{ dag_run.conf.get(\"max_alerts\", 5) }}' "
+            "--confidence-threshold '{{ dag_run.conf.get(\"confidence_threshold\", 0.70) }}' "
+            "--max-evidence-iterations '{{ dag_run.conf.get(\"max_evidence_iterations\", 2) }}' "
+            "--max-model-calls '{{ dag_run.conf.get(\"max_model_calls\", 3) }}' "
+            "--token-budget '{{ dag_run.conf.get(\"token_budget\", 16384) }}' "
+            "--estimated-cost-budget-usd "
+            "'{{ dag_run.conf.get(\"estimated_cost_budget_usd\", 0.05) }}' "
+            "--latency-budget-ms '{{ dag_run.conf.get(\"latency_budget_ms\", 300000) }}' "
             "--checkpoint-mode '{{ dag_run.conf.get(\"checkpoint_mode\", \"off\") }}' "
             "--checkpoint-namespace "
             "'{{ dag_run.conf.get(\"checkpoint_namespace\", \"\") or (dag.dag_id ~ \":\" ~ run_id) }}' "
@@ -259,9 +311,28 @@ with DAG(
         execution_timeout=timedelta(minutes=30),
     )
 
+    t20_sync_discord_incidents = runner_bash_task(
+        task_id="t20_sync_discord_incidents",
+        project_command=(
+            "python -m apps.discord_bot.delivery "
+            "{% if dag_run.conf.get(\"alert_key\", \"\") %}"
+            "--alert-key '{{ dag_run.conf.get(\"alert_key\", \"\") }}' "
+            "{% else %}"
+            "$DATE_ARGS "
+            "{% endif %}"
+        ),
+        execution_timeout=timedelta(minutes=5),
+    )
+
     t90_finish = finish_task()
 
-    t00_start >> t05_inspect_checkpoint_history >> t10_run_agentic_triage >> t90_finish
+    (
+        t00_start
+        >> t05_inspect_checkpoint_history
+        >> t10_run_agentic_triage
+        >> t20_sync_discord_incidents
+        >> t90_finish
+    )
 
 
 logger.info("Loaded DAG | dag_id=%s", DAG_ID)

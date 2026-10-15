@@ -19,6 +19,11 @@ import requests
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agent.tools.approval_control_store import ApprovalControlRecord, ApprovalControlStore
+from apps.discord_bot.delivery import (
+    build_bot_headers,
+    channel_messages_url,
+    validate_bot_message_response,
+)
 
 
 # --- Defining Constants
@@ -27,9 +32,6 @@ APPROVED_ACTION_DAG_ID = "90_02_dag_dq_platform_approved_actions"
 AIRFLOW_CLI_CONTAINER = "dq_airflow_api_server"
 GITHUB_API_ROOT = "https://api.github.com"
 GITHUB_REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
-DISCORD_WEBHOOK_PATTERN = re.compile(
-    r"^https://(?:discord(?:app)?\.com)/api/webhooks/[0-9]{10,30}/[A-Za-z0-9._-]{20,250}$"
-)
 
 
 # --- Defining Action Contracts
@@ -207,11 +209,12 @@ def action_readiness(record: ApprovalControlRecord, env: Mapping[str, str] | Non
         ready = enabled and token_present and repository_valid
         reason = "GitHub issue provider is configured." if ready else "GitHub issue provider is disabled or incomplete."
     else:
-        webhook = runtime_env.get("APPROVED_ACTION_DISCORD_WEBHOOK_URL", "").strip()
+        bot_token = runtime_env.get("DISCORD_BOT_TOKEN", "").strip()
+        channel_id = runtime_env.get("DISCORD_OPS_CHANNEL_ID", "").strip()
         enabled = _enabled(runtime_env, "APPROVED_ACTION_NOTIFICATION_ENABLED")
-        provider = "discord_webhook"
-        ready = enabled and bool(DISCORD_WEBHOOK_PATTERN.fullmatch(webhook))
-        reason = "Discord notification provider is configured." if ready else "Discord notification provider is disabled or incomplete."
+        provider = "discord_bot_api"
+        ready = enabled and bool(bot_token) and channel_id.isdigit()
+        reason = "Discord bot notification provider is configured." if ready else "Discord bot notification provider is disabled or incomplete."
 
     return {
         "request_id": record.request_id,
@@ -332,7 +335,7 @@ def _post_discord_notification(
     env: Mapping[str, str],
     http_post: Callable[..., HttpResponse],
 ) -> ActionExecutionResult:
-    """Post one bounded Discord notification to the configured ops webhook."""
+    """Post one bounded Discord notification through the existing DataSentry bot."""
     scope = PostNotificationScope.model_validate(record.scope)
     content = (
         f"## Approved data quality notification\n"
@@ -341,26 +344,35 @@ def _post_discord_notification(
         f"Date: `{scope.dt.isoformat()}`\n"
         f"Approval: `{record.request_id}`"
     )
+    bot_token = env["DISCORD_BOT_TOKEN"].strip()
+    channel_id = env["DISCORD_OPS_CHANNEL_ID"].strip()
     response = http_post(
-        env["APPROVED_ACTION_DISCORD_WEBHOOK_URL"].strip(),
-        json={"username": "DataSentry", "content": content[:1900]},
+        channel_messages_url(channel_id),
+        headers=build_bot_headers(bot_token),
+        json={"content": content[:1900], "allowed_mentions": {"parse": []}},
         timeout=_timeout_seconds(env),
     )
     if response.status_code >= 500:
         raise ApprovedActionDeliveryUnknown(
             f"Discord notification returned HTTP {response.status_code}; delivery is uncertain."
         )
-    if response.status_code not in {200, 204}:
+    if response.status_code != 200:
         raise RuntimeError(f"Discord notification returned HTTP {response.status_code}.")
+    try:
+        message_id, _, _ = validate_bot_message_response(response.json(), channel_id)
+    except (TypeError, ValueError) as exc:
+        raise ApprovedActionDeliveryUnknown(
+            "Discord accepted the request but did not confirm a bot-authored message."
+        ) from exc
     return ActionExecutionResult(
         request_id=record.request_id,
         action_type=record.action_type,
         status="succeeded",
         execution_run_id=execution_run_id,
-        execution_reference=f"discord_notification:{record.request_id}",
-        provider="discord_webhook",
+        execution_reference=f"discord_bot_message:{channel_id}:{message_id}",
+        provider="discord_bot_api",
         side_effects_executed=True,
-        detail="The approved notification was accepted by the configured Discord webhook.",
+        detail="The approved notification was posted by the configured DataSentry bot.",
     )
 
 

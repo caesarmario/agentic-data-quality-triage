@@ -592,6 +592,39 @@ class LlmRuntimeSummary(BaseModel):
     duration_ms: int                    = Field(default=0, ge=0)
 
 
+class AiInvestigationNarrative(BaseModel):
+    """
+    Human-readable investigation narrative built from bounded evidence.
+
+    The model keeps the operator-facing explanation separate from deterministic
+    hypotheses and approval objects. Runtime metadata records whether an
+    external model or the local fallback produced the final wording.
+
+    Attributes:
+        what_happened: Plain-language explanation of the likely incident.
+        evidence_reasoning: Bounded evidence statements supporting the explanation.
+        likely_impact: Downstream reliability or reporting impact.
+        uncertainty: What remains unknown or weakly supported.
+        recommended_next_step: Safest useful operator action.
+        approval_rationale: Why execution remains approval-gated.
+        source: Narrative source after validation and fallback handling.
+        provider: Provider that produced validated external wording.
+        model: Provider model that produced validated external wording.
+        route: Deterministic model route requested by policy.
+    """
+
+    what_happened: str                         = Field(min_length=1, max_length=2_000)
+    evidence_reasoning: list[str]              = Field(default_factory=list, min_length=1, max_length=6)
+    likely_impact: str                         = Field(min_length=1, max_length=2_000)
+    uncertainty: str                           = Field(min_length=1, max_length=1_500)
+    recommended_next_step: str                 = Field(min_length=1, max_length=1_500)
+    approval_rationale: str                    = Field(min_length=1, max_length=1_500)
+    source: Literal["external_model", "heuristic_fallback"] = "heuristic_fallback"
+    provider: str                              = Field(default="", max_length=100)
+    model: str                                 = Field(default="", max_length=200)
+    route: str                                 = Field(default="", max_length=100)
+
+
 class TriageReport(BaseModel):
     """
     Final triage report generated for an alert.
@@ -607,6 +640,7 @@ class TriageReport(BaseModel):
         evidence_plan: Bounded plan that selected deterministic evidence categories.
         hypothesis_framing: Audit metadata for model-assisted hypothesis wording.
         llm_runtime: Sanitized aggregate model-route usage retained by the report.
+        ai_investigation: Validated operator-facing AI investigation narrative.
         llm_route_events: Sanitized model telemetry, separate from root-cause evidence.
         complexity_assessment: Deterministic reasoning-complexity decision and facts.
         investigation_errors: Bounded non-fatal evidence or narrative gaps retained by the run.
@@ -631,6 +665,7 @@ class TriageReport(BaseModel):
     evidence_plan: EvidencePlan | None             = None
     hypothesis_framing: HypothesisFraming | None   = None
     llm_runtime: LlmRuntimeSummary                  = Field(default_factory=LlmRuntimeSummary)
+    ai_investigation: AiInvestigationNarrative | None = None
     llm_route_events: list[dict[str, Any]]           = Field(default_factory=list)
     complexity_assessment: IncidentComplexityAssessment | None = None
     investigation_errors: list[str]                = Field(default_factory=list, max_length=20)

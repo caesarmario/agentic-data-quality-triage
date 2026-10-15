@@ -121,6 +121,7 @@ class SchemaDriftTableEvidence:
     highest_severity: str
     finding_count: int
     findings: tuple[SchemaDriftFinding, ...]
+    observed_at: Any = None
 
 
 # --- Defining Parsing Helpers
@@ -230,7 +231,8 @@ def fetch_schema_drift_evidence(client: Any, run_id: str) -> list[SchemaDriftTab
             schema_sha256,
             status,
             highest_severity,
-            finding_count
+            finding_count,
+            observed_at
         FROM {SCHEMA_SNAPSHOTS_TABLE} FINAL
         WHERE run_id = {run_literal}
           AND finding_count > 0
@@ -306,6 +308,7 @@ def fetch_schema_drift_evidence(client: Any, run_id: str) -> list[SchemaDriftTab
                 highest_severity=clickhouse_text(row[6]),
                 finding_count=int(row[7]),
                 findings=findings,
+                observed_at=row[8] if len(row) > 8 else None,
             )
         )
 
@@ -414,6 +417,7 @@ def build_schema_alert_candidates(
             ),
             "schema_fingerprint": fingerprint,
             "source_schema_run_id": run_id,
+            "detected_at": evidence.observed_at,
             "contract_name": evidence.contract_name,
             "contract_version": evidence.contract_version,
             "contract_sha256": evidence.contract_sha256,
@@ -476,8 +480,8 @@ def open_schema_alert_exists(client: Any, candidate: AlertCandidate) -> bool:
         client=client,
         query=f"""
             SELECT count()
-            FROM {ALERTS_TABLE}
-            WHERE status = {quote_sql_literal(OPEN_ALERT_STATUS)}
+            FROM {ALERTS_TABLE} FINAL
+            WHERE status IN ('open', 'acknowledged', 'triaged')
               AND alert_type = {quote_sql_literal(SCHEMA_ALERT_TYPE)}
               AND table_name = {quote_sql_literal(candidate.table_name)}
               AND JSONExtractString(details_json, 'schema_fingerprint') = {quote_sql_literal(fingerprint)}

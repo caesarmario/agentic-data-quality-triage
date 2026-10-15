@@ -6,6 +6,7 @@
 # --- Importing Libraries
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 
 import pytest
@@ -235,6 +236,62 @@ def test_decision_is_terminal_and_idempotent(monkeypatch) -> None:
             decided_by="reviewer",
             client=object(),
         )
+
+
+def test_runtime_decision_uses_postgres_advisory_lock(monkeypatch) -> None:
+    """Runtime decisions must hold the per-request lock across read and append."""
+    pending = build_approval(status="pending")
+    client = object()
+    events: list[str] = []
+
+    @contextmanager
+    def fake_lock(request_id: str):
+        assert request_id == pending.request_id
+        events.append("lock_enter")
+        try:
+            yield
+        finally:
+            events.append("lock_exit")
+
+    def fake_get(resolved_client, request_id: str) -> ApprovalRequest:
+        assert resolved_client is client
+        assert request_id == pending.request_id
+        events.append("read")
+        return pending
+
+    def fake_insert(resolved_client, request: ApprovalRequest) -> None:
+        assert resolved_client is client
+        assert request.status == "approved"
+        events.append("append")
+
+    monkeypatch.setattr(approval_queue, "build_clickhouse_client", lambda: client)
+    monkeypatch.setattr(approval_queue, "approval_decision_lock", fake_lock)
+    monkeypatch.setattr(approval_queue, "get_approval_request", fake_get)
+    monkeypatch.setattr(approval_queue, "insert_approval_request", fake_insert)
+    monkeypatch.setattr(
+        approval_queue,
+        "write_agent_audit_event",
+        lambda **kwargs: events.append("audit"),
+    )
+
+    approved, changed = approval_queue.decide_approval_request(
+        request_id=pending.request_id,
+        decision="approve",
+        decided_by="mario",
+    )
+
+    assert changed is True
+    assert approved.status == "approved"
+    assert events == ["lock_enter", "read", "append", "audit", "lock_exit"]
+
+
+def test_approval_decision_lock_fails_closed_without_database_url(monkeypatch) -> None:
+    """A runtime decision cannot proceed without the PostgreSQL lock boundary."""
+    monkeypatch.delenv("DQ_CONTROL_DATABASE_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="DQ_CONTROL_DATABASE_URL is required"):
+        with approval_queue.approval_decision_lock("APR-20260610-A1B2C3D4"):
+            pytest.fail("The critical section must not run without a lock database.")
 
 
 def test_pre_dispatch_cancellation_is_audited_and_idempotent(monkeypatch) -> None:

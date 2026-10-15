@@ -30,6 +30,7 @@ from pipelines.common.logging import logger
 # --- Defining Constants
 SCHEMA_CONTRACT_PATHS = {
     "orders": PROJECT_ROOT / "configs" / "contracts" / "orders_schema.yml",
+    "resolution_acceptance": PROJECT_ROOT / "configs" / "contracts" / "resolution_acceptance_schema.yml",
 }
 
 SCHEMA_CONTRACT_NAMES = tuple(sorted(SCHEMA_CONTRACT_PATHS))

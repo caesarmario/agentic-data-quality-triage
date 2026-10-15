@@ -111,6 +111,76 @@ def test_operator_answer_uses_alert_context_without_llm(monkeypatch) -> None:
     assert "system key" not in text.lower()
 
 
+def test_operator_answer_exposes_normalized_runtime_telemetry_to_caller(monkeypatch) -> None:
+    """Validate callers can persist route telemetry without receiving raw provider payloads."""
+    response = copilot.LlmResponse(
+        agent_run_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        route_name="cheap_summary",
+        provider="gemini",
+        model="gemini-3.5-flash-lite",
+        content="The partition is empty. Review the upstream landing step before requesting a backfill.",
+        input_tokens=120,
+        output_tokens=24,
+        estimated_cost_usd=0.000096,
+        duration_ms=450,
+    )
+    captured: list[copilot.LlmResponse] = []
+
+    monkeypatch.setattr(copilot, "run_llm_task", lambda **kwargs: response)
+
+    text = copilot.build_operator_answer(
+        question="What happened?",
+        alert=sample_alert(),
+        response_sink=captured,
+    )
+
+    assert text == response.content
+    assert captured == [response]
+
+
+def test_operator_answer_uses_public_reference_even_when_model_repeats_system_key(monkeypatch):
+    alert = sample_alert()
+    original_key = alert["alert_key"]
+    captured = {}
+
+    def model_answer(**kwargs):
+        captured.update(kwargs)
+        return (
+            f"Review `/dq triage alert_key:{original_key}`. "
+            + "Earlier reference: " + original_key.replace("|", "\\|")
+            + ". Observed 0 rows; expected at least 1."
+        )
+
+    monkeypatch.setattr(copilot, "run_copilot_task", model_answer)
+    answer = copilot.build_operator_answer(question="What evidence is missing?", alert=alert)
+    alert_ref = copilot.compact_alert(alert)["alert_ref"]
+
+    assert answer == (
+        f"Review `/dq triage alert_key:{alert_ref}`. Earlier reference: {alert_ref}"
+        + ". Observed 0 rows; expected at least 1."
+    )
+    assert "alert_key" not in captured["context"]["alert"]
+    assert captured["context"]["alert"]["alert_ref"] == alert_ref
+    assert alert["alert_key"] == original_key
+
+
+def test_overview_answer_normalizes_only_known_alert_keys(monkeypatch):
+    alerts = [sample_alert(), {**sample_alert(), "alert_key": "orders|dq_failure|second"}]
+    original_keys = [row["alert_key"] for row in alerts]
+    captured = {}
+
+    def model_answer(**kwargs):
+        captured.update(kwargs)
+        return "\n".join(original_keys) + "\nUnrelated reference: other|unknown"
+
+    monkeypatch.setattr(copilot, "run_copilot_task", model_answer)
+    answer = copilot.build_operator_answer(question="Which incidents?", platform_alerts=alerts)
+
+    assert answer == "\n".join(copilot.compact_alert(row)["alert_ref"] for row in alerts) + "\nUnrelated reference: other|unknown"
+    assert all("alert_key" not in row for row in captured["context"]["active_alerts"])
+    assert [row["alert_key"] for row in alerts] == original_keys
+
+
 def test_daily_summary_copilot_uses_failure_context_when_llm_fails(monkeypatch) -> None:
     """
     Validate that daily summary fallback calls out incident-worthy failures.
@@ -480,3 +550,27 @@ def test_operator_answer_fallback_reports_no_exact_history_without_claiming_neve
     assert "no earlier investigation record" in text.lower()
     assert "does not prove" in text.lower()
     assert "another alert" in text.lower()
+
+
+def test_operator_answer_fallback_defaults_to_english_for_indonesian_question(
+    monkeypatch,
+) -> None:
+    """Ensure a global Indonesian question receives bounded active-alert context."""
+    monkeypatch.setattr(
+        copilot,
+        "run_llm_task",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("provider unavailable")
+        ),
+    )
+
+    text = copilot.build_operator_answer(
+        question="Apakah ada error di data quality? Coba list down.",
+        platform_alerts=[sample_alert()],
+    )
+
+    assert "i found `1` active data quality" in text.lower()
+    assert "dq.raw_orders" in text
+    assert "critical" in text.lower()
+    assert "/dq triage" in text
+    assert "alert_key" not in text

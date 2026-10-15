@@ -75,6 +75,9 @@ def llm_smoke_dag_params() -> dict[str, Param]:
         Dictionary containing route and explicit external-provider parameters.
     """
     return {
+        "acceptance_case": Param("provider", type="string", enum=["provider", "operator_language"]),
+        "language": Param("en", type="string", enum=["en", "id"]),
+        "alert_ref": Param("", type="string", pattern="^$|^DQ-[0-9]{8}-[A-F0-9]{6}$", maxLength=18),
         "route_name": Param(
             DEFAULT_EXTERNAL_SMOKE_ROUTE,
             type="string",
@@ -124,11 +127,15 @@ with DAG(
     t20_smoke_selected_route = runner_plain_bash_task(
         task_id="t20_smoke_selected_route",
         project_command=(
+            "{% if dag_run.conf.get('run_external_provider', false) and dag_run.conf.get('acceptance_case', 'provider') == 'operator_language' %}"
+            "python scripts/smoke_operator_language.py --language '{{ params.language }}' --alert-ref '{{ params.alert_ref }}'"
+            "{% else %}"
             "python scripts/smoke_llm_provider.py "
             "--route '{{ dag_run.conf.get(\"route_name\", \"cheap_summary\") }}' "
             "{% if dag_run.conf.get(\"run_external_provider\", false) %}"
             "--strict-external-provider"
             "{% else %}--force-heuristic{% endif %}"
+            "{% endif %}"
         ),
         execution_timeout=timedelta(minutes=5),
     )

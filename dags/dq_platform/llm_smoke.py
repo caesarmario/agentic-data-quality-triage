@@ -57,6 +57,8 @@ def emit_llm_smoke_summary(**context: Any) -> dict[str, Any]:
         "dag_id": dag_run.dag_id,
         "run_id": dag_run.run_id,
         "route_name": str(conf.get("route_name", "cheap_summary")),
+        "acceptance_case": str(conf.get("acceptance_case", "provider")),
+        "language": str(conf.get("language", "en")),
         "run_external_provider": bool(conf.get("run_external_provider", False)),
         "result": "success",
         "state_evidence": "t30 reached after all_success provider smoke dependencies",

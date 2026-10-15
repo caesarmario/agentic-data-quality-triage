@@ -34,6 +34,7 @@ from pipelines.seeding.helpers import parse_date
 # --- Defining Constants
 TOOL_NAME    = "alerts"
 ALERTS_TABLE = "dq.alerts"
+ACTIVE_ALERT_STATUSES = ("open", "acknowledged", "triaged")
 
 
 # --- Defining Functions
@@ -74,7 +75,17 @@ def build_alert_filters(
             filters.append(f"alert_key = {quote_sql_literal(normalized_alert_key)}")
 
     if status:
-        filters.append(f"status = {quote_sql_literal(status)}")
+        normalized_status = status.strip().lower()
+
+        if normalized_status == "active":
+            active_values = ", ".join(
+                quote_sql_literal(item)
+                for item in ACTIVE_ALERT_STATUSES
+            )
+            filters.append(f"status IN ({active_values})")
+
+        else:
+            filters.append(f"status = {quote_sql_literal(normalized_status)}")
 
     if dt:
         filters.append(f"dt = {format_date_literal(parse_date(dt))}")

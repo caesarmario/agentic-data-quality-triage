@@ -47,4 +47,4 @@ Faker>=26.0.0
 pytest>=8.3.2
 
 # --- Discord Bot Dependencies
-discord.py>=2.0.0
+discord.py>=2.4.0,<3.0.0

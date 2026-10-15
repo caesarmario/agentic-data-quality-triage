@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from contextlib import contextmanager, nullcontext
+from collections.abc import Iterator
 from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any
@@ -663,7 +666,44 @@ def insert_approval_request(client: Any, request: ApprovalRequest) -> None:
 
 
 # --- Defining Approval Lifecycle
-def create_approval_request(
+@contextmanager
+def approval_decision_lock(request_id: str) -> Iterator[None]:
+    """Serialize terminal decisions for one request through PostgreSQL advisory locking."""
+    database_url = os.getenv("DQ_CONTROL_DATABASE_URL", "").strip()
+
+    if not database_url:
+        raise RuntimeError(
+            "DQ_CONTROL_DATABASE_URL is required to serialize approval decisions safely."
+        )
+
+    lock_key = int.from_bytes(
+        hashlib.sha256(request_id.strip().encode("utf-8")).digest()[:8],
+        byteorder="big",
+        signed=True,
+    )
+
+    try:
+        import psycopg
+
+        connection_factory = psycopg.connect
+    except ImportError:
+        try:
+            import psycopg2
+        except ImportError as exc:  # pragma: no cover - runtime dependency check
+            raise RuntimeError(
+                "psycopg or psycopg2 is required for approval decision locking."
+            ) from exc
+
+        connection_factory = psycopg2.connect
+
+    with connection_factory(database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", (lock_key,))
+
+        yield
+
+
+def _create_approval_request(
     request: ApprovalRequestCreate,
     client: Any | None = None,
 ) -> tuple[ApprovalRequest, bool]:
@@ -748,6 +788,20 @@ def create_approval_request(
     return approval, True
 
 
+def create_approval_request(request: ApprovalRequestCreate, client: Any | None = None) -> tuple[ApprovalRequest, bool]:
+    """Serialize new remediation proposals with incident closure in the live runtime."""
+    if client is None and os.getenv("INCIDENT_CONTROL_ENABLED", "false").lower() == "true":
+        from agent.tools.incident_resolution_store import control_transaction, ResolutionConflict
+        with control_transaction() as cursor:
+            if request.alert_key:
+                cursor.execute("SELECT status FROM dq_control.incident_controls WHERE alert_key=%s FOR UPDATE", (request.alert_key,))
+                current = cursor.fetchone()
+                if current and current[0] == "resolved":
+                    raise ResolutionConflict("Incident sudah ditutup; proposal perbaikan baru diblokir.")
+            return _create_approval_request(request, client)
+    return _create_approval_request(request, client)
+
+
 def decide_approval_request(
     request_id: str,
     decision: ApprovalDecision | str,
@@ -786,63 +840,66 @@ def decide_approval_request(
     if not normalized_actor:
         raise ValueError("decided_by cannot be blank.")
 
-    current = get_approval_request(resolved_client, normalized_id)
+    lock_context = approval_decision_lock(normalized_id) if client is None else nullcontext()
 
-    if current is None:
-        raise LookupError(f"Approval request was not found: {normalized_id}")
+    with lock_context:
+        current = get_approval_request(resolved_client, normalized_id)
 
-    if current.status == target_status.value:
+        if current is None:
+            raise LookupError(f"Approval request was not found: {normalized_id}")
+
+        if current.status == target_status.value:
+            logger.info(
+                "Approval decision already applied | request_id=%s status=%s",
+                current.request_id,
+                current.status,
+            )
+
+            return current, False
+
+        if current.status != ApprovalRequestStatus.PENDING.value:
+            raise ValueError(
+                f"Approval request {current.request_id} is already {current.status}; "
+                f"cannot change it to {target_status.value}."
+            )
+
+        decided_at = datetime.now(timezone.utc)
+        updated    = current.model_copy(
+            update={
+                "updated_at": decided_at,
+                "status": target_status.value,
+                "decided_by": normalized_actor,
+                "decided_at": decided_at,
+                "decision_comment": normalized_comment,
+            }
+        )
+
+        insert_approval_request(resolved_client, updated)
+        write_agent_audit_event(
+            client=resolved_client,
+            action="approval_decision",
+            status=target_status.value,
+            agent_run_id=updated.agent_run_id,
+            alert_id=updated.alert_id,
+            alert_key=updated.alert_key,
+            actor=normalized_actor,
+            tool_name="approval_queue",
+            input_payload={
+                "request_id": updated.request_id,
+                "decision": normalized_decision.value,
+                "comment": normalized_comment,
+            },
+            output_payload={"request_id": updated.request_id, "status": updated.status},
+        )
+
         logger.info(
-            "Approval decision already applied | request_id=%s status=%s",
-            current.request_id,
-            current.status,
+            "Applied approval decision | request_id=%s status=%s decided_by=%s",
+            updated.request_id,
+            updated.status,
+            updated.decided_by,
         )
 
-        return current, False
-
-    if current.status != ApprovalRequestStatus.PENDING.value:
-        raise ValueError(
-            f"Approval request {current.request_id} is already {current.status}; "
-            f"cannot change it to {target_status.value}."
-        )
-
-    decided_at = datetime.now(timezone.utc)
-    updated    = current.model_copy(
-        update={
-            "updated_at": decided_at,
-            "status": target_status.value,
-            "decided_by": normalized_actor,
-            "decided_at": decided_at,
-            "decision_comment": normalized_comment,
-        }
-    )
-
-    insert_approval_request(resolved_client, updated)
-    write_agent_audit_event(
-        client=resolved_client,
-        action="approval_decision",
-        status=target_status.value,
-        agent_run_id=updated.agent_run_id,
-        alert_id=updated.alert_id,
-        alert_key=updated.alert_key,
-        actor=normalized_actor,
-        tool_name="approval_queue",
-        input_payload={
-            "request_id": updated.request_id,
-            "decision": normalized_decision.value,
-            "comment": normalized_comment,
-        },
-        output_payload={"request_id": updated.request_id, "status": updated.status},
-    )
-
-    logger.info(
-        "Applied approval decision | request_id=%s status=%s decided_by=%s",
-        updated.request_id,
-        updated.status,
-        updated.decided_by,
-    )
-
-    return updated, True
+        return updated, True
 
 
 def cancel_approval_request(

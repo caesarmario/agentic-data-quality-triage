@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent.context.models import IncidentMemoryRecord, build_incident_memory_record
+from agent.llm.client import LlmResponse
 from agent.specialists.contracts import (
     AgentApprovalState,
     AgentTaskStatus,
@@ -127,6 +128,33 @@ def test_daily_summary_endpoint_is_typed_and_filters_internal_sql(monkeypatch) -
     assert payload["total_checks"] == 10
     assert payload["total_open_alerts"] == 1
     assert "sql" not in payload
+
+
+def test_daily_summary_endpoint_can_resolve_latest_available_date(monkeypatch) -> None:
+    """Omitting dt must delegate latest-date resolution to the deterministic tool."""
+    captured: dict[str, Any] = {}
+
+    def fake_fetch_daily_quality_summary(**kwargs) -> dict[str, Any]:
+        captured.update(kwargs)
+
+        return {
+            "status": "success",
+            "dt": "2026-06-10",
+            "check_counts": [],
+            "alert_counts": [],
+            "total_checks": 0,
+            "total_open_alerts": 0,
+            "duration_ms": 1,
+            "summary": "Latest available daily summary.",
+        }
+
+    monkeypatch.setattr(api_main, "fetch_daily_quality_summary", fake_fetch_daily_quality_summary)
+
+    response = client.get("/api/v1/summaries/daily")
+
+    assert response.status_code == 200
+    assert response.json()["dt"] == "2026-06-10"
+    assert captured == {"dt": None}
 
 
 def test_daily_summary_endpoint_rejects_inconsistent_tool_totals(monkeypatch) -> None:
@@ -538,6 +566,24 @@ def test_alert_list_endpoint_uses_existing_alert_tool(monkeypatch) -> None:
     assert response.json()["limit"] == 5
     assert "sql" not in response.json()
     assert "details_json" not in response.json()["alerts"][0]
+
+
+def test_alert_list_endpoint_preserves_active_filter_alias(monkeypatch) -> None:
+    """The shared API should expose the active operator filter unchanged."""
+    captured: dict[str, Any] = {}
+
+    def fake_list_alerts(status: str, dt: str | None, limit: int) -> dict[str, Any]:
+        captured.update({"status": status, "dt": dt, "limit": limit})
+
+        return {"status": "success", "alerts": [], "row_count": 0, "sql": "SELECT 1"}
+
+    monkeypatch.setattr(api_main, "list_alerts", fake_list_alerts)
+
+    response = client.get("/api/v1/alerts", params={"status": "active", "limit": 25})
+
+    assert response.status_code == 200
+    assert response.json()["alert_status"] == "active"
+    assert captured == {"status": "active", "dt": None, "limit": 25}
 
 
 def test_alert_detail_endpoint_returns_serialized_alert(monkeypatch) -> None:
@@ -1364,6 +1410,11 @@ def test_copilot_answer_endpoint_uses_shared_context_and_audit(monkeypatch) -> N
     Returns:
         None.
     """
+    monkeypatch.setenv("INCIDENT_CONTROL_ENABLED", "true")
+    monkeypatch.setattr(api_main, "resolution_preview", lambda reference: {
+        "status": "triaged", "request": {"status": "pass", "expires_at": "2020-01-01T00:00:00Z",
+        "result": {"expected": 25, "observed": 25}},
+    })
     alert = DummyAlert(
         {
             "alert_id": None,
@@ -1376,6 +1427,17 @@ def test_copilot_answer_endpoint_uses_shared_context_and_audit(monkeypatch) -> N
         }
     )
     captured: dict[str, object] = {}
+    llm_response = LlmResponse(
+        agent_run_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        route_name="cheap_summary",
+        provider="gemini",
+        model="gemini-3.5-flash-lite",
+        content="The selected partition is missing.",
+        input_tokens=120,
+        output_tokens=30,
+        estimated_cost_usd=0.000111,
+        duration_ms=500,
+    )
 
     monkeypatch.setattr(api_main, "load_alert", lambda **kwargs: alert)
     monkeypatch.setattr(
@@ -1404,6 +1466,8 @@ def test_copilot_answer_endpoint_uses_shared_context_and_audit(monkeypatch) -> N
         """
         captured["copilot"] = kwargs
 
+        kwargs["response_sink"].append(llm_response)
+
         return "The selected partition is missing."
 
     def fake_write_copilot_api_audit_event(**kwargs) -> None:
@@ -1418,8 +1482,13 @@ def test_copilot_answer_endpoint_uses_shared_context_and_audit(monkeypatch) -> N
         """
         captured["audit"] = kwargs
 
+    def fake_write_llm_route_audit_event(**kwargs) -> None:
+        """Capture normalized route audit arguments."""
+        captured["llm_audit"] = kwargs
+
     monkeypatch.setattr(api_main, "build_operator_answer", fake_build_operator_answer)
     monkeypatch.setattr(api_main, "write_copilot_api_audit_event", fake_write_copilot_api_audit_event)
+    monkeypatch.setattr(api_main, "write_llm_route_audit_event", fake_write_llm_route_audit_event)
 
     response = client.post(
         "/api/v1/copilot/answer",
@@ -1435,7 +1504,12 @@ def test_copilot_answer_endpoint_uses_shared_context_and_audit(monkeypatch) -> N
     assert response.json()["context_source"] == "alert_audit"
     assert response.json()["audit_count"] == 1
     assert response.json()["incident_history_count"] == 1
+    assert response.json()["llm_runtime"]["provider"] == "gemini"
+    assert response.json()["llm_runtime"]["model"] == "gemini-3.5-flash-lite"
+    assert response.json()["llm_runtime"]["runtime_mode"] == "external_model"
     assert captured["copilot"]["alert"] is alert
+    assert captured["copilot"]["resolution_context"]["evidence_state"] == "expired"
+    assert captured["copilot"]["resolution_context"]["observed"] == 25
     assert captured["copilot"]["incident_history_rows"] == [
         {
             "recorded_at": "2026-08-20T13:37:00+00:00",
@@ -1451,6 +1525,75 @@ def test_copilot_answer_endpoint_uses_shared_context_and_audit(monkeypatch) -> N
     ]
     assert str(captured["copilot"]["agent_run_id"]) == response.json()["agent_run_id"]
     assert captured["audit"]["response"].agent_run_id == response.json()["agent_run_id"]
+    assert captured["audit"]["llm_response"] is llm_response
+    assert captured["llm_audit"]["response"] is llm_response
+    assert str(captured["llm_audit"]["agent_run_id"]) == response.json()["agent_run_id"]
+    assert captured["llm_audit"]["alert_key"] == "orders|test"
+
+
+def test_copilot_endpoint_supports_global_active_alert_questions(monkeypatch) -> None:
+    """Ensure global Copilot questions use bounded open and triaged alert context."""
+    captured: dict[str, object] = {"statuses": []}
+    llm_response = LlmResponse(
+        agent_run_id=UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        route_name="cheap_summary",
+        provider="gemini",
+        model="gemini-3.5-flash-lite",
+        content="Ada dua alert aktif yang perlu ditinjau.",
+        input_tokens=90,
+        output_tokens=20,
+        estimated_cost_usd=0.000077,
+        duration_ms=400,
+    )
+
+    def fake_list_alerts(status: str, limit: int, agent_run_id: UUID) -> dict:
+        """Return one bounded alert per requested active status."""
+        captured["statuses"].append(status)
+        return {
+            "alerts": [
+                {
+                    "alert_key": f"orders|{status}",
+                    "alert_display_id": f"DQ-{status.upper()}",
+                    "status": status,
+                    "severity": "critical" if status == "open" else "warning",
+                    "table_name": "dq.raw_orders",
+                    "metric": "row_count_positive",
+                    "dt": "2026-06-10",
+                }
+            ]
+        }
+
+    def fake_build_operator_answer(**kwargs) -> str:
+        """Capture global context and return a model-backed answer."""
+        captured["copilot"] = kwargs
+        kwargs["response_sink"].append(llm_response)
+        return llm_response.content
+
+    monkeypatch.setattr(api_main, "list_alerts", fake_list_alerts)
+    monkeypatch.setattr(api_main, "build_operator_answer", fake_build_operator_answer)
+    monkeypatch.setattr(api_main, "write_llm_route_audit_event", lambda **kwargs: None)
+    monkeypatch.setattr(
+        api_main,
+        "write_copilot_api_audit_event",
+        lambda **kwargs: captured.update({"audit": kwargs}),
+    )
+
+    response = client.post(
+        "/api/v1/copilot/answer",
+        json={"question": "Apakah ada error di data quality? Coba list down."},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["answer"] == llm_response.content
+    assert payload["context_source"] == "active_alerts"
+    assert payload["alert_key"] == ""
+    assert payload["active_alert_count"] == 2
+    assert payload["llm_runtime"]["provider"] == "gemini"
+    assert captured["statuses"] == ["open", "triaged"]
+    assert len(captured["copilot"]["platform_alerts"]) == 2
+    assert captured["copilot"]["alert"] is None
+    assert captured["audit"]["alert"] is None
 
 
 def test_copilot_incident_history_context_excludes_current_and_private_fields() -> None:

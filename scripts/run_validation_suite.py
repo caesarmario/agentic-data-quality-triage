@@ -32,6 +32,7 @@ VALIDATION_EXTERNAL_LLM_ENABLED = "false"
 VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
     "all": (),
     "airflow": (
+        "tests/test_resolution_outbox_acceptance.py",
         "tests/test_airflow_dag_design.py",
         "tests/test_airflow_run_identity.py",
         "tests/test_backfill_approval_gate.py",
@@ -71,6 +72,15 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_triage_evaluation.py",
     ),
     "api": (
+        "tests/test_resolution_outbox_acceptance.py",
+        "tests/test_operator_language_contract.py",
+        "tests/test_operator_language_smoke.py",
+        "tests/test_resolution_api.py",
+        "tests/test_incident_resolution.py",
+        "tests/test_resolution_store.py",
+        "tests/test_resolution_producer.py",
+        "tests/test_incident_revalidation.py",
+        "tests/test_airflow_revalidation_api.py",
         "tests/test_daily_summary_tool.py",
         "tests/test_quality_summary_tool.py",
         "tests/test_api_app.py",
@@ -85,13 +95,22 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_validation_suite.py",
     ),
     "discord": (
+        "tests/test_discord_help.py",
+        "tests/test_discord_welcome.py",
+        "tests/test_discord_command_workspace.py",
+        "tests/test_discord_workspaces.py",
+        "tests/test_discord_language_rendering.py",
+        "tests/test_operator_language_contract.py",
+        "tests/test_discord_resolution.py",
         "tests/test_control_plane_client.py",
         "tests/test_copilot_narratives.py",
         "tests/test_daily_summary_tool.py",
         "tests/test_quality_summary_tool.py",
         "tests/test_discord_bot.py",
         "tests/test_discord_formatters.py",
-        "tests/test_discord_webhook.py",
+        "tests/test_discord_delivery.py",
+        "tests/test_discord_interactions.py",
+        "tests/test_discord_mentions.py",
     ),
     "dq": (
         "tests/test_dq_evidence.py",
@@ -142,6 +161,8 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_validation_suite.py",
     ),
     "ui": (
+        "tests/test_streamlit_language.py",
+        "tests/test_streamlit_resolution.py",
         "tests/test_web_theme.py",
         "tests/test_streamlit_helpers.py",
         "tests/test_web_deployment.py",
@@ -237,6 +258,7 @@ def run_validation_suite(suite: str) -> int:
     # Airflow validation must never spend external provider credit. Individual
     # tests may still opt in locally while using fully mocked provider clients.
     child_env["EXTERNAL_LLM_ENABLED"] = VALIDATION_EXTERNAL_LLM_ENABLED
+    child_env["INCIDENT_CONTROL_ENABLED"] = "false"
 
     logger.info(
         "Starting validation suite | suite=%s started_at=%s command=%s",

@@ -37,6 +37,10 @@ x-app-env: &app-env
   AGENT_CHECKPOINT_BUSY_TIMEOUT_MS: ${AGENT_CHECKPOINT_BUSY_TIMEOUT_MS:-5000}
   LANGGRAPH_STRICT_MSGPACK: ${LANGGRAPH_STRICT_MSGPACK:-true}
   DQ_CONTROL_DATABASE_URL: ${DQ_CONTROL_DATABASE_URL:-postgresql://airflow:airflow@airflow-postgres:5432/airflow}
+  INCIDENT_CONTROL_ENABLED: "true"
+  AIRFLOW_API_BASE_URL: ${AIRFLOW_API_BASE_URL:-http://airflow-api-server:8080}
+  AIRFLOW_API_USERNAME: ${AIRFLOW_API_USERNAME:-${AIRFLOW_WWW_USER_USERNAME:-admin}}
+  AIRFLOW_API_PASSWORD: ${AIRFLOW_API_PASSWORD:-${AIRFLOW_WWW_USER_PASSWORD:-admin}}
 
 # --- Defining Python Runner Template
 x-python-runner: &python-runner
@@ -431,6 +435,9 @@ services:
     <<: *python-runner
     container_name: dq_api
     profiles: ["api", "web"]
+    environment:
+      <<: *app-env
+      EXTERNAL_LLM_ENABLED: ${COPILOT_EXTERNAL_LLM_ENABLED:-false}
     ports:
       - "${API_PORT:-8000}:8000"
     command:

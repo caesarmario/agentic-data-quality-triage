@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, TypedDict
 from uuid import UUID, uuid4
 
+from pydantic import BaseModel, Field
+
 
 # --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.state import (
+    AiInvestigationNarrative,
     Alert,
     ApprovalActionType,
     ApprovalGatedAction,
@@ -87,6 +90,24 @@ class GraphState(TypedDict):
     """
 
     state: TriageState
+
+
+class InvestigationEvidenceReasoning(BaseModel):
+    """Link one model-authored finding to a bounded evidence reference."""
+
+    evidence_reference: str = Field(pattern=r"^E[1-8]$")
+    finding: str             = Field(min_length=1, max_length=1_000)
+
+
+class InvestigationNarrativeProposal(BaseModel):
+    """Define the structured operator narrative accepted from a routed model."""
+
+    what_happened: str                                = Field(min_length=1, max_length=2_000)
+    evidence_reasoning: list[InvestigationEvidenceReasoning] = Field(min_length=1, max_length=6)
+    likely_impact: str                                = Field(min_length=1, max_length=2_000)
+    uncertainty: str                                  = Field(min_length=1, max_length=1_500)
+    recommended_next_step: str                        = Field(min_length=1, max_length=1_500)
+    approval_rationale: str                           = Field(min_length=1, max_length=1_500)
 
 
 @dataclass(frozen=True)
@@ -792,11 +813,12 @@ def build_report_narrative_context(state: TriageState) -> dict[str, Any]:
     complexity_assessment = assess_incident_complexity(state)
     evidence_rows          = [
         {
+            "evidence_reference": f"E{index}",
             "tool_name": item.tool_name,
             "summary": item.summary,
             "row_count": item.row_count,
         }
-        for item in state.evidence[:8]
+        for index, item in enumerate(state.evidence[:8], start=1)
     ]
 
     return {
@@ -824,9 +846,11 @@ def build_report_narrative_prompt(state: TriageState) -> str:
     complexity = assess_incident_complexity(state)
 
     return (
-        "Write a concise senior data engineering triage narrative for this DQ alert. "
-        "Use only the provided evidence. Mention the likely root cause, likely impact, "
-        "and why remediation must stay approval-gated. "
+        "Build a plain-language investigation brief for a data engineer or analytics stakeholder. "
+        "Use only the provided evidence. Explain what likely happened, cite supporting evidence "
+        "using the supplied E1-E8 references, state likely downstream impact, disclose uncertainty, "
+        "recommend one safe next step, and explain why mutation remains approval-gated. "
+        "Do not repeat technical keys, invent business impact, or claim that remediation executed. "
         f"Alert table={alert.table_name if alert else 'unknown'}, "
         f"metric={alert.metric if alert else 'unknown'}, "
         f"dt={alert.dt if alert else 'unknown'}, "
@@ -872,6 +896,109 @@ def build_llm_report_narrative(state: TriageState) -> LlmResponse:
         ),
         context=build_report_narrative_context(state=state),
         agent_run_id=state.agent_run_id,
+        response_model=InvestigationNarrativeProposal,
+        response_schema_name="investigation_narrative",
+    )
+
+
+def build_ai_investigation_narrative(
+    state: TriageState,
+    response: LlmResponse | None,
+) -> AiInvestigationNarrative:
+    """
+    Build the validated operator narrative or a safe deterministic fallback.
+
+    Args:
+        state: Current evidence-driven triage state.
+        response: Optional routed model response from the reporting node.
+
+    Returns:
+        AiInvestigationNarrative safe for reports, API, UI, and Discord.
+    """
+    top_hypothesis = state.top_hypothesis
+    evidence_lines = [
+        f"[E{index}] {item.summary}"
+        for index, item in enumerate(state.evidence[:4], start=1)
+        if item.tool_name != "llm_router" and item.summary.strip()
+    ]
+    deterministic_evidence = evidence_lines or [
+        "[E1] No complete evidence row was available; treat the diagnosis as provisional."
+    ]
+    confidence = top_hypothesis.confidence if top_hypothesis else 0.0
+    fallback = AiInvestigationNarrative(
+        what_happened=(
+            top_hypothesis.description
+            if top_hypothesis
+            else "The investigation did not produce a supported root-cause hypothesis."
+        ),
+        evidence_reasoning=deterministic_evidence,
+        likely_impact=(
+            "Data for the affected date may be incomplete or unreliable in downstream models and reporting "
+            "until the source condition is verified and the partition is revalidated."
+        ),
+        uncertainty=(
+            f"The current diagnosis has confidence {confidence:.2f}; "
+            + (
+                "one or more evidence dependencies were incomplete."
+                if state.errors
+                else "the evidence supports a leading hypothesis but does not prove the source-side cause."
+            )
+        ),
+        recommended_next_step=(
+            top_hypothesis.recommended_action
+            if top_hypothesis and top_hypothesis.recommended_action
+            else "Review the retained evidence and confirm the upstream condition before proposing remediation."
+        ),
+        approval_rationale=(
+            "Any rerun, backfill, quarantine, or data-changing action can affect downstream consumers, "
+            "so the system requires explicit human approval before execution."
+        ),
+        source="heuristic_fallback",
+        provider=response.provider if response else "heuristic",
+        model=response.model if response else "heuristic-v1",
+        route=response.route_name if response else REPORT_NARRATIVE_ROUTE,
+    )
+
+    if not response or response.used_heuristic or not response.structured_output:
+        return fallback
+
+    try:
+        proposal = InvestigationNarrativeProposal.model_validate(response.structured_output)
+
+    except ValueError as exc:
+        logger.warning(
+            "Falling back from invalid investigation narrative | agent_run_id=%s error=%s",
+            state.agent_run_id,
+            type(exc).__name__,
+        )
+        return fallback
+
+    valid_references = {
+        f"E{index}"
+        for index, _item in enumerate(state.evidence[:8], start=1)
+    }
+
+    if any(item.evidence_reference not in valid_references for item in proposal.evidence_reasoning):
+        logger.warning(
+            "Falling back from ungrounded investigation narrative | agent_run_id=%s",
+            state.agent_run_id,
+        )
+        return fallback
+
+    return AiInvestigationNarrative(
+        what_happened=proposal.what_happened,
+        evidence_reasoning=[
+            f"[{item.evidence_reference}] {item.finding}"
+            for item in proposal.evidence_reasoning
+        ],
+        likely_impact=proposal.likely_impact,
+        uncertainty=proposal.uncertainty,
+        recommended_next_step=proposal.recommended_next_step,
+        approval_rationale=proposal.approval_rationale,
+        source="external_model",
+        provider=response.provider,
+        model=response.model,
+        route=response.route_name,
     )
 
 
@@ -946,23 +1073,58 @@ def render_markdown_report(report: TriageReport) -> str:
         "## Summary",
         report.summary,
         "",
-        "## Plain-English Readout",
-        issue_text,
-        "",
-        "## Alert Context",
-        f"- Severity: `{alert.severity}`",
-        f"- Status: `{alert.status}`",
-        f"- Table: `{alert.table_name}`",
-        f"- Metric: `{alert.metric}`",
-        f"- Date: `{alert.dt}`",
-        f"- Observed: `{alert.observed_value}`",
-        f"- Expected: `{alert.expected_value}`",
-        "",
-        "## Impact",
-        report.impact,
-        "",
-        "## Reasoning Complexity",
+        "## AI Investigation",
     ]
+
+    if report.ai_investigation:
+        narrative = report.ai_investigation
+        lines.extend(
+            [
+                "### What likely happened",
+                narrative.what_happened,
+                "",
+                "### Why this is the leading explanation",
+                *[f"- {item}" for item in narrative.evidence_reasoning],
+                "",
+                "### Likely impact",
+                narrative.likely_impact,
+                "",
+                "### What remains uncertain",
+                narrative.uncertainty,
+                "",
+                "### Recommended next step",
+                narrative.recommended_next_step,
+                "",
+                "### Why approval is required",
+                narrative.approval_rationale,
+                "",
+                (
+                    f"Narrative source: `{narrative.source}` via "
+                    f"`{narrative.provider}/{narrative.model}` on route `{narrative.route}`."
+                ),
+            ]
+        )
+    else:
+        lines.append(issue_text)
+
+    lines.extend(
+        [
+            "",
+            "## Alert Context",
+            f"- Severity: `{alert.severity}`",
+            f"- Status: `{alert.status}`",
+            f"- Table: `{alert.table_name}`",
+            f"- Metric: `{alert.metric}`",
+            f"- Date: `{alert.dt}`",
+            f"- Observed: `{alert.observed_value}`",
+            f"- Expected: `{alert.expected_value}`",
+            "",
+            "## Impact",
+            report.impact,
+            "",
+            "## Reasoning Complexity",
+        ]
+    )
 
     if report.complexity_assessment:
         lines.extend(
@@ -1235,22 +1397,17 @@ def build_report_from_state(state: TriageState, llm_narrative: LlmResponse | Non
     complexity_assessment = assess_incident_complexity(state)
     report_id              = build_report_id(state.agent_run_id, state.alert.alert_key)
     issue_title            = build_alert_title(state.alert)
+    ai_investigation       = build_ai_investigation_narrative(state=state, response=llm_narrative)
 
-    summary = (
-        f"{state.alert.severity} alert: {issue_title}. "
-        f"Most likely cause is {top_hypothesis.title if top_hypothesis else 'unknown'}."
-    )
-    impact = (
-        "Downstream staging, mart, DQ reporting, and dashboard metrics for the affected date may be incomplete "
-        "until the partition is regenerated, reloaded, and revalidated."
-    )
+    summary = f"{issue_title}. {ai_investigation.what_happened}"
+    impact  = ai_investigation.likely_impact
     recommended_actions = []
 
     if top_hypothesis and top_hypothesis.recommended_action:
         recommended_actions.append(top_hypothesis.recommended_action)
 
-    if llm_narrative and llm_narrative.content:
-        recommended_actions.append(f"LLM-assisted narrative: {llm_narrative.content}")
+    if ai_investigation.recommended_next_step not in recommended_actions:
+        recommended_actions.append(ai_investigation.recommended_next_step)
 
     recommended_actions.append("Review the stored evidence before approving any mutating remediation action.")
     investigation_errors = normalize_investigation_errors(state.errors)
@@ -1267,6 +1424,7 @@ def build_report_from_state(state: TriageState, llm_narrative: LlmResponse | Non
         evidence_plan=state.evidence_plan,
         hypothesis_framing=state.hypothesis_framing,
         llm_runtime=llm_runtime,
+        ai_investigation=ai_investigation,
         llm_route_events=state.llm_route_events,
         complexity_assessment=complexity_assessment,
         investigation_errors=investigation_errors,

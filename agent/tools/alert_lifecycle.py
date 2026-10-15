@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -135,7 +136,7 @@ def build_alert_lifecycle_version_row(
 
     # ReplacingMergeTree chooses the row with the largest updated_at version.
     version_row["updated_at"]    = next_version
-    version_row["status"]        = "triaged"
+    version_row["status"]        = "resolved" if source_row["status"] == "resolved" else "triaged"
     version_row["report_s3_uri"] = report_s3_uri
 
     return [version_row[column] for column in ALERT_VERSION_COLUMNS]
@@ -260,6 +261,10 @@ def mark_alert_triaged(
         if not source_row:
             raise RuntimeError("Alert lifecycle source row was not found.")
 
+        if os.getenv("INCIDENT_CONTROL_ENABLED", "false").lower() == "true":
+            from agent.tools.incident_resolution import transition_triaged
+            return transition_triaged(client, source_row, report_s3_uri)
+
         version_written = not (
             source_row.get("status") == "triaged"
             and source_row.get("report_s3_uri") == report_s3_uri
@@ -292,7 +297,7 @@ def mark_alert_triaged(
 
         lifecycle_row = query_lifecycle_row(client=client, alert_key=alert.alert_key)
 
-        if lifecycle_row.get("status") != "triaged":
+        if lifecycle_row.get("status") not in {"triaged", "resolved"}:
             raise RuntimeError("Alert lifecycle readback did not retain triaged status.")
 
         if lifecycle_row.get("report_s3_uri") != report_s3_uri:

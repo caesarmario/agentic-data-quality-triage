@@ -29,6 +29,8 @@ SAFE_IDENTIFIER   = re.compile(r"^[A-Za-z0-9_.-]+$")
 SAFE_RUN_ID       = SAFE_IDENTIFIER
 
 ADMINISTRATIVE_DAG_IDS = (
+    "90_03_dag_dq_incident_revalidation",
+    "90_04_dag_dq_resolution_outbox_acceptance",
     TRIAGE_DAG_ID,
     APPROVED_ACTION_DAG_ID,
     VALIDATION_DAG_ID,

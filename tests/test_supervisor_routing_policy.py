@@ -431,7 +431,6 @@ def test_low_risk_narrative_route_has_bounded_fallback_to_heuristic() -> None:
     assert route.risk_tier == "low"
     assert fallback_chain("cheap_summary") == (
         "cheap_summary",
-        "openai_summary",
         "evidence_summary",
     )
     assert config.routes["evidence_summary"].provider == "heuristic"

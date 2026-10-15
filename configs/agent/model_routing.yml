@@ -73,7 +73,7 @@ routes:
     max_output_tokens: 700
     input_cost_per_1m_tokens: 0.30
     output_cost_per_1m_tokens: 2.50
-    fallback_route: openai_summary
+    fallback_route: evidence_summary
 
   openai_summary:
     description: Secondary low-risk summary route when Gemini is unavailable.
@@ -107,10 +107,10 @@ routes:
     reasoning_tier: mid
     risk_tier: medium
     temperature: 0.0
-    max_output_tokens: 4096
+    max_output_tokens: 1200
     input_cost_per_1m_tokens: 0.30
     output_cost_per_1m_tokens: 2.50
-    fallback_route: triage_reasoning
+    fallback_route: evidence_summary
     structured_output_mode: preferred
 
   hypothesis_framing:
@@ -120,22 +120,22 @@ routes:
     reasoning_tier: mid
     risk_tier: medium
     temperature: 0.0
-    max_output_tokens: 4096
+    max_output_tokens: 3000
     input_cost_per_1m_tokens: 0.30
     output_cost_per_1m_tokens: 2.50
-    fallback_route: triage_reasoning
+    fallback_route: evidence_summary
     structured_output_mode: preferred
 
   triage_reasoning:
     description: Medium-risk root cause explanation after deterministic tools collect evidence.
-    provider: openai
-    model: gpt-5.6-luna
+    provider: gemini
+    model: gemini-3.5-flash-lite
     reasoning_tier: mid
     risk_tier: medium
     temperature: 0.1
     max_output_tokens: 1200
-    input_cost_per_1m_tokens: 0.20
-    output_cost_per_1m_tokens: 1.20
+    input_cost_per_1m_tokens: 0.30
+    output_cost_per_1m_tokens: 2.50
     fallback_route: evidence_summary
     structured_output_mode: preferred
 
@@ -162,5 +162,4 @@ routes:
     max_output_tokens: 900
     input_cost_per_1m_tokens: 0.30
     output_cost_per_1m_tokens: 2.50
-    fallback_route: openai_summary
-
+    fallback_route: evidence_summary

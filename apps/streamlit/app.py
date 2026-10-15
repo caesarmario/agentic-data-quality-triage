@@ -13,6 +13,7 @@ import time
 from datetime import date
 from html import escape
 from pathlib import Path
+from string import Template
 from typing import Any
 from uuid import uuid4
 
@@ -30,6 +31,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from agent.graph import DEFAULT_CONFIDENCE_TARGET, DEFAULT_MAX_EVIDENCE_LOOP, TriageRuntimeConfig, run_triage
 from agent.llm import copilot as copilot_service
+from agent.mcp.server import ensure_report_s3_uri_allowed
 from agent.tools.alerts import list_alerts
 from agent.tools.audit_log import write_agent_audit_event
 from agent.tools.daily_summary import fetch_daily_quality_summary
@@ -37,9 +39,29 @@ from agent.tools.s3 import parse_s3_uri
 from apps.common.control_plane import (
     MAX_REPORT_BYTES,
     ControlPlaneClient,
+    ControlPlaneResponseError,
     ControlPlaneTransportError,
 )
-from apps.common.llm_observability import enrich_audit_rows, latest_llm_route_from_rows
+from apps.common.llm_observability import aggregate_latest_llm_run_observations, enrich_audit_rows
+from apps.discord_bot.delivery import synchronize_incident_message
+from apps.streamlit.resolution import (
+    ACTIVE_PANEL_KEY,
+    render_resolution_notice,
+    render_resolution_panel,
+    render_resolution_technical_details,
+)
+from apps.common.i18n import language_context, normalize_language
+from apps.streamlit.localization import (
+    localized_choice,
+    incident_option_label,
+    language_formatter,
+    render_language_selector,
+    selected_language,
+    status_label,
+    table_label,
+    tr,
+    workspace_tabs,
+)
 from pipelines.common.clickhouse import build_clickhouse_client, quote_sql_literal
 from pipelines.common.logging import logger
 from pipelines.seeding.upload_to_s3 import build_s3_client
@@ -48,12 +70,47 @@ from pipelines.seeding.upload_to_s3 import build_s3_client
 # --- Defining Constants
 APP_TITLE               = "Agentic DQ Triage Platform"
 DEFAULT_ALERT_LIMIT     = 50
+DEFAULT_ALERT_STATUS    = "active"
 DEFAULT_MANIFEST_S3_URI = "s3://dq-artifacts/dbt-artifacts/orders/latest/manifest.json"
 DEFAULT_BLAST_RADIUS_DEPTH = 5
 DEFAULT_BLAST_RADIUS_NODES = 100
 CONTROL_PLANE_API_URL    = os.getenv("CONTROL_PLANE_API_URL", "").strip().rstrip("/")
 COPILOT_API_TIMEOUT      = float(os.getenv("COPILOT_API_TIMEOUT_SECONDS", "15"))
 CONTROL_PLANE_APPROVAL_TOKEN = os.getenv("CONTROL_PLANE_APPROVAL_TOKEN", "").strip()
+
+PRIMARY_WORKSPACE_TABS = (
+    "Incidents",
+    "Approvals",
+    "Agent Reliability",
+)
+
+INCIDENT_DETAIL_TABS = (
+    "Overview",
+    "Evidence",
+    "AI Analysis",
+    "Lineage",
+    "Approval",
+    "Audit & Recovery",
+)
+
+EMPTY_STATE_MESSAGES = {
+    "no_active_incidents": (
+        "No active incidents match the current filters. The daily quality snapshot remains visible, "
+        "and resolved incidents can still be selected from the sidebar filter."
+    ),
+    "no_daily_summary": (
+        "No daily quality snapshot is available for this scope. Run the scheduled pipeline or choose "
+        "a business date that already has DQ results."
+    ),
+    "no_triage_report": (
+        "No triage report is loaded for this incident. Run triage from AI Analysis to collect evidence "
+        "and generate an approval-aware report."
+    ),
+    "ai_fallback": (
+        "The requested AI provider did not produce this answer. The Copilot used its bounded fallback "
+        "and kept the same evidence and action guardrails."
+    ),
+}
 
 SEVERITY_CSS_CLASSES = {
     "critical": "dq-severity-critical",
@@ -118,52 +175,90 @@ def build_streamlit_control_plane_client(
 
 
 # --- Defining Style Helpers
-def build_page_style_css() -> str:
+def build_page_style_css(active_theme: str = "light") -> str:
     """
     Build semantic CSS that follows Streamlit's active light or dark theme.
 
-    The `--st-*` variables are provided by Streamlit and change automatically
-    when an operator switches theme from the app settings menu. Local `--dq-*`
-    aliases keep project components consistent without duplicating color values.
+    Streamlit theme variables are used when the runtime exposes them. Explicit
+    theme-aware fallbacks keep custom surfaces readable on Streamlit releases
+    where those variables are not present in the rendered document.
+
+    Args:
+        active_theme: Resolved Streamlit theme type, usually ``light`` or ``dark``.
 
     Returns:
         CSS text for cards, status surfaces, metrics, code, and long reports.
     """
-    return """
+    normalized_theme = str(active_theme or "light").strip().lower()
+    is_dark = normalized_theme == "dark"
+    palette_pairs = {
+        "background": ("#F6F8F5", "#0B1210"),
+        "surface": ("#FFFFFF", "#141D19"),
+        "text": ("#18211B", "#EBF4EF"),
+        "border": ("#CBD5CE", "#34443C"),
+        "border_light": ("#E3E9E5", "#29372F"),
+        "critical_bg": ("#FBE9E7", "#3A1E1C"),
+        "critical_text": ("#84261F", "#FFC1BB"),
+        "critical_border": ("#B9382E", "#FF897F"),
+        "warning_bg": ("#FCECDD", "#382518"),
+        "warning_text": ("#713608", "#FFD1A5"),
+        "warning_border": ("#A45114", "#FFAF66"),
+        "stable_bg": ("#E5F5EC", "#173126"),
+        "stable_text": ("#14543B", "#A9E8C8"),
+        "stable_border": ("#1B6E4B", "#5FD09A"),
+        "info_bg": ("#E8EFFB", "#192A45"),
+        "info_text": ("#1F477F", "#BED4FA"),
+        "info_border": ("#2B5CA8", "#7AA9F7"),
+    }
+    palette = {key: values[int(is_dark)] for key, values in palette_pairs.items()}
+    palette["live_theme_colors"] = "\n".join(
+        f"--dq-{key.replace('_', '-')}: light-dark({values[0]}, {values[1]});"
+        for key, values in palette_pairs.items()
+    )
+
+    css_template = Template("""
         :root {
-            color-scheme: light dark;
-            --dq-surface: var(--st-secondary-background-color, #FFFFFF);
+            --dq-surface: var(--st-secondary-background-color, $surface);
             --dq-surface-subtle: color-mix(
                 in srgb,
-                var(--st-secondary-background-color, #FFFFFF) 84%,
-                var(--st-background-color, #F6F8F5)
+                var(--st-secondary-background-color, $surface) 84%,
+                var(--st-background-color, $background)
             );
-            --dq-text: var(--st-text-color, #18211B);
-            --dq-muted: var(--st-gray-text-color, #3F4942);
-            --dq-border: var(--st-border-color, #CBD5CE);
-            --dq-border-light: var(--st-border-color-light, #E3E9E5);
-            --dq-critical-bg: var(--st-red-background-color, #FBE9E7);
-            --dq-critical-text: var(--st-red-text-color, #84261F);
-            --dq-critical-border: var(--st-red-color, #B9382E);
-            --dq-warning-bg: var(--st-orange-background-color, #FCECDD);
-            --dq-warning-text: var(--st-orange-text-color, #713608);
-            --dq-warning-border: var(--st-orange-color, #A45114);
-            --dq-stable-bg: var(--st-green-background-color, #E5F5EC);
-            --dq-stable-text: var(--st-green-text-color, #14543B);
-            --dq-stable-border: var(--st-green-color, #1B6E4B);
-            --dq-info-bg: var(--st-blue-background-color, #E8EFFB);
-            --dq-info-text: var(--st-blue-text-color, #1F477F);
-            --dq-info-border: var(--st-blue-color, #2B5CA8);
+            --dq-text: var(--st-text-color, $text);
+            --dq-muted: color-mix(
+                in srgb,
+                var(--st-text-color, $text) 72%,
+                transparent
+            );
+            --dq-border: var(--st-border-color, $border);
+            --dq-border-light: var(--st-border-color-light, $border_light);
+            --dq-critical-bg: var(--st-red-background-color, $critical_bg);
+            --dq-critical-text: var(--st-red-text-color, $critical_text);
+            --dq-critical-border: var(--st-red-color, $critical_border);
+            --dq-warning-bg: var(--st-orange-background-color, $warning_bg);
+            --dq-warning-text: var(--st-orange-text-color, $warning_text);
+            --dq-warning-border: var(--st-orange-color, $warning_border);
+            --dq-stable-bg: var(--st-green-background-color, $stable_bg);
+            --dq-stable-text: var(--st-green-text-color, $stable_text);
+            --dq-stable-border: var(--st-green-color, $stable_border);
+            --dq-info-bg: var(--st-blue-background-color, $info_bg);
+            --dq-info-text: var(--st-blue-text-color, $info_text);
+            --dq-info-border: var(--st-blue-color, $info_border);
             --dq-shadow: 0 12px 32px color-mix(
                 in srgb,
-                var(--st-text-color, #18211B) 9%,
+                var(--st-text-color, $text) 9%,
                 transparent
             );
         }
 
-        .stApp {
-            background: var(--st-background-color, #F6F8F5);
-            color: var(--dq-text);
+        /* Streamlit changes its native color-scheme without a Python rerun. */
+        @supports (color: light-dark(white, black)) {
+            [data-testid="stApp"] {
+                $live_theme_colors
+                --dq-surface-subtle: color-mix(in srgb, var(--dq-surface) 84%, var(--dq-background));
+                --dq-muted: color-mix(in srgb, var(--dq-text) 72%, transparent);
+                --dq-shadow: 0 12px 32px color-mix(in srgb, var(--dq-text) 9%, transparent);
+            }
         }
 
         .block-container {
@@ -184,19 +279,36 @@ def build_page_style_css() -> str:
             background: var(--dq-surface);
             box-shadow: 0 4px 16px color-mix(
                 in srgb,
-                var(--st-text-color, #18211B) 5%,
+                var(--dq-text) 5%,
                 transparent
             );
         }
 
-        div[data-testid="stMetricLabel"] {
-            color: var(--dq-muted);
+        label[data-testid="stMetricLabel"],
+        label[data-testid="stMetricLabel"] * {
+            color: var(--dq-muted) !important;
+            opacity: 1 !important;
         }
 
         div[data-testid="stMetricValue"] {
             color: var(--dq-text);
             font-size: 1.7rem;
             line-height: 1.15;
+        }
+
+        section[data-testid="stMain"] label[data-testid="stWidgetLabel"],
+        section[data-testid="stMain"] label[data-testid="stWidgetLabel"] * {
+            color: var(--dq-muted) !important;
+            opacity: 1 !important;
+        }
+
+        div[data-testid="stTabs"] div[data-testid="stTab"] {
+            color: var(--dq-muted) !important;
+            opacity: 1 !important;
+        }
+
+        div[data-testid="stTabs"] div[data-testid="stTab"][aria-selected="true"] {
+            color: var(--dq-text) !important;
         }
 
         .dq-card {
@@ -299,6 +411,25 @@ def build_page_style_css() -> str:
             line-height: 1.68;
         }
 
+        button[data-variant="segmented_control"] {
+            color: var(--dq-text);
+        }
+
+        button[data-variant="segmented_control"][aria-checked="true"] {
+            color: var(--dq-info-text) !important;
+            background: var(--dq-info-bg) !important;
+            border-color: var(--dq-info-border);
+        }
+
+        button[data-variant="segmented_control"][aria-checked="true"] p {
+            color: var(--dq-info-text) !important;
+        }
+
+        button[data-variant="segmented_control"]:focus-visible {
+            outline: 2px solid var(--dq-info-text);
+            outline-offset: 2px;
+        }
+
         @media (max-width: 768px) {
             .block-container {
                 padding-top: 1.25rem;
@@ -310,7 +441,9 @@ def build_page_style_css() -> str:
                 min-height: auto;
             }
         }
-    """
+    """)
+
+    return css_template.substitute(palette)
 
 
 def apply_page_style() -> None:
@@ -324,7 +457,7 @@ def apply_page_style() -> None:
 
     logger.info("Applying Streamlit semantic theme | active_theme=%s", active_theme)
     st.markdown(
-        f"<style>{build_page_style_css()}</style>",
+        f"<style>{build_page_style_css(active_theme)}</style>",
         unsafe_allow_html=True,
     )
 
@@ -376,7 +509,7 @@ def render_report_document(
     normalized_markdown = str(markdown_text or "").strip()
 
     if not normalized_markdown:
-        st.info("The selected report is empty.")
+        st.info(tr('The selected report is empty.'))
         return
 
     logger.info(
@@ -387,8 +520,71 @@ def render_report_document(
 
     # Keep long reports visually separate from controls and constrain line length for readability.
     with st.container(border=True, key=container_key):
-        st.caption(source_label)
+        st.caption(tr(source_label))
         st.markdown(normalized_markdown)
+
+
+def report_storage_reference(s3_uri: str) -> tuple[str, str]:
+    """Allow only private project report objects, not arbitrary bucket contents."""
+    if not isinstance(s3_uri, str) or not s3_uri.startswith("s3://") or any(ord(char) < 32 for char in s3_uri):
+        raise ValueError(tr("Report reference is invalid."))
+    bucket, object_key = ensure_report_s3_uri_allowed(s3_uri)
+    if (
+        not object_key.startswith("agent-reports/")
+        or not object_key.endswith((".md", ".json"))
+        or any(part in {"", ".", ".."} for part in object_key.split("/"))
+    ):
+        raise ValueError(tr("Report reference is invalid."))
+    return bucket, object_key
+
+
+def report_download_data(text: str, *, truncated: bool = False) -> bytes | None:
+    """Download only complete original UTF-8 text within the shared byte limit."""
+    if not isinstance(text, str) or truncated is not False or not text.strip():
+        return None
+    try:
+        payload = text.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return payload if len(payload) <= MAX_REPORT_BYTES else None
+
+
+def render_report_download(text: str, s3_uri: str, *, key: str, truncated: bool = False) -> None:
+    try:
+        _, object_key = report_storage_reference(s3_uri)
+    except ValueError:
+        st.warning(tr("Report reference is invalid."))
+        return
+    payload = report_download_data(text, truncated=truncated)
+    if payload is None:
+        st.caption(tr("Download unavailable: the report is truncated, empty, or exceeds the 200 KB safety limit."))
+        return
+    st.download_button(
+        tr("Download report"), data=payload,
+        file_name=Path(object_key).name,
+        mime="application/json" if object_key.endswith(".json") else "text/markdown",
+        key=key, on_click="ignore",
+    )
+
+
+def render_report_access(s3_uri: str, text: str | None = None, *, key: str = "report_download") -> None:
+    """Expose private copyable references, never a presigned or public URL."""
+    if not s3_uri:
+        return
+    try:
+        bucket, object_key = report_storage_reference(s3_uri)
+    except ValueError:
+        st.warning(tr("Report reference is invalid."))
+        return
+    st.caption(tr("Report URI"))
+    st.code(s3_uri, language=None)
+    st.caption(tr("Report bucket"))
+    st.code(bucket, language=None)
+    st.caption(tr("Report key"))
+    st.code(object_key, language=None)
+    st.caption(tr("This report stays private. Copy the storage references or download the complete bounded report; no public bucket URL is created."))
+    if text is not None:
+        render_report_download(text, s3_uri, key=key)
 
 
 def render_header() -> None:
@@ -398,10 +594,9 @@ def render_header() -> None:
     Returns:
         None.
     """
-    st.title(APP_TITLE)
+    st.title(tr(APP_TITLE))
     st.caption(
-        "Local demo UI for ClickHouse alerts, guarded evidence, LangGraph triage reports, "
-        "and approval-gated action previews."
+        tr('Local demo UI for ClickHouse alerts, guarded evidence, LangGraph triage reports, and approval-gated action previews.')
     )
 
 
@@ -448,7 +643,11 @@ def dataframe_from_rows(rows: list[dict[str, Any]]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
 
-    return pd.DataFrame(rows)
+    frame = pd.DataFrame(rows)
+    for column in ("Status", "Severity", "approval_status", "execution_status", "status", "eval_status"):
+        if column in frame.columns:
+            frame[column] = frame[column].map(lambda value: status_label(value) if isinstance(value, str) else value)
+    return frame.rename(columns=lambda label: table_label(str(label)))
 
 
 def summarize_alert_rows(alerts: list[dict[str, Any]]) -> dict[str, Any]:
@@ -548,6 +747,143 @@ def summarize_daily_quality_payload(payload: dict[str, Any]) -> dict[str, int]:
     return summary
 
 
+def build_reliability_kpis(
+    alerts: list[dict[str, Any]],
+    daily_summary: dict[str, Any] | None,
+) -> list[dict[str, str | int]]:
+    """
+    Build the four incident-first reliability metrics shown in the header.
+
+    Args:
+        alerts: Alerts loaded for the current operator scope.
+        daily_summary: Optional deterministic daily DQ snapshot.
+
+    Returns:
+        Exactly four label/value dictionaries in stable display order.
+    """
+    alert_summary = summarize_alert_rows(alerts)
+    daily_counts  = (
+        summarize_daily_quality_payload(daily_summary)
+        if daily_summary
+        else None
+    )
+
+    return [
+        {
+            "label": tr('Daily Checks'),
+            "value": daily_counts["total_checks"] if daily_counts else tr('Unavailable'),
+        },
+        {
+            "label": tr('Failed Checks'),
+            "value": daily_counts["failed_checks"] if daily_counts else tr('Unavailable'),
+        },
+        {
+            "label": tr('Active Incidents'),
+            "value": alert_summary["total_alerts"],
+        },
+        {
+            "label": tr('Critical Incidents'),
+            "value": alert_summary["critical_count"],
+        },
+    ]
+
+
+def resolve_alert_date_filter(
+    restrict_to_summary_date: bool,
+    requested_summary_dt: str | None,
+    daily_summary: dict[str, Any] | None,
+) -> str | None:
+    """
+    Resolve the alert date filter after the latest daily snapshot is loaded.
+
+    Args:
+        restrict_to_summary_date: Whether alerts must match the snapshot date.
+        requested_summary_dt: Explicit date requested by the operator, if any.
+        daily_summary: Optional resolved daily summary containing its actual dt.
+
+    Returns:
+        Exact alert date filter or None when alerts should span dates.
+    """
+    if not restrict_to_summary_date:
+        return None
+
+    resolved_dt = str((daily_summary or {}).get("dt") or requested_summary_dt or "").strip()
+
+    return resolved_dt or None
+
+
+def build_incident_option_rows(alerts: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """
+    Build human-readable incident selector labels without exposing system keys.
+
+    Args:
+        alerts: Alerts loaded for the current operator scope.
+
+    Returns:
+        Ordered label-to-alert mapping for the incident selector.
+    """
+    options: dict[str, dict[str, Any]] = {}
+
+    for index, alert in enumerate(alerts, start=1):
+        alert_ref = str(alert.get("alert_display_id") or "Unassigned")
+        severity  = str(alert.get("severity") or "unknown").upper()
+        table     = str(alert.get("table_name") or "Unknown table")
+        metric    = str(alert.get("metric") or "Unknown metric")
+        dt        = str(alert.get("dt") or "No date")
+        label     = f"{index:02d} | {alert_ref} | {severity} | {table} | {metric} | {dt}"
+
+        options[label] = alert
+
+    return options
+
+
+def build_copilot_presentation(result: dict[str, Any]) -> dict[str, Any]:
+    """
+    Normalize one Copilot result into a compact operator-facing presentation.
+
+    Args:
+        result: Copilot answer plus bounded provenance metadata.
+
+    Returns:
+        Direct answer, compact provenance, and actual fallback state.
+    """
+    runtime         = result.get("llm_runtime") or {}
+    runtime_mode    = str(runtime.get("runtime_mode") or "").strip().lower()
+    used_heuristic  = bool(runtime.get("used_heuristic")) or runtime_mode == "heuristic_fallback"
+    transport_error = bool(str(result.get("fallback_reason") or "").strip())
+    show_fallback   = used_heuristic or transport_error
+    provider        = str(runtime.get("provider") or "").strip()
+    model           = str(runtime.get("model") or "").strip()
+
+    if provider and model:
+        runtime_label = f"{provider} / {model}"
+
+    elif used_heuristic:
+        runtime_label = tr('bounded heuristic fallback')
+
+    else:
+        runtime_label = f"{str(result.get('transport') or 'local')} Copilot"
+
+    context_parts = [
+        runtime_label,
+        tr('{count} evidence', count=int(result.get('evidence_count') or 0)),
+        tr('{count} prior investigations', count=int(result.get('incident_history_count') or 0)),
+    ]
+
+    fallback_message = str(runtime.get("fallback_summary") or "").strip()
+
+    if show_fallback and not fallback_message:
+        fallback_message = tr(EMPTY_STATE_MESSAGES["ai_fallback"])
+
+    return {
+        "answer": str(result.get("answer") or tr('No answer is available.')).strip(),
+        "provenance": " | ".join(context_parts),
+        "show_fallback": show_fallback,
+        "fallback_message": fallback_message,
+        "has_report": bool(result.get("has_report")),
+    }
+
+
 def classify_reliability_state(
     summary: dict[str, Any],
     daily_summary: dict[str, Any] | None = None,
@@ -572,42 +908,42 @@ def classify_reliability_state(
         or daily_counts.get("critical_alerts", 0) > 0
     ):
         return {
-            "label": "Critical attention required",
+            "label": tr('Critical attention required'),
             "css_class": "dq-health-critical",
-            "message": "A failed DQ check or critical alert requires investigation before downstream data is trusted.",
+            "message": tr('A failed DQ check or critical alert requires investigation before downstream data is trusted.'),
         }
 
     if summary_error:
         return {
-            "label": "Daily quality status unavailable",
+            "label": tr('Daily quality status unavailable'),
             "css_class": "dq-health-warning",
-            "message": "The daily DQ snapshot could not be loaded. Alert workflows remain available, but this state must not be treated as healthy.",
+            "message": tr('The daily DQ snapshot could not be loaded. Alert workflows remain available, but this state must not be treated as healthy.'),
         }
 
     if daily_summary and daily_counts.get("total_checks", 0) == 0:
         return {
-            "label": "Daily checks have not run",
+            "label": tr('Daily checks have not run'),
             "css_class": "dq-health-warning",
-            "message": "No DQ check result exists for the selected date. Wait for the scheduled pipeline or investigate the missing run before trusting the data.",
+            "message": tr('No DQ check result exists for the selected date. Wait for the scheduled pipeline or investigate the missing run before trusting the data.'),
         }
 
     if (
         summary["warning_count"] > 0
-        or summary["open_count"] > 0
+        or summary["total_alerts"] > 0
         or daily_counts.get("warning_checks", 0) > 0
         or daily_counts.get("skipped_checks", 0) > 0
         or daily_counts.get("warning_alerts", 0) > 0
     ):
         return {
-            "label": "Warning watchlist",
+            "label": tr('Warning watchlist'),
             "css_class": "dq-health-warning",
-            "message": "The platform found non-critical alerts. Review evidence and decide whether triage or monitoring is enough.",
+            "message": tr('The platform found non-critical alerts. Review evidence and decide whether triage or monitoring is enough.'),
         }
 
     return {
-        "label": "Stable for selected date and filters",
+        "label": tr('Stable for selected date and filters'),
         "css_class": "dq-health-stable",
-        "message": "No failed daily check or material alert is visible for the selected scope. Continue monitoring scheduled runs.",
+        "message": tr('No failed daily check or material alert is visible for the selected scope. Continue monitoring scheduled runs.'),
     }
 
 
@@ -659,14 +995,15 @@ def fetch_streamlit_alert_rows(
 
 
 def fetch_streamlit_daily_summary(
-    dt: str,
+    dt: str | None = None,
     api_base_url: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """
     Fetch one daily DQ snapshot through FastAPI with transport-only fallback.
 
     Args:
-        dt: Exact business date in YYYY-MM-DD format.
+        dt: Optional business date in YYYY-MM-DD format. None selects the
+            latest available DQ business date.
         api_base_url: Optional API URL override used by tests or local tools.
 
     Returns:
@@ -732,20 +1069,21 @@ def load_alert_rows(
 
 @st.cache_data(ttl=15, show_spinner=False)
 def load_daily_quality_summary(
-    dt: str,
+    dt: str | None = None,
     api_base_url: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """
     Load and cache one daily DQ snapshot for the Reliability Overview.
 
     Args:
-        dt: Exact business date in YYYY-MM-DD format.
+        dt: Optional business date in YYYY-MM-DD format. None selects the
+            latest available DQ business date.
         api_base_url: Optional API URL override used by tests or local tools.
 
     Returns:
         Tuple containing the public daily summary and selected transport.
     """
-    logger.info("Loading daily quality summary for Streamlit | dt=%s", dt)
+    logger.info("Loading daily quality summary for Streamlit | dt=%s", dt or "latest")
 
     payload, transport = fetch_streamlit_daily_summary(
         dt=dt,
@@ -893,23 +1231,40 @@ def build_llm_runtime_summary(audit_rows: list[dict[str, Any]]) -> dict[str, Any
     Returns:
         Operator-facing runtime summary or None when no LLM event exists.
     """
-    route = latest_llm_route_from_rows(rows=audit_rows)
+    route = aggregate_latest_llm_run_observations(rows=audit_rows)
 
     if not route:
         return None
 
-    mode_labels = {
-        "external_model": "External model",
-        "heuristic_fallback": "Heuristic fallback",
-        "failed": "Failed",
-    }
+    if route["has_external_model"] and route["has_heuristic"]:
+        mode_label = tr('Mixed execution')
+    elif route["has_external_model"]:
+        mode_label = tr('External model')
+    elif route["has_heuristic"]:
+        mode_label = tr('Heuristic fallback')
+    elif route["has_failed"]:
+        mode_label = tr('Failed')
+    else:
+        mode_label = tr('Unknown')
+
+    provider_model = ", ".join(
+        f"{provider} / {model}"
+        for provider, model in zip(route["providers"], route["models"])
+    ) or "unknown"
+    if len(route["requested_routes"]) == 1 and len(route["executed_routes"]) == 1:
+        route_label = f"{route['requested_routes'][0]} -> {route['executed_routes'][0]}"
+    else:
+        route_label = (
+            f"{', '.join(route['requested_routes']) or 'unknown'} -> "
+            f"{', '.join(route['executed_routes']) or 'unknown'}"
+        )
 
     return {
         **route,
-        "mode_label": mode_labels.get(str(route.get("runtime_mode")), "Unknown"),
-        "provider_model": f"{route.get('provider') or 'unknown'} / {route.get('model') or 'unknown'}",
-        "route_label": f"{route.get('requested_route') or 'unknown'} -> {route.get('executed_route') or 'unknown'}",
-        "token_label": f"{int(route.get('input_tokens') or 0)} in / {int(route.get('output_tokens') or 0)} out",
+        "mode_label": mode_label,
+        "provider_model": provider_model,
+        "route_label": route_label,
+        "token_label": tr("{input_tokens} in / {output_tokens} out", input_tokens=route["total_input_tokens"], output_tokens=route["total_output_tokens"]),
     }
 
 
@@ -935,14 +1290,17 @@ def read_s3_text(s3_uri: str, max_bytes: int | None = None) -> str:
     logger.info("Reading S3 text artifact for Streamlit | uri=%s", s3_uri)
 
     response = client.get_object(Bucket=bucket, Key=key)
-    body     = (
-        response["Body"].read()
-        if max_bytes is None
-        else response["Body"].read(max(1, int(max_bytes)) + 1)
-    )
+    try:
+        body = (
+            response["Body"].read()
+            if max_bytes is None
+            else response["Body"].read(max(1, int(max_bytes)) + 1)
+        )
+    finally:
+        response["Body"].close()
 
     if max_bytes is not None and len(body) > max(1, int(max_bytes)):
-        raise ValueError(f"S3 text artifact exceeds the {max_bytes}-byte safety limit.")
+        raise ValueError(tr("S3 text artifact exceeds the {max_bytes}-byte safety limit.", max_bytes=max_bytes))
 
     return body.decode("utf-8")
 
@@ -969,6 +1327,7 @@ def read_report_text(
         ValueError: If the URI is invalid or the local fallback exceeds the
             same hard report size bound.
     """
+    report_storage_reference(s3_uri)
     safe_max_bytes = max(1, min(int(max_bytes), MAX_REPORT_BYTES))
     api_client     = build_streamlit_control_plane_client(api_base_url=api_base_url)
 
@@ -979,7 +1338,18 @@ def read_report_text(
                 max_bytes=safe_max_bytes,
             )
 
-            return str(payload["text"]), "api"
+            text = payload["text"]
+            if (
+                payload.get("truncated") is not False
+                or not isinstance(text, str)
+                or len(text.encode("utf-8")) > safe_max_bytes
+                or type(payload.get("bytes_read")) is not int
+                or type(payload.get("returned_bytes")) is not int
+                or payload.get("bytes_read") != len(text.encode("utf-8"))
+                or payload.get("returned_bytes") != len(text.encode("utf-8"))
+            ):
+                raise ControlPlaneResponseError(tr("Report response is truncated or exceeds its safety limit."))
+            return text, "api"
 
         except ControlPlaneTransportError as exc:
             logger.warning(
@@ -1208,6 +1578,7 @@ def request_ui_copilot_api(
     latest_triage_result: dict[str, Any] | None,
     api_base_url: str,
     timeout_seconds: float,
+    language: str = "en",
 ) -> dict[str, Any]:
     """
     Request one Copilot answer from the shared control-plane client.
@@ -1226,6 +1597,7 @@ def request_ui_copilot_api(
         ControlPlaneTransportError: If the API cannot be reached.
         ValueError: If response context does not match the selected alert.
     """
+    language = normalize_language(language)
     alert_key       = str(alert.get("alert_key") or "")
     matching_result = matching_triage_result(
         alert_key=alert_key,
@@ -1253,10 +1625,11 @@ def request_ui_copilot_api(
         alert_key=alert_key,
         report_json_s3_uri=report_json_s3_uri,
         audit_limit=10,
+        language=language,
     )
 
     if str(response_payload.get("alert_key") or "") != alert_key:
-        raise ValueError("Copilot API response alert_key does not match the selected alert.")
+        raise ValueError(tr('Copilot API response alert_key does not match the selected alert.'))
 
     return {
         "question": question,
@@ -1270,6 +1643,7 @@ def request_ui_copilot_api(
         "agent_run_id": str(response_payload.get("agent_run_id") or ""),
         "transport": "api",
         "fallback_reason": "",
+        "llm_runtime": dict(response_payload.get("llm_runtime") or {}),
     }
 
 def answer_ui_copilot_question(
@@ -1279,6 +1653,7 @@ def answer_ui_copilot_question(
     audit_rows: list[dict[str, Any]] | None,
     api_base_url: str | None = None,
     api_timeout: float = COPILOT_API_TIMEOUT,
+    language: str = "en",
 ) -> dict[str, Any]:
     """
     Answer one UI Copilot question through API-first shared LLM routing.
@@ -1294,6 +1669,7 @@ def answer_ui_copilot_question(
     Returns:
         Copilot answer plus context and transport metadata.
     """
+    language = normalize_language(language)
     resolved_api_url = CONTROL_PLANE_API_URL if api_base_url is None else api_base_url.strip().rstrip("/")
     fallback_reason  = ""
 
@@ -1305,6 +1681,7 @@ def answer_ui_copilot_question(
                 latest_triage_result=latest_triage_result,
                 api_base_url=resolved_api_url,
                 timeout_seconds=max(1.0, min(api_timeout, 60.0)),
+                language=language,
             )
 
         except ControlPlaneTransportError as exc:
@@ -1329,13 +1706,15 @@ def answer_ui_copilot_question(
         context["audit_count"],
     )
 
-    answer = copilot_service.build_operator_answer(
-        question=question,
-        alert=alert,
-        report_context=context["report_context"],
-        evidence_rows=context["evidence_rows"],
-        audit_rows=context["audit_rows"],
-    )
+    with language_context(language):
+        answer = copilot_service.build_operator_answer(
+            question=question,
+            alert=alert,
+            report_context=context["report_context"],
+            evidence_rows=context["evidence_rows"],
+            audit_rows=context["audit_rows"],
+            language=language,
+        )
 
     return {
         "question": question,
@@ -1347,6 +1726,7 @@ def answer_ui_copilot_question(
         "agent_run_id": "",
         "transport": "local",
         "fallback_reason": fallback_reason,
+        "llm_runtime": {},
     }
 
 def record_mock_external_action(alert: dict[str, Any], action_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1425,7 +1805,7 @@ def build_ui_backfill_approval_payload(
         action_type = action_type.value
 
     if str(action_type) != "backfill":
-        raise ValueError("Only backfill recommendations can create approval requests in the current UI.")
+        raise ValueError(tr('Only backfill recommendations can create approval requests in the current UI.'))
 
     parameters          = dict(payload.get("parameters") or {})
     target_dag_id       = str(parameters.pop("target_dag_id", "")).strip()
@@ -1436,10 +1816,10 @@ def build_ui_backfill_approval_payload(
     reason              = str(payload.get("reason") or parameter_reason).strip()
 
     if str(payload.get("target_dag_id") or "") != "90_dag_dq_platform_backfill_dispatcher":
-        raise ValueError("Backfill recommendation must use the controlled Airflow dispatcher.")
+        raise ValueError(tr('Backfill recommendation must use the controlled Airflow dispatcher.'))
 
     if not target_dag_id or not start_date or not end_date:
-        raise ValueError("Backfill recommendation is missing target DAG or date scope.")
+        raise ValueError(tr('Backfill recommendation is missing target DAG or date scope.'))
 
     return {
         "requested_by": requested_by.strip() or parameter_requester or "streamlit_operator",
@@ -1481,7 +1861,7 @@ def create_ui_backfill_approval_request(
         ControlPlaneClientError: If the API rejects or cannot persist the request.
     """
     if not api_base_url.strip():
-        raise ValueError("CONTROL_PLANE_API_URL is required for durable approval requests.")
+        raise ValueError(tr('CONTROL_PLANE_API_URL is required for durable approval requests.'))
 
     api_client = ControlPlaneClient(
         base_url=api_base_url,
@@ -1533,7 +1913,7 @@ def decide_ui_approval_request(
         ControlPlaneClientError: If the decision cannot be persisted.
     """
     if not api_base_url.strip():
-        raise ValueError("CONTROL_PLANE_API_URL is required for approval decisions.")
+        raise ValueError(tr('CONTROL_PLANE_API_URL is required for approval decisions.'))
 
     api_client = ControlPlaneClient(
         base_url=api_base_url,
@@ -1554,6 +1934,26 @@ def decide_ui_approval_request(
         decided_by=decided_by,
         comment=comment,
     )
+
+
+def synchronize_ui_incident_card(approval: dict[str, Any]) -> None:
+    """Refresh the matching Discord incident card without affecting approval state."""
+    alert_key = str(approval.get("alert_key") or "").strip()
+
+    if not alert_key:
+        return
+
+    try:
+        synchronize_incident_message(
+            alert_key=alert_key,
+            approval_state=str(approval.get("status") or ""),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Streamlit Discord incident synchronization failed safely | request_id=%s error_type=%s",
+            approval.get("request_id"),
+            type(exc).__name__,
+        )
 
 
 def load_approval_queue_rows(
@@ -1577,7 +1977,7 @@ def load_approval_queue_rows(
         ControlPlaneClientError: If the queue response is unavailable or malformed.
     """
     if not api_base_url.strip():
-        raise ValueError("CONTROL_PLANE_API_URL is required for Approval Queue visibility.")
+        raise ValueError(tr('CONTROL_PLANE_API_URL is required for Approval Queue visibility.'))
 
     api_client = ControlPlaneClient(
         base_url=api_base_url,
@@ -1612,7 +2012,7 @@ def load_life_evaluation_rows(
         ControlPlaneClientError: If the history response is unavailable or malformed.
     """
     if not api_base_url.strip():
-        raise ValueError("CONTROL_PLANE_API_URL is required for LIFE evaluation visibility.")
+        raise ValueError(tr('CONTROL_PLANE_API_URL is required for LIFE evaluation visibility.'))
 
     api_client = ControlPlaneClient(
         base_url=api_base_url,
@@ -1661,10 +2061,10 @@ def load_incident_history_rows(
     normalized_reference = alert_reference.strip()
 
     if not normalized_reference:
-        raise ValueError("An Alert Ref is required for incident history.")
+        raise ValueError(tr('An Alert Ref is required for incident history.'))
 
     if not api_base_url.strip():
-        raise ValueError("CONTROL_PLANE_API_URL is required for incident history.")
+        raise ValueError(tr('CONTROL_PLANE_API_URL is required for incident history.'))
 
     api_client = ControlPlaneClient(
         base_url=api_base_url,
@@ -1731,17 +2131,15 @@ def build_incident_history_display_rows(
         category = str(row.get("top_hypothesis_category") or "")
         display_rows.append(
             {
-                "Investigated At": row.get("recorded_at"),
-                "Alert Ref": row.get("alert_display_id"),
-                "Report Ref": row.get("report_id") or "Not assigned",
-                "Status": str(row.get("outcome_status") or "unknown").replace("_", " ").title(),
-                "Likely Cause": category.replace("_", " ").title() if category else "Not classified",
-                "Confidence": row.get("confidence"),
-                "Evidence": int(row.get("evidence_reference_count") or 0),
-                "Approval": str(row.get("approval_state") or "not_required")
-                .replace("_", " ")
-                .title(),
-                "Report": row.get("report_s3_uri"),
+                tr('Investigated At'): row.get("recorded_at"),
+                tr('Alert Ref'): row.get("alert_display_id"),
+                tr('Report Ref'): row.get("report_id") or tr('Not assigned'),
+                tr('Status'): status_label(row.get("outcome_status") or "unknown"),
+                tr('Likely Cause'): category.replace("_", " ").title() if category else tr('Not classified'),
+                tr('Confidence'): row.get("confidence"),
+                tr('Evidence'): int(row.get("evidence_reference_count") or 0),
+                tr('Approval'): status_label(row.get("approval_state") or "not_required"),
+                tr('Report'): row.get("report_s3_uri"),
             }
         )
 
@@ -1779,7 +2177,7 @@ def request_ui_checkpoint_history(
         ControlPlaneClientError: If transport or response validation fails.
     """
     if not api_base_url.strip():
-        raise ValueError("CONTROL_PLANE_API_URL is required for checkpoint history.")
+        raise ValueError(tr('CONTROL_PLANE_API_URL is required for checkpoint history.'))
 
     api_client = ControlPlaneClient(
         base_url=api_base_url,
@@ -1837,7 +2235,7 @@ def request_ui_checkpoint_replay_preview(
         ControlPlaneClientError: If transport or response validation fails.
     """
     if not api_base_url.strip():
-        raise ValueError("CONTROL_PLANE_API_URL is required for checkpoint replay preview.")
+        raise ValueError(tr('CONTROL_PLANE_API_URL is required for checkpoint replay preview.'))
 
     api_client = ControlPlaneClient(
         base_url=api_base_url,
@@ -1877,12 +2275,12 @@ def build_checkpoint_history_display_rows(
     """
     return [
         {
-            "Created At": row.get("created_at"),
-            "Step": row.get("step"),
-            "Source": str(row.get("source") or "unknown").replace("_", " ").title(),
-            "Pending Nodes": ", ".join(row.get("next_nodes") or []) or "Complete",
-            "Complete": bool(row.get("is_complete")),
-            "Checkpoint ID": row.get("checkpoint_id"),
+            tr('Created At'): row.get("created_at"),
+            tr('Step'): row.get("step"),
+            tr('Source'): str(row.get("source") or "unknown").replace("_", " ").title(),
+            tr('Pending Nodes'): ", ".join(row.get("next_nodes") or []) or tr('Complete'),
+            tr('Complete'): bool(row.get("is_complete")),
+            tr('Checkpoint ID'): row.get("checkpoint_id"),
         }
         for row in history
     ]
@@ -1919,10 +2317,10 @@ def request_ui_dbt_blast_radius(
     normalized_api   = api_base_url.strip().rstrip("/")
 
     if not normalized_table:
-        raise ValueError("A selected alert must include a table before impact analysis can run.")
+        raise ValueError(tr('A selected alert must include a table before impact analysis can run.'))
 
     if not normalized_api:
-        raise ValueError("CONTROL_PLANE_API_URL is required for lineage impact analysis.")
+        raise ValueError(tr('CONTROL_PLANE_API_URL is required for lineage impact analysis.'))
 
     logger.info(
         "Requesting Streamlit dbt blast radius | table=%s max_depth=%d max_nodes=%d",
@@ -1993,11 +2391,11 @@ def build_blast_radius_display_rows(nodes: list[dict[str, Any]]) -> list[dict[st
 
         display_rows.append(
             {
-                "Depth": int(node.get("depth") or 0),
-                "Asset": asset_name,
-                "Type": str(node.get("resource_type") or "unknown"),
-                "Relation": str(node.get("relation_name") or "not materialized"),
-                "Lineage Path": readable_path,
+                tr('Depth'): int(node.get("depth") or 0),
+                tr('Asset'): asset_name,
+                tr('Type'): str(node.get("resource_type") or "unknown"),
+                tr('Relation'): str(node.get("relation_name") or tr('not materialized')),
+                tr('Lineage Path'): readable_path,
             }
         )
 
@@ -2059,41 +2457,70 @@ def render_sidebar_filters() -> dict[str, Any]:
         Dictionary of selected UI filter/settings values.
     """
     with st.sidebar:
-        st.header("Alert Filters")
+        st.header(tr('Incident Scope'))
 
-        status = st.selectbox(
-            "Alert status",
-            options=["open", "acknowledged", "triaged", "resolved"],
+        status = localized_choice("selectbox",
+            tr('Incident status'),
+            options=[DEFAULT_ALERT_STATUS, "open", "acknowledged", "triaged", "resolved"],
             index=0,
+            help=tr('Active includes open, acknowledged, and triaged incidents.'),
+            key="render_sidebar_filters_selectbox_0", format_func=language_formatter(statuses=True),
         )
-        selected_dt       = st.date_input("Daily summary date", value=date.today())
-        dt_filter_enabled = st.checkbox("Restrict alert list to summary date", value=False)
-        limit             = st.slider("Alert limit", min_value=5, max_value=100, value=DEFAULT_ALERT_LIMIT, step=5)
+        summary_date_mode = localized_choice("radio",
+            tr('Daily snapshot'),
+            options=["Latest available", "Choose date"],
+            index=0,
+            key="render_sidebar_filters_radio_0", format_func=language_formatter(),
+        )
+        selected_dt = None
+        if summary_date_mode == "Choose date":
+            selected_dt = st.date_input(
+                tr('Business date'),
+                value=st.session_state.get("render_sidebar_filters_date_input_0", date.today()),
+                key="render_sidebar_filters_date_input_0",
+            )
+        dt_filter_enabled = st.checkbox(
+            tr('Restrict incidents to snapshot date'),
+            value=False,
+            key="render_sidebar_filters_checkbox_0",
+        )
+        limit = st.slider(
+            tr('Incident limit'),
+            min_value=5,
+            max_value=100,
+            value=DEFAULT_ALERT_LIMIT,
+            step=5,
+            key="render_sidebar_filters_slider_0",
+        )
 
         st.caption(
-            "The date always controls the daily DQ snapshot. The checkbox only restricts the alert list."
+            tr('The latest snapshot resolves to the newest available DQ business date. Date restriction is optional for the incident queue.')
         )
 
-        st.divider()
-        st.header("Triage Settings")
+        with st.expander(tr('Advanced triage settings'), expanded=False):
+            confidence_threshold = st.slider(
+                tr('Confidence threshold'),
+                min_value=0.10,
+                max_value=0.95,
+                value=float(DEFAULT_CONFIDENCE_TARGET),
+                step=0.05,
+                key="render_sidebar_filters_slider_1",
+            )
+            max_evidence_iterations = st.slider(
+                tr('Extra evidence loops'),
+                min_value=0,
+                max_value=5,
+                value=int(DEFAULT_MAX_EVIDENCE_LOOP),
+                step=1,
+                key="render_sidebar_filters_slider_2",
+            )
+            manifest_s3_uri = st.text_input(
+                tr('dbt manifest S3 URI'),
+                value=DEFAULT_MANIFEST_S3_URI,
+                key="render_sidebar_filters_text_input_0",
+            )
 
-        confidence_threshold = st.slider(
-            "Confidence threshold",
-            min_value=0.10,
-            max_value=0.95,
-            value=float(DEFAULT_CONFIDENCE_TARGET),
-            step=0.05,
-        )
-        max_evidence_iterations = st.slider(
-            "Extra evidence loops",
-            min_value=0,
-            max_value=5,
-            value=int(DEFAULT_MAX_EVIDENCE_LOOP),
-            step=1,
-        )
-        manifest_s3_uri = st.text_input("dbt manifest S3 URI", value=DEFAULT_MANIFEST_S3_URI)
-
-        refresh_clicked = st.button("Refresh alerts", use_container_width=True)
+        refresh_clicked = st.button(tr('Refresh alerts'), use_container_width=True, key="render_sidebar_filters_button_0")
 
     if refresh_clicked:
         load_alert_rows.clear()
@@ -2103,8 +2530,12 @@ def render_sidebar_filters() -> dict[str, Any]:
 
     return {
         "status": status,
-        "dt": selected_dt.isoformat() if dt_filter_enabled else None,
-        "summary_dt": selected_dt.isoformat(),
+        "summary_dt": (
+            selected_dt.isoformat()
+            if selected_dt is not None
+            else None
+        ),
+        "restrict_to_summary_date": dt_filter_enabled,
         "limit": limit,
         "confidence_threshold": confidence_threshold,
         "max_evidence_iterations": max_evidence_iterations,
@@ -2112,54 +2543,25 @@ def render_sidebar_filters() -> dict[str, Any]:
     }
 
 
-def render_alert_metrics(alerts: list[dict[str, Any]]) -> None:
-    """
-    Render compact alert summary metrics.
-
-    Args:
-        alerts: Alert rows currently loaded in the UI.
-
-    Returns:
-        None.
-    """
-    summary = summarize_alert_rows(alerts)
-
-    col_total, col_open, col_critical, col_warning, col_tables = st.columns(5)
-
-    col_total.metric("Loaded Alerts", summary["total_alerts"])
-    col_open.metric("Open", summary["open_count"])
-    col_critical.metric("Critical", summary["critical_count"])
-    col_warning.metric("Warning", summary["warning_count"])
-    col_tables.metric("Affected Tables", summary["affected_table_count"])
-
-
-def render_daily_quality_metrics(
-    daily_summary: dict[str, Any],
-    transport: str,
+def render_reliability_kpis(
+    alerts: list[dict[str, Any]],
+    daily_summary: dict[str, Any] | None,
 ) -> None:
     """
-    Render deterministic daily check and open-alert totals.
+    Render the compact four-metric reliability header.
 
     Args:
-        daily_summary: Validated daily quality summary payload.
-        transport: API or local fallback transport label.
+        alerts: Alerts loaded for the current operator scope.
+        daily_summary: Optional deterministic daily DQ snapshot.
 
     Returns:
         None.
     """
-    summary = summarize_daily_quality_payload(daily_summary)
+    metrics = build_reliability_kpis(alerts=alerts, daily_summary=daily_summary)
+    columns = st.columns(len(metrics))
 
-    st.caption(
-        f"Daily DQ snapshot | dt={daily_summary.get('dt')} | source={transport}"
-    )
-
-    col_checks, col_passed, col_warning, col_failed, col_alerts = st.columns(5)
-
-    col_checks.metric("Daily Checks", summary["total_checks"])
-    col_passed.metric("Passed", summary["passed_checks"])
-    col_warning.metric("Warnings", summary["warning_checks"])
-    col_failed.metric("Failed", summary["failed_checks"])
-    col_alerts.metric("Open Alerts", summary["total_open_alerts"])
+    for column, metric in zip(columns, metrics):
+        column.metric(str(metric["label"]), metric["value"])
 
 
 def render_reliability_overview(
@@ -2180,7 +2582,7 @@ def render_reliability_overview(
     Returns:
         None.
     """
-    st.subheader("Reliability Overview")
+    st.subheader(tr('Reliability Overview'))
 
     summary = summarize_alert_rows(alerts)
     state   = classify_reliability_state(
@@ -2189,10 +2591,9 @@ def render_reliability_overview(
         summary_error=daily_summary_error,
     )
 
-    dates_text  = ", ".join(summary["affected_dates"][:5]) if summary["affected_dates"] else "No affected dt loaded"
-    tables_text = ", ".join(summary["affected_tables"][:5]) if summary["affected_tables"] else "No affected table loaded"
-    dates_html  = escape_html_text(dates_text)
-    tables_html = escape_html_text(tables_text)
+    snapshot_dt = escape_html_text((daily_summary or {}).get("dt") or tr("not available"))
+    transport   = escape_html_text(daily_summary_transport or tr("unavailable"))
+    snapshot_label = tr("Daily snapshot <code>{snapshot_dt}</code> via <code>{transport}</code>", snapshot_dt=snapshot_dt, transport=transport)
 
     st.markdown(
         f"""
@@ -2200,40 +2601,20 @@ def render_reliability_overview(
             <b>{state["label"]}</b><br>
             <span class="dq-muted">{state["message"]}</span>
             <div class="dq-separator"></div>
-            <span class="dq-muted">Affected dates</span><br>
-            <code>{dates_html}</code><br><br>
-            <span class="dq-muted">Affected tables</span><br>
-            <code>{tables_html}</code>
+            <span class="dq-muted">{snapshot_label}</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    if daily_summary:
-        render_daily_quality_metrics(
-            daily_summary=daily_summary,
-            transport=daily_summary_transport,
-        )
+    render_reliability_kpis(alerts=alerts, daily_summary=daily_summary)
 
-    else:
-        st.warning(
-            "Daily DQ snapshot unavailable. Alert operations remain visible, but this page is not claiming a healthy state. "
-            f"Detail: {daily_summary_error or 'No summary payload was returned.'}"
-        )
+    if not daily_summary:
+        st.info(tr(EMPTY_STATE_MESSAGES["no_daily_summary"]))
 
-    st.caption("Loaded alert filter context")
-    render_alert_metrics(alerts)
-
-    col_reports, col_status, col_next = st.columns([1, 1, 2])
-
-    col_reports.metric("Reports Linked", summary["report_count"])
-    col_status.metric("Lifecycle States", len(summary["status_counts"]))
-
-    with col_next:
-        st.caption(
-            "Testing flow: run Airflow daily orchestrator, inspect alerts here, run triage, "
-            "review the S3 report, then create and explicitly decide a durable approval request."
-        )
+        if daily_summary_error:
+            with st.expander(tr('Daily summary error'), expanded=False):
+                st.code(daily_summary_error)
 
 
 def render_approval_queue_panel() -> None:
@@ -2243,31 +2624,30 @@ def render_approval_queue_panel() -> None:
     Returns:
         None.
     """
-    st.subheader("Approval Queue")
+    st.subheader(tr('Approval Queue'))
     st.caption(
-        "Approval decisions and execution are separate. This panel is read-only; "
-        "DAG 90 remains the controlled execution boundary."
+        tr('Approval decisions and execution are separate. This panel is read-only; DAG 90 remains the controlled execution boundary.')
     )
 
     try:
         rows = load_approval_queue_rows(limit=25)
 
     except Exception as exc:
-        st.info(f"Approval Queue is unavailable: {type(exc).__name__}: {exc}")
+        st.info(tr('Approval Queue is unavailable: {error_type}: {error}', error_type=type(exc).__name__, error=exc))
         return
 
     if not rows:
-        st.caption("No durable approval request has been created yet.")
+        st.caption(tr('No durable approval request has been created yet.'))
         return
 
     summary = summarize_approval_queue_rows(rows)
     col_pending, col_approved, col_cancelled, col_active, col_failed = st.columns(5)
 
-    col_pending.metric("Pending Decisions", summary["pending"])
-    col_approved.metric("Approved", summary["approved"])
-    col_cancelled.metric("Cancelled", summary["cancelled"])
-    col_active.metric("Active Execution", summary["active_executions"])
-    col_failed.metric("Execution Failed", summary["failed_executions"])
+    col_pending.metric(tr('Pending Decisions'), summary["pending"])
+    col_approved.metric(tr('Approved'), summary["approved"])
+    col_cancelled.metric(tr('Cancelled'), summary["cancelled"])
+    col_active.metric(tr('Active Execution'), summary["active_executions"])
+    col_failed.metric(tr('Execution Failed'), summary["failed_executions"])
 
     display_rows = [
         {
@@ -2300,10 +2680,9 @@ def render_life_evaluation_history_panel() -> None:
     Returns:
         None.
     """
-    st.subheader("Agent Reliability Evaluations")
+    st.subheader(tr('Agent Reliability Evaluations'))
     st.caption(
-        "Recent LIFE evaluations compare persisted triage reports with deterministic incident ground truth. "
-        "They propose reviewable improvements but never change prompts, rules, data, or DAGs automatically."
+        tr('Recent LIFE evaluations compare persisted triage reports with deterministic incident ground truth. They propose reviewable improvements but never change prompts, rules, data, or DAGs automatically.')
     )
 
     try:
@@ -2311,26 +2690,25 @@ def render_life_evaluation_history_panel() -> None:
 
     except Exception as exc:
         logger.warning("LIFE evaluation history is unavailable | error=%s", exc)
-        st.info(f"Agent reliability history is unavailable: {type(exc).__name__}: {exc}")
+        st.info(tr('Agent reliability history is unavailable: {error_type}: {error}', error_type=type(exc).__name__, error=exc))
         return
 
     if not rows:
-        st.caption("No LIFE evaluation has been recorded in the last 30 days.")
+        st.caption(tr('No LIFE evaluation has been recorded in the last 30 days.'))
         return
 
     summary = summarize_life_evaluation_rows(rows)
     col_total, col_pass, col_review, col_fail, col_approval = st.columns(5)
 
-    col_total.metric("Evaluations", summary["total"])
-    col_pass.metric("Passed", summary["pass"])
-    col_review.metric("Needs Review", summary["review"])
-    col_fail.metric("Failed", summary["fail"])
-    col_approval.metric("Human Review", summary["approval_required"])
+    col_total.metric(tr('Evaluations'), summary["total"])
+    col_pass.metric(tr('Passed'), summary["pass"])
+    col_review.metric(tr('Needs Review'), summary["review"])
+    col_fail.metric(tr('Failed'), summary["fail"])
+    col_approval.metric(tr('Human Review'), summary["approval_required"])
 
     if summary["malformed"]:
         st.warning(
-            f"{summary['malformed']} audit payload(s) could not be parsed. "
-            "The raw payload remains hidden; inspect Airflow and ClickHouse logs using the audit ID."
+            tr('{count} audit payload(s) could not be parsed. The raw payload remains hidden; inspect Airflow and ClickHouse logs using the audit ID.', count=summary['malformed'])
         )
 
     display_columns = [
@@ -2373,14 +2751,13 @@ def render_incident_history_panel(alert: dict[str, Any]) -> None:
         or ""
     ).strip()
 
-    st.subheader("Previous Investigations")
+    st.subheader(tr('Previous Investigations'))
     st.caption(
-        "Durable investigation outcomes for this exact alert. The panel shows bounded facts and "
-        "evidence references, not hidden prompts, raw SQL, or unrestricted conversation history."
+        tr('Durable investigation outcomes for this exact alert. The panel shows bounded facts and evidence references, not hidden prompts, raw SQL, or unrestricted conversation history.')
     )
 
     if not alert_ref:
-        st.info("This alert has no stable reference for history lookup.")
+        st.info(tr('This alert has no stable reference for history lookup.'))
         return
 
     try:
@@ -2396,12 +2773,12 @@ def render_incident_history_panel(alert: dict[str, Any]) -> None:
             alert_ref,
             exc,
         )
-        st.info(f"Previous investigations are unavailable: {type(exc).__name__}: {exc}")
+        st.info(tr('Previous investigations are unavailable: {error_type}: {error}', error_type=type(exc).__name__, error=exc))
         return
 
     if not rows:
         st.caption(
-            "No previous investigation was found in the last 90 days. Run triage to create the first evidence-backed record."
+            tr('No previous investigation was found in the last 90 days. Run triage to create the first evidence-backed record.')
         )
         return
 
@@ -2409,14 +2786,14 @@ def render_incident_history_panel(alert: dict[str, Any]) -> None:
     latest  = rows[0]
     col_runs, col_success, col_evidence, col_reports, col_approval = st.columns(5)
 
-    col_runs.metric("Investigations", summary["total"])
-    col_success.metric("Completed", summary["successful"])
-    col_evidence.metric("Evidence Refs", summary["evidence_references"])
-    col_reports.metric("Reports", summary["reports"])
-    col_approval.metric("Needs Approval", summary["approval_required"])
+    col_runs.metric(tr('Investigations'), summary["total"])
+    col_success.metric(tr('Completed'), summary["successful"])
+    col_evidence.metric(tr('Evidence Refs'), summary["evidence_references"])
+    col_reports.metric(tr('Reports'), summary["reports"])
+    col_approval.metric(tr('Needs Approval'), summary["approval_required"])
 
-    st.markdown("#### Latest Readout")
-    st.write(str(latest.get("summary") or "No investigation summary is available."))
+    st.markdown(tr('#### Latest Readout'))
+    st.write(str(latest.get("summary") or tr('No investigation summary is available.')))
 
     if latest.get("top_hypothesis_category"):
         category = str(latest["top_hypothesis_category"]).replace("_", " ").title()
@@ -2426,7 +2803,7 @@ def render_incident_history_panel(alert: dict[str, Any]) -> None:
             if isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
             else "confidence not recorded"
         )
-        st.caption(f"Likely cause: {category} | {confidence_text}")
+        st.caption(tr('Likely cause: {category} | {confidence_text}', category=category, confidence_text=confidence_text))
 
     st.dataframe(
         dataframe_from_rows(build_incident_history_display_rows(rows)),
@@ -2434,7 +2811,7 @@ def render_incident_history_panel(alert: dict[str, Any]) -> None:
         hide_index=True,
     )
 
-    with st.expander("Technical references", expanded=False):
+    with st.expander(tr('Technical references'), expanded=False):
         st.json(
             {
                 "memory_id": latest.get("memory_id"),
@@ -2466,38 +2843,37 @@ def render_checkpoint_recovery_panel(alert: dict[str, Any]) -> None:
     if alert_key:
         identity_options["System alert key"] = (alert_key, "alert_key")
 
-    st.subheader("Checkpoint Recovery")
+    st.subheader(tr('Checkpoint Recovery'))
     st.caption(
-        "Inspect sanitized LangGraph history and prepare an Airflow replay preview. "
-        "This panel never reads raw graph state and never triggers DAG 40."
+        tr('Inspect sanitized LangGraph history and prepare an Airflow replay preview. This panel never reads raw graph state and never triggers DAG 40.')
     )
 
     if not identity_options:
-        st.info("This alert has no stable identity for checkpoint lookup.")
+        st.info(tr('This alert has no stable identity for checkpoint lookup.'))
         return
 
-    with st.expander("Inspect source triage checkpoints", expanded=False):
-        identity_label = st.selectbox(
-            "Identity used by the source DAG 40 run",
+    with st.expander(tr('Inspect source triage checkpoints'), expanded=False):
+        identity_label = localized_choice("selectbox",
+            tr('Identity used by the source DAG 40 run'),
             options=list(identity_options),
             help=(
-                "Choose the same identity passed to the original Airflow triage run. "
-                "Using another identity produces a different checkpoint thread."
+                tr('Choose the same identity passed to the original Airflow triage run. Using another identity produces a different checkpoint thread.')
             ),
             key=f"checkpoint_identity_{alert_display_id}",
+            format_func=language_formatter(),
         )
         identity_value, identity_field = identity_options[identity_label]
         checkpoint_namespace = st.text_input(
-            "Checkpoint namespace",
+            tr('Checkpoint namespace'),
             placeholder="manual__triage_triage_YYYYMMDDTHHMMSSffffff",
-            help="Use the checkpoint namespace printed in the source DAG 40 task log.",
+            help=tr('Use the checkpoint namespace printed in the source DAG 40 task log.'),
             key=f"checkpoint_namespace_{alert_display_id}",
         ).strip()
         history_state_key = f"checkpoint_history_result_{alert_display_id}"
         preview_state_key = f"checkpoint_replay_preview_{alert_display_id}"
 
         if st.button(
-            "Inspect checkpoint history",
+            tr('Inspect checkpoint history'),
             type="secondary",
             disabled=not checkpoint_namespace,
             key=f"inspect_checkpoint_{alert_display_id}",
@@ -2524,12 +2900,12 @@ def render_checkpoint_recovery_panel(alert: dict[str, Any]) -> None:
                     checkpoint_namespace,
                     exc,
                 )
-                st.error(f"Checkpoint history is unavailable: {type(exc).__name__}: {exc}")
+                st.error(tr('Checkpoint history is unavailable: {error_type}: {error}', error_type=type(exc).__name__, error=exc))
 
         stored_history = st.session_state.get(history_state_key)
 
         if not isinstance(stored_history, dict):
-            st.caption("Enter the source Airflow namespace, then inspect its sanitized history.")
+            st.caption(tr('Enter the source Airflow namespace, then inspect its sanitized history.'))
             return
 
         if (
@@ -2537,17 +2913,17 @@ def render_checkpoint_recovery_panel(alert: dict[str, Any]) -> None:
             or stored_history.get("alert_reference") != identity_value
             or stored_history.get("identity_field") != identity_field
         ):
-            st.info("Namespace or identity changed. Inspect again before preparing a replay preview.")
+            st.info(tr('Namespace or identity changed. Inspect again before preparing a replay preview.'))
             return
 
         history_payload = stored_history["payload"]
         selected        = history_payload["selected_checkpoint"]
         col_history, col_matches, col_step, col_state = st.columns(4)
 
-        col_history.metric("Checkpoints", int(history_payload["history_count"]))
-        col_matches.metric("Replay Candidates", int(history_payload["matching_checkpoint_count"]))
-        col_step.metric("Selected Step", int(selected["step"]))
-        col_state.metric("Pending Node", ", ".join(selected["next_nodes"]))
+        col_history.metric(tr('Checkpoints'), int(history_payload["history_count"]))
+        col_matches.metric(tr('Replay Candidates'), int(history_payload["matching_checkpoint_count"]))
+        col_step.metric(tr('Selected Step'), int(selected["step"]))
+        col_state.metric(tr('Pending Node'), ", ".join(selected["next_nodes"]))
 
         st.dataframe(
             dataframe_from_rows(build_checkpoint_history_display_rows(history_payload["history"])),
@@ -2555,21 +2931,19 @@ def render_checkpoint_recovery_panel(alert: dict[str, Any]) -> None:
             hide_index=True,
         )
         st.info(
-            "History inspection is read-only. The selected checkpoint only becomes executable "
-            "after an operator explicitly triggers Airflow DAG 40."
+            tr('History inspection is read-only. The selected checkpoint only becomes executable after an operator explicitly triggers Airflow DAG 40.')
         )
 
         replay_request_id = st.text_input(
-            "Replay request ID (optional)",
+            tr('Replay request ID (optional)'),
             help=(
-                "Leave blank to generate a stable idempotency key from the alert, namespace, "
-                "and checkpoint. Reusing the key reuses the same replay child thread."
+                tr('Leave blank to generate a stable idempotency key from the alert, namespace, and checkpoint. Reusing the key reuses the same replay child thread.')
             ),
             key=f"checkpoint_replay_request_{alert_display_id}",
         ).strip()
 
         if st.button(
-            "Build Airflow replay preview",
+            tr('Build Airflow replay preview'),
             type="primary",
             key=f"preview_checkpoint_replay_{alert_display_id}",
         ):
@@ -2592,18 +2966,18 @@ def render_checkpoint_recovery_panel(alert: dict[str, Any]) -> None:
                     checkpoint_namespace,
                     exc,
                 )
-                st.error(f"Replay preview failed: {type(exc).__name__}: {exc}")
+                st.error(tr('Replay preview failed: {error_type}: {error}', error_type=type(exc).__name__, error=exc))
 
         replay_preview = st.session_state.get(preview_state_key)
 
         if isinstance(replay_preview, dict):
-            st.success("Replay preview validated. No Airflow DagRun was triggered.")
+            st.success(tr('Replay preview validated. No Airflow DagRun was triggered.'))
             st.write(replay_preview["summary"])
 
-            with st.expander("Airflow DAG 40 replay configuration", expanded=True):
+            with st.expander(tr('Airflow DAG 40 replay configuration'), expanded=True):
                 st.json(replay_preview["dag_run_conf"])
 
-            with st.expander("Technical replay references", expanded=False):
+            with st.expander(tr('Technical replay references'), expanded=False):
                 st.json(
                     {
                         "dag_id": replay_preview["dag_id"],
@@ -2630,27 +3004,25 @@ def render_alert_table(alerts: list[dict[str, Any]]) -> None:
     df = dataframe_from_rows(alerts)
 
     if df.empty:
-        st.info("No alerts found for the selected filters.")
+        st.info(tr(EMPTY_STATE_MESSAGES["no_active_incidents"]))
         return
 
-    display_columns = [
-        "created_at",
-        "alert_display_id",
-        "status",
-        "severity",
-        "dt",
-        "table_name",
-        "metric",
-        "dimension",
-        "observed_value",
-        "expected_value",
-        "threshold_value",
-        "alert_key",
+    display_rows = [
+        {
+            "Alert Ref": row.get("alert_display_id"),
+            "Severity": str(row.get("severity") or "unknown").upper(),
+            "Status": str(row.get("status") or "unknown").replace("_", " ").title(),
+            "Business Date": str(row.get("dt") or ""),
+            "Table": row.get("table_name"),
+            "Check": row.get("metric"),
+            "Observed": row.get("observed_value"),
+            "Expected": row.get("expected_value"),
+        }
+        for row in alerts
     ]
-    safe_columns = [column for column in display_columns if column in df.columns]
 
     st.dataframe(
-        df[safe_columns],
+        dataframe_from_rows(display_rows),
         use_container_width=True,
         hide_index=True,
     )
@@ -2666,62 +3038,101 @@ def render_selected_alert(alert: dict[str, Any]) -> None:
     Returns:
         None.
     """
-    st.subheader("Selected Alert")
+    st.subheader(tr('Selected Alert'))
 
     severity_class = severity_css_class(alert.get("severity"))
-    severity_text  = escape_html_text(str(alert.get("severity") or "unknown").upper())
-    table_name     = escape_html_text(alert.get("table_name") or "Unknown table")
-    metric_name    = escape_html_text(alert.get("metric") or "Unknown metric")
-    alert_ref      = escape_html_text(alert.get("alert_display_id") or "Not assigned")
-    system_key     = escape_html_text(alert.get("alert_key") or "Not available")
+    severity_text  = escape_html_text(status_label(alert.get("severity") or "unknown").upper())
+    table_name     = escape_html_text(alert.get("table_name") or tr('Unknown table'))
+    metric_name    = escape_html_text(alert.get("metric") or tr('Unknown metric'))
+    alert_ref      = escape_html_text(alert.get("alert_display_id") or tr('Not assigned'))
+    status_text    = escape_html_text(status_label(alert.get("status") or "unknown"))
+    business_dt    = escape_html_text(alert.get("dt") or tr('Not available'))
+    observed_value = escape_html_text(
+        alert.get("observed_value")
+        if alert.get("observed_value") is not None
+        else tr('Not available')
+    )
+    expected_value = escape_html_text(
+        alert.get("expected_value")
+        if alert.get("expected_value") is not None
+        else tr('Not available')
+    )
 
-    col_left, col_right = st.columns([1.2, 1])
+    st.markdown(
+        f"""
+        <div class="dq-card {severity_class}">
+            <b>{severity_text} · {alert_ref}</b><br>
+            <span class="dq-muted">{table_name} / {metric_name}</span>
+            <div class="dq-separator"></div>
+            <span class="dq-muted">{tr("Status")}</span> <code>{status_text}</code>
+            &nbsp;&nbsp; <span class="dq-muted">{tr("Business date")}</span> <code>{business_dt}</code><br><br>
+            <span class="dq-muted">{tr("Observed")}</span> <code>{observed_value}</code>
+            &nbsp;&nbsp; <span class="dq-muted">{tr("Expected")}</span> <code>{expected_value}</code>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    with col_left:
-        st.markdown(
-            f"""
-            <div class="dq-card {severity_class}">
-                <b>{severity_text}</b><br>
-                <span class="dq-muted">{table_name} / {metric_name}</span>
-                <div class="dq-separator"></div>
-                <span class="dq-muted">Alert Ref</span><br>
-                <code>{alert_ref}</code><br><br>
-                <span class="dq-muted">System Alert Key</span><br>
-                <code>{system_key}</code>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
 
-    with col_right:
+def render_alert_technical_details(alert: dict[str, Any]) -> None:
+    """
+    Render internal alert identifiers and raw payloads under advanced recovery.
+
+    Args:
+        alert: Selected alert row.
+
+    Returns:
+        None.
+    """
+    details = parse_json_object(alert.get("details_json") or alert.get("details"))
+
+    with st.expander(tr('Alert technical details'), expanded=False):
         st.json(
             {
                 "alert_id": str(alert.get("alert_id") or ""),
-                "dt": str(alert.get("dt") or ""),
-                "status": alert.get("status"),
-                "observed_value": alert.get("observed_value"),
-                "expected_value": alert.get("expected_value"),
+                "system_alert_key": str(alert.get("alert_key") or ""),
+                "source_check_run_id": str(alert.get("source_check_run_id") or ""),
                 "threshold_value": alert.get("threshold_value"),
+                "report_s3_uri": str(alert.get("report_s3_uri") or ""),
+                "details": details,
             }
         )
 
-    details = parse_json_object(alert.get("details_json") or alert.get("details"))
 
-    with st.expander("Alert details JSON", expanded=False):
-        st.json(details)
+def render_source_evidence_panel(alert: dict[str, Any]) -> None:
+    """
+    Render bounded source evidence references for the selected incident.
 
-    evidence_uri = str(details.get("evidence_s3_uri") or "")
+    Args:
+        alert: Selected alert row.
 
-    if evidence_uri:
-        with st.expander("DQ failure evidence artifact", expanded=False):
-            st.code(evidence_uri)
+    Returns:
+        None.
+    """
+    details      = parse_json_object(alert.get("details_json") or alert.get("details"))
+    evidence_uri = str(details.get("evidence_s3_uri") or "").strip()
 
-            if st.button("Read evidence artifact", use_container_width=True):
-                try:
-                    st.json(json.loads(read_s3_text(evidence_uri)))
+    st.subheader(tr('Source Evidence'))
 
-                except Exception as exc:
-                    st.error(f"Failed to read evidence artifact: {exc}")
+    if not evidence_uri:
+        st.info(tr('No source DQ evidence artifact is linked to this incident.'))
+        return
+
+    st.caption(tr('The source artifact is read-only and loaded only when requested.'))
+
+    with st.expander(tr('DQ failure evidence artifact'), expanded=False):
+        st.code(evidence_uri)
+
+        if st.button(
+            tr('Read evidence artifact'),
+            key=f"read_evidence_{alert.get('alert_display_id')}",
+            use_container_width=True,
+        ):
+            try:
+                st.json(json.loads(read_s3_text(evidence_uri)))
+
+            except Exception as exc:
+                st.error(tr('Failed to read evidence artifact: {error}', error=exc))
 
 
 def render_lineage_impact_panel(alert: dict[str, Any]) -> None:
@@ -2737,29 +3148,28 @@ def render_lineage_impact_panel(alert: dict[str, Any]) -> None:
     table_name = str(alert.get("table_name") or "").strip()
     alert_ref  = str(alert.get("alert_display_id") or table_name or "selected-alert")
 
-    st.subheader("Lineage & Blast Radius")
+    st.subheader(tr('Lineage & Blast Radius'))
     st.caption(
-        "Trace downstream dbt assets from the selected table using a bounded, cycle-safe manifest traversal. "
-        "This analysis is read-only and never exposes compiled SQL."
+        tr('Trace downstream dbt assets from the selected table using a bounded, cycle-safe manifest traversal. This analysis is read-only and never exposes compiled SQL.')
     )
 
     if not table_name:
-        st.info("The selected alert does not identify a warehouse table, so downstream impact cannot be resolved.")
+        st.info(tr('The selected alert does not identify a warehouse table, so downstream impact cannot be resolved.'))
         return
 
     col_table, col_bounds = st.columns([1.4, 1])
-    col_table.markdown(f"**Affected table**  \n`{table_name}`")
+    col_table.markdown(tr('**Affected table**  \n`{table_name}`', table_name=table_name))
     col_bounds.markdown(
-        f"**Safety bounds**  \nDepth `{DEFAULT_BLAST_RADIUS_DEPTH}` | Nodes `{DEFAULT_BLAST_RADIUS_NODES}`"
+        tr('**Safety bounds**  \nDepth `{depth}` | Nodes `{nodes}`', depth=DEFAULT_BLAST_RADIUS_DEPTH, nodes=DEFAULT_BLAST_RADIUS_NODES)
     )
 
     if st.button(
-        "Analyze downstream impact",
+        tr('Analyze downstream impact'),
         key=f"blast_radius_{alert_ref}",
         use_container_width=True,
     ):
         try:
-            with st.spinner("Reading the latest dbt manifest and tracing downstream dependencies..."):
+            with st.spinner(tr('Reading the latest dbt manifest and tracing downstream dependencies...')):
                 result = request_ui_dbt_blast_radius(
                     table_name=table_name,
                     manifest_s3_uri=DEFAULT_MANIFEST_S3_URI,
@@ -2772,7 +3182,7 @@ def render_lineage_impact_panel(alert: dict[str, Any]) -> None:
                 "Streamlit blast-radius request failed | table=%s",
                 table_name,
             )
-            st.error(f"Downstream impact analysis failed: {exc}")
+            st.error(tr('Downstream impact analysis failed: {error}', error=exc))
 
     result = matching_blast_radius_result(
         table_name=table_name,
@@ -2780,31 +3190,30 @@ def render_lineage_impact_panel(alert: dict[str, Any]) -> None:
     )
 
     if result is None:
-        st.caption("Run the analysis to see impacted models, tests, and traversal coverage for this table.")
+        st.caption(tr('Run the analysis to see impacted models, tests, and traversal coverage for this table.'))
         return
 
     if not result.get("matched"):
-        st.info(str(result.get("summary") or f"No dbt manifest node matched {table_name}."))
+        st.info(str(result.get("summary") or tr('No dbt manifest node matched {table_name}.', table_name=table_name)))
         return
 
-    st.markdown(f"**Quick read:** {result.get('summary') or 'Downstream impact resolved.'}")
+    st.markdown(tr('**Quick read:** {summary}', summary=result.get('summary') or 'Downstream impact resolved.'))
 
     col_assets, col_tests, col_depth, col_status = st.columns(4)
-    col_assets.metric("Downstream Assets", int(result.get("impacted_asset_count") or 0))
-    col_tests.metric("dbt Tests", int(result.get("impacted_test_count") or 0))
-    col_depth.metric("Depth Reached", int(result.get("max_depth_reached") or 0))
-    col_status.metric("Traversal", "Truncated" if result.get("truncated") else "Complete")
+    col_assets.metric(tr('Downstream Assets'), int(result.get("impacted_asset_count") or 0))
+    col_tests.metric(tr('dbt Tests'), int(result.get("impacted_test_count") or 0))
+    col_depth.metric(tr('Depth Reached'), int(result.get("max_depth_reached") or 0))
+    col_status.metric(tr('Traversal'), tr("Truncated") if result.get("truncated") else tr("Complete"))
 
     if result.get("truncated"):
         st.warning(
-            "The impact graph reached its safety bound. Increase bounds only through an explicit reviewed change; "
-            "do not treat this result as the complete downstream graph."
+            tr('The impact graph reached its safety bound. Increase bounds only through an explicit reviewed change; do not treat this result as the complete downstream graph.')
         )
 
     impacted_assets = list(result.get("impacted_assets") or [])
 
     if impacted_assets:
-        st.markdown("#### Impacted Data Assets")
+        st.markdown(tr('#### Impacted Data Assets'))
         st.dataframe(
             dataframe_from_rows(build_blast_radius_display_rows(impacted_assets)),
             use_container_width=True,
@@ -2812,13 +3221,13 @@ def render_lineage_impact_panel(alert: dict[str, Any]) -> None:
         )
 
     else:
-        st.success("No downstream data assets were found within the configured traversal bounds.")
+        st.success(tr('No downstream data assets were found within the configured traversal bounds.'))
 
     impacted_tests  = list(result.get("impacted_tests") or [])
     unresolved_nodes = list(result.get("unresolved_nodes") or [])
 
     if impacted_tests:
-        with st.expander(f"Impacted dbt tests ({len(impacted_tests)})", expanded=False):
+        with st.expander(tr('Impacted dbt tests ({count})', count=len(impacted_tests)), expanded=False):
             st.dataframe(
                 dataframe_from_rows(build_blast_radius_display_rows(impacted_tests)),
                 use_container_width=True,
@@ -2826,9 +3235,9 @@ def render_lineage_impact_panel(alert: dict[str, Any]) -> None:
             )
 
     if unresolved_nodes:
-        with st.expander(f"Unresolved manifest references ({len(unresolved_nodes)})", expanded=False):
+        with st.expander(tr('Unresolved manifest references ({count})', count=len(unresolved_nodes)), expanded=False):
             st.warning(
-                "These dependency identifiers exist in child_map but were not present in the supported manifest collections."
+                tr('These dependency identifiers exist in child_map but were not present in the supported manifest collections.')
             )
             st.dataframe(
                 dataframe_from_rows(build_blast_radius_display_rows(unresolved_nodes)),
@@ -2836,7 +3245,7 @@ def render_lineage_impact_panel(alert: dict[str, Any]) -> None:
                 hide_index=True,
             )
 
-    with st.expander("Technical traversal reference", expanded=False):
+    with st.expander(tr('Technical traversal reference'), expanded=False):
         st.json(
             {
                 "root_node": result.get("node"),
@@ -2852,7 +3261,7 @@ def render_lineage_impact_panel(alert: dict[str, Any]) -> None:
 
 def render_triage_panel(alert: dict[str, Any], settings: dict[str, Any]) -> None:
     """
-    Render triage execution panel and latest report output.
+    Render triage execution controls and the operator-facing report.
 
     Args:
         alert: Selected alert row.
@@ -2861,13 +3270,13 @@ def render_triage_panel(alert: dict[str, Any], settings: dict[str, Any]) -> None
     Returns:
         None.
     """
-    st.subheader("Agentic Triage")
+    st.subheader(tr('Agentic Triage'))
 
     alert_key = str(alert.get("alert_key") or "")
 
-    if st.button("Run triage for selected alert", type="primary", use_container_width=True):
+    if st.button(tr('Run triage for selected alert'), type="primary", use_container_width=True, key="render_triage_panel_button_0"):
         try:
-            with st.spinner("Running LangGraph triage and writing report artifacts..."):
+            with st.spinner(tr('Running LangGraph triage and writing report artifacts...')):
                 result = run_selected_alert_triage(
                     alert_key=alert_key,
                     confidence_threshold=float(settings["confidence_threshold"]),
@@ -2885,12 +3294,12 @@ def render_triage_panel(alert: dict[str, Any], settings: dict[str, Any]) -> None
             )
 
             st.success(
-                f"Triage completed through {transport_label} and report artifacts were stored."
+                tr('Triage completed through {transport_label} and report artifacts were stored.', transport_label=transport_label)
             )
 
         except Exception as exc:
             logger.exception("Streamlit triage failed | alert_key=%s", alert_key)
-            st.error(f"Triage failed: {exc}")
+            st.error(tr('Triage failed: {error}', error=exc))
 
     latest = matching_triage_result(
         alert_key=alert_key,
@@ -2898,136 +3307,220 @@ def render_triage_panel(alert: dict[str, Any], settings: dict[str, Any]) -> None
     )
 
     if not latest:
-        st.caption("Run triage to generate a Markdown and JSON report for this alert.")
+        st.info(tr(EMPTY_STATE_MESSAGES["no_triage_report"]))
         return
 
-    report  = latest["report"]
-    summary = latest["summary"]
+    report = latest["report"]
 
-    st.json(summary)
+    render_report_document(
+        markdown_text=report.markdown_report,
+        container_key="triage_report_document",
+        source_label="Generated triage report",
+    )
+    render_report_access(
+        str(report.markdown_report_s3_uri or ""), report.markdown_report,
+        key="generated_report_download",
+    )
 
-    tab_report, tab_evidence, tab_actions = st.tabs(["Report", "Evidence", "Approval Actions"])
 
-    with tab_report:
-        render_report_document(
-            markdown_text=report.markdown_report,
-            container_key="triage_report_document",
-            source_label="Generated triage report",
+def render_triage_evidence_panel(alert: dict[str, Any]) -> None:
+    """
+    Render evidence collected by the latest matching triage run.
+
+    Args:
+        alert: Selected alert row.
+
+    Returns:
+        None.
+    """
+    alert_key = str(alert.get("alert_key") or "")
+    latest    = matching_triage_result(
+        alert_key=alert_key,
+        latest_triage_result=st.session_state.get("latest_triage_result"),
+    )
+
+    st.subheader(tr('Triage Evidence'))
+
+    if not latest:
+        st.info(tr(EMPTY_STATE_MESSAGES["no_triage_report"]))
+        return
+
+    report = latest["report"]
+    evidence_rows = [
+        {
+            "Tool": item.tool_name,
+            "Evidence Type": getattr(item.evidence_type, "value", str(item.evidence_type)),
+            "Summary": item.summary,
+            "Rows": item.row_count,
+            "Artifact": item.s3_uri,
+        }
+        for item in report.evidence
+    ]
+
+    if not evidence_rows:
+        st.info(tr('The current triage report did not collect an evidence item.'))
+        return
+
+    st.dataframe(
+        dataframe_from_rows(evidence_rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def render_triage_approval_panel(alert: dict[str, Any]) -> None:
+    """
+    Render approval-gated actions from the latest matching triage report.
+
+    Args:
+        alert: Selected alert row.
+
+    Returns:
+        None.
+    """
+    alert_key = str(alert.get("alert_key") or "")
+    latest    = matching_triage_result(
+        alert_key=alert_key,
+        latest_triage_result=st.session_state.get("latest_triage_result"),
+    )
+
+    st.subheader(tr('Incident Approval'))
+    st.caption(
+        tr('Approval records a human decision only. DAG 90 remains the separate execution boundary.')
+    )
+
+    if not latest:
+        st.info(tr(EMPTY_STATE_MESSAGES["no_triage_report"]))
+        return
+
+    report = latest["report"]
+
+    if not report.approval_gated_actions:
+        st.info(tr('The current report does not recommend an approval-gated action.'))
+        return
+
+    operator_identity = st.text_input(
+        tr('Approval operator'),
+        value="streamlit_operator",
+        help=tr('Recorded as requested_by or decided_by in the durable approval queue.'),
+        key=f"approval_operator_{report.report_id}",
+    )
+    decision_comment = st.text_input(
+        tr('Decision comment'),
+        value="Reviewed triage evidence and exact backfill scope.",
+        key=f"approval_comment_{report.report_id}",
+    )
+
+    for action_index, action in enumerate(report.approval_gated_actions):
+        payload = action.model_dump(mode="json")
+        action_type = (
+            action.action_type.value
+            if hasattr(action.action_type, "value")
+            else str(action.action_type)
         )
+        state_key = f"approval_request_{report.report_id}_{action_index}"
+        approval  = st.session_state.get(state_key)
 
-    with tab_evidence:
-        evidence_rows = [
-            {
-                "tool_name": item.tool_name,
-                "evidence_type": item.evidence_type,
-                "summary": item.summary,
-                "row_count": item.row_count,
-                "s3_uri": item.s3_uri,
-            }
-            for item in report.evidence
-        ]
-        st.dataframe(dataframe_from_rows(evidence_rows), use_container_width=True, hide_index=True)
+        st.markdown(tr('#### Proposed `{action_type}` action', action_type=action_type))
 
-    with tab_actions:
-        if not report.approval_gated_actions:
-            st.info("No approval-gated action was recommended by the current report.")
-            return
-
-        operator_identity = st.text_input(
-            "Approval operator",
-            value="streamlit_operator",
-            help="Recorded as requested_by or decided_by in the durable approval queue.",
-            key=f"approval_operator_{report.report_id}",
-        )
-        decision_comment = st.text_input(
-            "Decision comment",
-            value="Reviewed triage evidence and exact backfill scope.",
-            key=f"approval_comment_{report.report_id}",
-        )
-
-        for action_index, action in enumerate(report.approval_gated_actions):
-            payload = action.model_dump(mode="json")
-            action_type = (
-                action.action_type.value
-                if hasattr(action.action_type, "value")
-                else str(action.action_type)
-            )
-            state_key = f"approval_request_{report.report_id}_{action_index}"
-            approval  = st.session_state.get(state_key)
-
-            st.markdown(f"#### Proposed `{action_type}` action")
+        with st.expander(tr('Review action payload'), expanded=False):
             st.json(payload)
-            st.caption(
-                "Creating or deciding this request does not trigger Airflow. "
-                "Execution remains a separate DAG 90 operator action."
-            )
 
-            if st.button(
-                "Create durable approval request",
-                key=f"create_{state_key}",
-                use_container_width=True,
-                disabled=bool(approval),
-            ):
+        if st.button(
+            tr('Create durable approval request'),
+            key=f"create_{state_key}",
+            use_container_width=True,
+            disabled=bool(approval),
+        ):
+            try:
+                approval = create_ui_backfill_approval_request(
+                    alert=alert,
+                    action=action,
+                    requested_by=operator_identity,
+                    agent_run_id=str(report.agent_run_id),
+                )
+                st.session_state[state_key] = approval
+                synchronize_ui_incident_card(approval)
+                st.success(tr('Approval request `{request_id}` is pending.', request_id=approval['request_id']))
+
+            except Exception as exc:
+                st.error(tr('Failed to create approval request: {error_type}: {error}', error_type=type(exc).__name__, error=exc))
+
+        if not approval:
+            continue
+
+        st.json(
+            {
+                "request_id": approval.get("request_id"),
+                "status": approval.get("status"),
+                "risk_level": approval.get("risk_level"),
+                "target_dag_id": approval.get("target_dag_id"),
+                "start_date": approval.get("start_date"),
+                "end_date": approval.get("end_date"),
+            }
+        )
+
+        if approval.get("status") != "pending":
+            continue
+
+        col_approve, col_reject = st.columns(2)
+
+        with col_approve:
+            if st.button(tr('Approve request'), key=f"approve_{state_key}", use_container_width=True):
                 try:
-                    approval = create_ui_backfill_approval_request(
-                        alert=alert,
-                        action=action,
-                        requested_by=operator_identity,
-                        agent_run_id=str(report.agent_run_id),
+                    approval = decide_ui_approval_request(
+                        request_id=str(approval["request_id"]),
+                        decision="approve",
+                        decided_by=operator_identity,
+                        comment=decision_comment,
                     )
                     st.session_state[state_key] = approval
-                    st.success(f"Approval request `{approval['request_id']}` is pending.")
+                    synchronize_ui_incident_card(approval)
+                    st.success(
+                        tr('Request `{request_id}` approved. No Airflow DAG was triggered.', request_id=approval['request_id'])
+                    )
 
                 except Exception as exc:
-                    st.error(f"Failed to create approval request: {type(exc).__name__}: {exc}")
+                    st.error(tr('Approval failed: {error_type}: {error}', error_type=type(exc).__name__, error=exc))
 
-            if approval:
-                st.json(
-                    {
-                        "request_id": approval.get("request_id"),
-                        "status": approval.get("status"),
-                        "risk_level": approval.get("risk_level"),
-                        "target_dag_id": approval.get("target_dag_id"),
-                        "start_date": approval.get("start_date"),
-                        "end_date": approval.get("end_date"),
-                        "created_new": approval.get("created_new"),
-                    }
-                )
+        with col_reject:
+            if st.button(tr('Reject request'), key=f"reject_{state_key}", use_container_width=True):
+                try:
+                    approval = decide_ui_approval_request(
+                        request_id=str(approval["request_id"]),
+                        decision="reject",
+                        decided_by=operator_identity,
+                        comment=decision_comment,
+                    )
+                    st.session_state[state_key] = approval
+                    synchronize_ui_incident_card(approval)
+                    st.warning(tr('Request `{request_id}` rejected.', request_id=approval['request_id']))
 
-                if approval.get("status") == "pending":
-                    col_approve, col_reject = st.columns(2)
+                except Exception as exc:
+                    st.error(tr('Rejection failed: {error_type}: {error}', error_type=type(exc).__name__, error=exc))
 
-                    with col_approve:
-                        if st.button("Approve request", key=f"approve_{state_key}", use_container_width=True):
-                            try:
-                                approval = decide_ui_approval_request(
-                                    request_id=str(approval["request_id"]),
-                                    decision="approve",
-                                    decided_by=operator_identity,
-                                    comment=decision_comment,
-                                )
-                                st.session_state[state_key] = approval
-                                st.success(
-                                    f"Request `{approval['request_id']}` approved. No Airflow DAG was triggered."
-                                )
 
-                            except Exception as exc:
-                                st.error(f"Approval failed: {type(exc).__name__}: {exc}")
+def render_triage_runtime_details(alert: dict[str, Any]) -> None:
+    """
+    Render raw triage runtime metadata under Audit & Recovery.
 
-                    with col_reject:
-                        if st.button("Reject request", key=f"reject_{state_key}", use_container_width=True):
-                            try:
-                                approval = decide_ui_approval_request(
-                                    request_id=str(approval["request_id"]),
-                                    decision="reject",
-                                    decided_by=operator_identity,
-                                    comment=decision_comment,
-                                )
-                                st.session_state[state_key] = approval
-                                st.warning(f"Request `{approval['request_id']}` rejected.")
+    Args:
+        alert: Selected alert row.
 
-                            except Exception as exc:
-                                st.error(f"Rejection failed: {type(exc).__name__}: {exc}")
+    Returns:
+        None.
+    """
+    latest = matching_triage_result(
+        alert_key=str(alert.get("alert_key") or ""),
+        latest_triage_result=st.session_state.get("latest_triage_result"),
+    )
+
+    if not latest:
+        st.caption(tr('No current-session triage runtime metadata is available.'))
+        return
+
+    with st.expander(tr('Current triage runtime payload'), expanded=False):
+        st.json(latest["summary"])
 
 
 def render_audit_panel(alert: dict[str, Any]) -> None:
@@ -3042,37 +3535,39 @@ def render_audit_panel(alert: dict[str, Any]) -> None:
     """
     alert_key = str(alert.get("alert_key") or "")
 
-    st.subheader("Audit Trail")
+    st.subheader(tr('Audit Trail'))
 
     try:
         audit_rows = load_audit_rows(alert_key=alert_key)
 
     except Exception as exc:
-        st.warning(f"Audit log is not available yet: {exc}")
+        st.warning(tr('Audit log is not available yet: {error}', error=exc))
+        render_latest_report_artifact(alert, [])
         return
 
     if not audit_rows:
-        st.caption("No audit events found for this alert yet.")
+        st.caption(tr('No audit events found for this alert yet.'))
+        render_latest_report_artifact(alert, [])
         return
 
     llm_runtime = build_llm_runtime_summary(audit_rows=audit_rows)
 
     if llm_runtime:
-        st.markdown("#### AI Runtime")
+        st.markdown(tr('#### AI Runtime'))
 
         col_mode, col_provider, col_tokens, col_cost = st.columns(4)
 
-        col_mode.metric("Execution Mode", llm_runtime["mode_label"])
-        col_provider.metric("Provider / Model", llm_runtime["provider_model"])
-        col_tokens.metric("Token Usage", llm_runtime["token_label"])
-        col_cost.metric("Estimated Cost", llm_runtime["estimated_cost_display"])
+        col_mode.metric(tr('Execution Mode'), llm_runtime["mode_label"])
+        col_provider.metric(tr('Provider / Model'), llm_runtime["provider_model"])
+        col_tokens.metric(tr('Token Usage'), llm_runtime["token_label"])
+        col_cost.metric(tr('Estimated Cost'), llm_runtime["estimated_cost_display"])
 
         st.caption(
-            f"Route {llm_runtime['route_label']} | Duration {int(llm_runtime.get('duration_ms') or 0)} ms"
+            tr('{count} route events | Routes {routes} | Duration {duration} ms', count=llm_runtime['route_count'], routes=llm_runtime['route_label'], duration=int(llm_runtime['total_duration_ms'] or 0))
         )
 
-        if llm_runtime.get("fallback_summary"):
-            st.info(str(llm_runtime["fallback_summary"]))
+        if llm_runtime["fallback_summaries"]:
+            st.info(tr('Fallbacks: ') + " | ".join(llm_runtime["fallback_summaries"]))
 
     display_rows = [
         {key: value for key, value in row.items() if key != "llm_route"}
@@ -3080,28 +3575,39 @@ def render_audit_panel(alert: dict[str, Any]) -> None:
     ]
 
     st.dataframe(dataframe_from_rows(display_rows), use_container_width=True, hide_index=True)
+    render_latest_report_artifact(alert, audit_rows)
+
+
+def render_latest_report_artifact(alert: dict[str, Any], audit_rows: list[dict[str, Any]]) -> None:
+    """Keep private report access available even without an audit row."""
 
     report_uri = find_report_uri(alert=alert, audit_rows=audit_rows)
 
     if report_uri:
-        with st.expander("Read latest report artifact", expanded=False):
-            st.code(report_uri)
+        with st.expander(tr('Read latest report artifact'), expanded=False):
+            render_report_access(report_uri)
 
-            if st.button("Read report artifact", use_container_width=True):
+            if st.button(tr('Read report artifact'), use_container_width=True, key="render_audit_panel_button_0"):
+                st.session_state.pop("streamlit_report_artifact", None)
                 try:
                     report_text, transport = read_report_text(report_uri)
-                    render_report_document(
-                        markdown_text=report_text,
-                        container_key="artifact_report_document",
-                        source_label=(
-                            "Report loaded through the Control Plane API"
-                            if transport == "api"
-                            else "Report loaded through bounded local S3 fallback"
-                        ),
-                    )
+                    # Retain only the bounded original text across reruns.
+                    st.session_state["streamlit_report_artifact"] = {"uri": report_uri, "text": report_text, "transport": transport}
 
                 except Exception as exc:
-                    st.error(f"Failed to read report artifact: {exc}")
+                    st.error(tr('Failed to read report artifact: {error}', error=exc))
+            stored_report = st.session_state.get("streamlit_report_artifact") or {}
+            if stored_report.get("uri") == report_uri:
+                render_report_document(
+                    markdown_text=stored_report["text"],
+                    container_key="artifact_report_document",
+                    source_label=(
+                        "Report loaded through the Control Plane API"
+                        if stored_report.get("transport") == "api"
+                        else "Report loaded through bounded local S3 fallback"
+                    ),
+                )
+                render_report_download(stored_report["text"], report_uri, key="artifact_report_download")
 
 
 def render_copilot_panel(alert: dict[str, Any]) -> None:
@@ -3117,32 +3623,30 @@ def render_copilot_panel(alert: dict[str, Any]) -> None:
     alert_key = str(alert.get("alert_key") or "")
     alert_ref = str(alert.get("alert_display_id") or "selected alert")
 
-    st.subheader("Evidence-Aware Copilot")
-    st.caption(
-        "Ask for an explanation, evidence summary, safe recommendation, or approval draft. "
-        "The Copilot cannot run SQL mutations, trigger Airflow, or execute remediation."
-    )
+    st.subheader(tr('Copilot'))
+    st.caption(tr('Ask for a grounded explanation or a safe next step for this incident.'))
 
-    guided_label = st.selectbox(
-        "Guided task",
+    guided_label = localized_choice("selectbox",
+        tr('Guided task'),
         options=list(COPILOT_GUIDED_PROMPTS.keys()),
         key=f"copilot_guided_task_{alert_ref}",
+        format_func=language_formatter(),
     )
     custom_question = st.text_area(
-        "Optional custom question",
-        placeholder="For example: Why is this alert important to downstream reporting?",
+        tr('Optional custom question'),
+        placeholder=tr('For example: Why is this alert important to downstream reporting?'),
         key=f"copilot_custom_question_{alert_ref}",
         height=90,
     )
     question = custom_question.strip() or COPILOT_GUIDED_PROMPTS[guided_label]
 
     if st.button(
-        "Ask Copilot",
+        tr('Ask Copilot'),
         key=f"ask_copilot_{alert_ref}",
         use_container_width=True,
     ):
         try:
-            with st.spinner("Reading bounded evidence and preparing an operator answer..."):
+            with st.spinner(tr('Reading bounded evidence and preparing an operator answer...')):
                 try:
                     audit_rows = load_audit_rows(alert_key=alert_key)
 
@@ -3159,6 +3663,7 @@ def render_copilot_panel(alert: dict[str, Any]) -> None:
                     alert=alert,
                     latest_triage_result=st.session_state.get("latest_triage_result"),
                     audit_rows=audit_rows,
+                    language=selected_language(),
                 )
 
             st.session_state["latest_copilot_result"] = {
@@ -3166,57 +3671,32 @@ def render_copilot_panel(alert: dict[str, Any]) -> None:
                 "alert_ref": alert_ref,
                 **result,
             }
-            st.success("Copilot answer generated from the selected alert context.")
+            st.success(tr('Copilot answer generated from the selected alert context.'))
 
         except Exception as exc:
             logger.exception("Streamlit Copilot failed | alert_key=%s", alert_key)
-            st.error(f"Copilot could not prepare an answer: {exc}")
+            st.error(tr('Copilot could not prepare an answer: {error}', error=exc))
 
     latest = st.session_state.get("latest_copilot_result") or {}
 
     # Do not display an answer generated for a previously selected alert.
     if str(latest.get("alert_key") or "") != alert_key:
         st.info(
-            "Start with a guided task. Run triage first when you need evidence-backed root-cause or backfill guidance."
+            tr('Choose a guided task or ask a question. Run triage first when the answer needs newly collected evidence.')
         )
         return
 
-    st.markdown("#### Direct Answer")
-    st.markdown(str(latest.get("answer") or "No answer is available."))
+    presentation = build_copilot_presentation(latest)
 
-    transport = str(latest.get("transport") or "local")
-    st.caption(f"Copilot transport: {transport}")
+    st.markdown(tr('#### Direct answer'))
+    st.markdown(presentation["answer"])
+    st.caption(f"{alert_ref} | {presentation['provenance']}")
 
-    if latest.get("fallback_reason"):
-        st.warning(
-            "The control-plane API was unavailable, so the shared local Copilot service answered this request. "
-            "No evidence or action boundary was relaxed."
-        )
+    if presentation["show_fallback"]:
+        st.warning(presentation["fallback_message"])
 
-    st.markdown("#### Alert Context")
-    col_ref, col_report, col_evidence, col_history, col_audit = st.columns(5)
-    col_ref.metric("Alert Ref", alert_ref)
-    col_report.metric("Matching Report", "Yes" if latest.get("has_report") else "No")
-    col_evidence.metric("Evidence Items", int(latest.get("evidence_count") or 0))
-    col_history.metric(
-        "Prior Investigations",
-        int(latest.get("incident_history_count") or 0),
-    )
-    col_audit.metric("Audit Events", int(latest.get("audit_count") or 0))
-
-    st.markdown("#### Guardrail")
-    st.info(
-        "This answer is advisory. Any backfill, rerun, ticket, notification, or data-changing action "
-        "still requires explicit approval and execution through the controlled Airflow/API boundary."
-    )
-
-    st.markdown("#### Suggested Next Step")
-
-    if latest.get("has_report"):
-        st.write("Review the cited evidence and approval preview before using any remediation action.")
-
-    else:
-        st.write("Run triage for this Alert Ref first so the Copilot can use collected evidence and a matching report.")
+    if not presentation["has_report"]:
+        st.caption(tr('No matching report was supplied; run triage for evidence-backed root-cause guidance.'))
 
 
 def render_mock_action_panel(alert: dict[str, Any]) -> None:
@@ -3229,8 +3709,8 @@ def render_mock_action_panel(alert: dict[str, Any]) -> None:
     Returns:
         None.
     """
-    st.subheader("Mock External Actions")
-    st.caption("These buttons only write an audit event. They do not call Slack, Jira, or any external service.")
+    st.subheader(tr('Mock External Actions'))
+    st.caption(tr('These buttons only write an audit event. They do not call Slack, Jira, or any external service.'))
 
     col_slack, col_ticket = st.columns(2)
 
@@ -3252,7 +3732,7 @@ def render_mock_action_panel(alert: dict[str, Any]) -> None:
     }
 
     with col_slack:
-        if st.button("Mock post to Slack", use_container_width=True):
+        if st.button(tr('Mock post to Slack'), use_container_width=True, key="render_mock_action_panel_button_0"):
             try:
                 result = record_mock_external_action(
                     alert=alert,
@@ -3260,13 +3740,13 @@ def render_mock_action_panel(alert: dict[str, Any]) -> None:
                     payload=slack_payload,
                 )
                 st.session_state["latest_mock_action"] = result
-                st.success("Mock Slack action recorded.")
+                st.success(tr('Mock Slack action recorded.'))
 
             except Exception as exc:
-                st.error(f"Failed to record mock Slack action: {exc}")
+                st.error(tr('Failed to record mock Slack action: {error}', error=exc))
 
     with col_ticket:
-        if st.button("Mock create ticket", use_container_width=True):
+        if st.button(tr('Mock create ticket'), use_container_width=True, key="render_mock_action_panel_button_1"):
             try:
                 result = record_mock_external_action(
                     alert=alert,
@@ -3274,14 +3754,128 @@ def render_mock_action_panel(alert: dict[str, Any]) -> None:
                     payload=ticket_payload,
                 )
                 st.session_state["latest_mock_action"] = result
-                st.success("Mock ticket action recorded.")
+                st.success(tr('Mock ticket action recorded.'))
 
             except Exception as exc:
-                st.error(f"Failed to record mock ticket action: {exc}")
+                st.error(tr('Failed to record mock ticket action: {error}', error=exc))
 
     if "latest_mock_action" in st.session_state:
-        with st.expander("Latest mocked action result", expanded=False):
+        with st.expander(tr('Latest mocked action result'), expanded=False):
             st.json(st.session_state["latest_mock_action"])
+
+
+def render_incident_evidence_workspace(alert: dict[str, Any]) -> None:
+    """
+    Render source, triage, and historical evidence for one incident.
+
+    Args:
+        alert: Selected alert row.
+
+    Returns:
+        None.
+    """
+    render_source_evidence_panel(alert)
+    st.divider()
+    render_triage_evidence_panel(alert)
+    st.divider()
+    render_incident_history_panel(alert)
+
+
+def render_audit_recovery_workspace(alert: dict[str, Any]) -> None:
+    """
+    Render advanced identifiers, audit, checkpoint, and mocked action tools.
+
+    Args:
+        alert: Selected alert row.
+
+    Returns:
+        None.
+    """
+    st.subheader(tr('Audit & Recovery'))
+    st.caption(
+        tr('Advanced operational detail is intentionally hidden from the primary incident workflow.')
+    )
+    render_alert_technical_details(alert)
+    render_triage_runtime_details(alert)
+    render_resolution_technical_details(alert, build_streamlit_control_plane_client())
+    st.divider()
+    render_audit_panel(alert)
+    st.divider()
+    render_checkpoint_recovery_panel(alert)
+
+    st.divider()
+    render_mock_action_panel(alert)
+
+
+def render_incident_workspace(
+    alerts: list[dict[str, Any]],
+    settings: dict[str, Any],
+) -> None:
+    """
+    Render the incident queue before one lazily loaded incident workspace.
+
+    Args:
+        alerts: Alerts loaded for the current operator scope.
+        settings: Sidebar filters and triage settings.
+
+    Returns:
+        None.
+    """
+    render_resolution_notice()
+    st.subheader(tr('Incident Queue'))
+    st.caption(tr('Select one incident to investigate. Internal identifiers remain under Audit & Recovery.'))
+    render_alert_table(alerts)
+
+    if not alerts:
+        return
+
+    alert_options  = build_incident_option_rows(alerts)
+    selected_label = localized_choice("selectbox",
+        tr('Incident to investigate'),
+        options=list(alert_options),
+        key="render_incident_workspace_selectbox_0",
+        format_func=lambda option, language=selected_language(): incident_option_label(option, alert_options[option], language=language),
+    )
+    selected_alert = alert_options[selected_label]
+
+    detail_tabs = workspace_tabs(
+        INCIDENT_DETAIL_TABS,
+        key="incident_detail_tabs",
+        on_change="rerun",
+    )
+    overview_tab, evidence_tab, analysis_tab, lineage_tab, approval_tab, recovery_tab = detail_tabs
+
+    if overview_tab.open:
+        with overview_tab:
+            render_selected_alert(selected_alert)
+            st.divider()
+            render_resolution_panel(
+                selected_alert,
+                build_streamlit_control_plane_client(),
+                on_resolved=load_alert_rows.clear,
+            )
+
+    elif evidence_tab.open:
+        with evidence_tab:
+            render_incident_evidence_workspace(selected_alert)
+
+    elif analysis_tab.open:
+        with analysis_tab:
+            render_copilot_panel(selected_alert)
+            st.divider()
+            render_triage_panel(alert=selected_alert, settings=settings)
+
+    elif lineage_tab.open:
+        with lineage_tab:
+            render_lineage_impact_panel(selected_alert)
+
+    elif approval_tab.open:
+        with approval_tab:
+            render_triage_approval_panel(selected_alert)
+
+    elif recovery_tab.open:
+        with recovery_tab:
+            render_audit_recovery_workspace(selected_alert)
 
 
 # --- Defining Main App
@@ -3294,21 +3888,11 @@ def main() -> None:
     """
     logger.info("Rendering Streamlit app")
 
+    render_language_selector()
     apply_page_style()
     render_header()
 
     settings = render_sidebar_filters()
-
-    try:
-        alerts = load_alert_rows(
-            status=settings["status"],
-            dt=settings["dt"],
-            limit=int(settings["limit"]),
-        )
-
-    except Exception as exc:
-        st.error(f"Unable to load alerts through the control-plane boundary: {exc}")
-        st.stop()
 
     daily_summary           = None
     daily_summary_transport = ""
@@ -3326,52 +3910,49 @@ def main() -> None:
             settings["summary_dt"],
         )
 
+    alert_dt = resolve_alert_date_filter(
+        restrict_to_summary_date=bool(settings["restrict_to_summary_date"]),
+        requested_summary_dt=settings["summary_dt"],
+        daily_summary=daily_summary,
+    )
+
+    try:
+        alerts = load_alert_rows(
+            status=settings["status"],
+            dt=alert_dt,
+            limit=int(settings["limit"]),
+        )
+
+    except Exception as exc:
+        st.error(tr('Unable to load incidents through the control-plane boundary: {error}', error=exc))
+        st.stop()
+
     render_reliability_overview(
         alerts=alerts,
         daily_summary=daily_summary,
         daily_summary_transport=daily_summary_transport,
         daily_summary_error=daily_summary_error,
     )
-    render_approval_queue_panel()
-    render_life_evaluation_history_panel()
-    render_alert_table(alerts)
 
-    if not alerts:
-        st.stop()
+    st.session_state[ACTIVE_PANEL_KEY] = None
+    primary_tabs = workspace_tabs(
+        PRIMARY_WORKSPACE_TABS,
+        key="primary_workspace_tabs",
+        on_change="rerun",
+    )
+    incidents_tab, approvals_tab, reliability_tab = primary_tabs
 
-    alert_options = {
-        f"{index:02d} | {row.get('alert_display_id')} | {row.get('severity')} | {row.get('dt')} | {row.get('table_name')} | {row.get('metric')}": row
-        for index, row in enumerate(alerts, start=1)
-    }
-    selected_label = st.selectbox("Select alert for investigation", options=list(alert_options.keys()))
-    selected_alert = alert_options[selected_label]
+    if incidents_tab.open:
+        with incidents_tab:
+            render_incident_workspace(alerts=alerts, settings=settings)
 
-    st.divider()
-    render_selected_alert(selected_alert)
+    elif approvals_tab.open:
+        with approvals_tab:
+            render_approval_queue_panel()
 
-    st.divider()
-    render_incident_history_panel(selected_alert)
-
-    st.divider()
-    render_checkpoint_recovery_panel(selected_alert)
-
-    st.divider()
-    render_lineage_impact_panel(selected_alert)
-
-    st.divider()
-    col_triage, col_audit = st.columns([1.2, 1])
-
-    with col_triage:
-        render_triage_panel(alert=selected_alert, settings=settings)
-
-    with col_audit:
-        render_audit_panel(selected_alert)
-
-    st.divider()
-    render_copilot_panel(selected_alert)
-
-    st.divider()
-    render_mock_action_panel(selected_alert)
+    elif reliability_tab.open:
+        with reliability_tab:
+            render_life_evaluation_history_panel()
 
 
 # --- Running CLI Entrypoint

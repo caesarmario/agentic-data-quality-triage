@@ -69,7 +69,39 @@ class StubResponse:
         self.payload = payload if payload is not None else {}
 
     def json(self):
+        if isinstance(self.payload, Exception):
+            raise self.payload
         return self.payload
+
+
+# --- Building Synthetic Notification Fixtures
+def _notification_scope() -> dict:
+    return normalize_action_scope(
+        "post_notification",
+        {
+            "dt": "2026-09-28",
+            "alert_ref": "ALT-123",
+            "title": "Missing daily partition",
+            "summary": "The expected partition is missing.",
+        },
+    )
+
+
+def _notification_env() -> dict[str, str]:
+    return {
+        "APPROVED_ACTION_NOTIFICATION_ENABLED": "true",
+        "DISCORD_BOT_TOKEN": "synthetic-bot-token",
+        "DISCORD_OPS_CHANNEL_ID": "123456789012345678",
+        "APPROVED_ACTION_HTTP_TIMEOUT_SECONDS": "5",
+    }
+
+
+def _bot_message() -> dict:
+    return {
+        "id": "234567890123456789",
+        "channel_id": "123456789012345678",
+        "author": {"id": "345678901234567890", "bot": True},
+    }
 
 
 # --- Building Test Records
@@ -125,7 +157,15 @@ def test_rerun_scope_is_fixed_to_dag_20_and_rejects_full_refresh() -> None:
         normalize_action_scope("rerun_dbt", {"dt": "2026-09-28", "target_dag_id": "arbitrary"})
 
 
-def test_ticket_and_notification_scope_cannot_select_destination_or_credentials() -> None:
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"channel_id": "987654321098765432"},
+        {"bot_token": "caller-selected-token"},
+        {"base_url": "https://example.invalid"},
+    ],
+)
+def test_ticket_and_notification_scope_cannot_select_destination_or_credentials(override) -> None:
     with pytest.raises(ValueError):
         normalize_action_scope(
             "create_ticket",
@@ -145,7 +185,7 @@ def test_ticket_and_notification_scope_cannot_select_destination_or_credentials(
                 "alert_ref": "ALT-123",
                 "title": "Missing daily partition",
                 "summary": "The expected partition is missing.",
-                "webhook_url": "https://example.invalid",
+                **override,
             },
         )
 
@@ -275,42 +315,163 @@ def test_ticket_uses_environment_repository_and_returns_only_reference() -> None
     assert store.outcomes[0][2] == "succeeded"
 
 
-def test_notification_timeout_is_unknown_and_never_automatically_retried() -> None:
-    scope = normalize_action_scope(
-        "post_notification",
-        {
-            "dt": "2026-09-28",
-            "alert_ref": "ALT-123",
-            "title": "Missing daily partition",
-            "summary": "The expected partition is missing.",
-        },
+def test_notification_uses_fixed_bot_endpoint_and_validates_authored_response() -> None:
+    store = StubStore(_record(action_type="post_notification", scope=_notification_scope()))
+    calls: list[dict] = []
+
+    def post(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return StubResponse(200, _bot_message())
+
+    result = execute_approved_action(
+        request_id=store.record.request_id,
+        execution_run_id="manual__notification",
+        store=store,
+        env=_notification_env(),
+        http_post=post,
     )
-    store = StubStore(_record(action_type="post_notification", scope=scope))
+
+    assert len(calls) == 1
+    assert calls[0]["url"] == "https://discord.com/api/v10/channels/123456789012345678/messages"
+    assert calls[0]["headers"]["Authorization"] == "Bot synthetic-bot-token"
+    assert calls[0]["timeout"] == 5
+    payload = calls[0]["json"]
+    assert set(payload) == {"content", "allowed_mentions"}
+    assert payload["allowed_mentions"] == {"parse": []}
+    assert len(payload["content"]) <= 1900
+    assert "ALT-123" in payload["content"]
+    assert store.record.request_id in payload["content"]
+    assert result.provider == "discord_bot_api"
+    assert result.status == "succeeded" and result.side_effects_executed is True
+    assert result.execution_reference == "discord_bot_message:123456789012345678:234567890123456789"
+    assert store.claims == [(store.record.request_id, "manual__notification", 2)]
+    assert store.outcomes[0][2] == "succeeded"
+    assert "synthetic-bot-token" not in result.model_dump_json()
+    assert "Authorization" not in result.model_dump_json()
+
+
+@pytest.mark.parametrize("error_type", [requests.Timeout, requests.ConnectionError])
+def test_notification_timeout_is_unknown_and_never_automatically_retried(error_type) -> None:
+    store = StubStore(_record(action_type="post_notification", scope=_notification_scope()))
     calls = 0
 
     def post(*args, **kwargs):
         nonlocal calls
         calls += 1
-        raise requests.Timeout("synthetic timeout")
+        raise error_type("synthetic-bot-token Authorization: Bot synthetic-bot-token")
 
-    with pytest.raises(ApprovedActionDeliveryUnknown):
+    with pytest.raises(ApprovedActionDeliveryUnknown) as raised:
         execute_approved_action(
             request_id=store.record.request_id,
             execution_run_id="manual__notification",
             store=store,
-            env={
-                "APPROVED_ACTION_NOTIFICATION_ENABLED": "true",
-                "APPROVED_ACTION_DISCORD_WEBHOOK_URL": (
-                    "https://discord.com/api/webhooks/123456789012345678/"
-                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-                ),
-            },
+            env=_notification_env(),
             http_post=post,
         )
 
     assert calls == 1
     assert store.outcomes[0][2] == "unknown"
     assert "manual reconciliation" in store.outcomes[0][4]
+    assert "synthetic-bot-token" not in str(raised.value)
+    assert "synthetic-bot-token" not in str(store.outcomes)
+
+
+@pytest.mark.parametrize(
+    "status_code,payload",
+    [
+        (503, {"error": "synthetic-bot-token"}),
+        (200, ValueError("synthetic-bot-token")),
+        (200, {}),
+        (200, []),
+        (200, {**_bot_message(), "id": ""}),
+        (200, {**_bot_message(), "channel_id": "987654321098765432"}),
+        (200, {**_bot_message(), "webhook_id": "456789012345678901"}),
+        (200, {**_bot_message(), "author": {"id": "345678901234567890", "bot": False}}),
+        (200, {**_bot_message(), "author": {"bot": True}}),
+    ],
+)
+def test_unconfirmed_notification_response_is_unknown_without_retry(status_code, payload) -> None:
+    store = StubStore(_record(action_type="post_notification", scope=_notification_scope()))
+    calls = 0
+
+    def post(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return StubResponse(status_code, payload)
+
+    with pytest.raises(ApprovedActionDeliveryUnknown) as raised:
+        execute_approved_action(
+            request_id=store.record.request_id,
+            execution_run_id="manual__unconfirmed_notification",
+            store=store,
+            env=_notification_env(),
+            http_post=post,
+        )
+
+    assert calls == 1
+    assert len(store.outcomes) == 1 and store.outcomes[0][2] == "unknown"
+    assert "manual reconciliation" in store.outcomes[0][4]
+    assert "synthetic-bot-token" not in str(raised.value)
+    assert "synthetic-bot-token" not in str(store.outcomes)
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 429])
+def test_rejected_notification_is_failed_without_retry_or_secret_leak(status_code) -> None:
+    store = StubStore(_record(action_type="post_notification", scope=_notification_scope()))
+    calls = 0
+
+    def post(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return StubResponse(status_code, {"error": "synthetic-bot-token"})
+
+    with pytest.raises(RuntimeError, match=f"HTTP {status_code}") as raised:
+        execute_approved_action(
+            request_id=store.record.request_id,
+            execution_run_id="manual__rejected_notification",
+            store=store,
+            env=_notification_env(),
+            http_post=post,
+        )
+
+    assert calls == 1
+    assert store.outcomes[0][2] == "failed"
+    assert "synthetic-bot-token" not in str(raised.value)
+    assert "synthetic-bot-token" not in str(store.outcomes)
+
+
+@pytest.mark.parametrize(
+    "overrides,ready",
+    [
+        ({}, True),
+        ({"APPROVED_ACTION_NOTIFICATION_ENABLED": "false"}, False),
+        ({"DISCORD_BOT_TOKEN": ""}, False),
+        ({"DISCORD_OPS_CHANNEL_ID": ""}, False),
+        ({"DISCORD_OPS_CHANNEL_ID": "invalid/channel"}, False),
+    ],
+)
+def test_notification_readiness_requires_bot_configuration_without_exposing_it(overrides, ready) -> None:
+    env = {**_notification_env(), **overrides}
+    store = StubStore(_record(action_type="post_notification", scope=_notification_scope()))
+    result = action_readiness(store.record, env)
+
+    assert result["provider"] == "discord_bot_api"
+    assert result["provider_ready"] is ready
+    assert "synthetic-bot-token" not in str(result)
+    assert "123456789012345678" not in str(result)
+    if not ready:
+        def post(*args, **kwargs):
+            pytest.fail("Incomplete configuration must not dispatch a request")
+
+        with pytest.raises(RuntimeError, match="disabled or incomplete"):
+            execute_approved_action(
+                request_id=store.record.request_id,
+                execution_run_id="manual__unconfigured_notification",
+                store=store,
+                env=env,
+                http_post=post,
+            )
+        assert store.claims == [] and store.outcomes == []
 
 
 def test_readiness_never_exposes_destination_or_secret() -> None:

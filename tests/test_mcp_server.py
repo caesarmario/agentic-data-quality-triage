@@ -6,6 +6,11 @@
 # --- Importing Libraries
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+
 import pytest
 
 from agent.mcp import server as mcp_server
@@ -107,6 +112,32 @@ def test_tool_registry_as_dicts_is_serializable() -> None:
     assert payload[0]["name"] == "list_alerts"
     assert "purpose" in payload[0]
     assert "audit_behavior" in payload[0]
+
+
+def test_mcp_cli_keeps_machine_readable_stdout_protocol_clean() -> None:
+    """
+    Ensure MCP CLI logging cannot contaminate machine-readable stdout.
+
+    Returns:
+        None.
+    """
+    environment = os.environ.copy()
+    environment.pop("AGENT_LOG_STREAM", None)
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "agent.mcp.server", "--list-tools"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+    )
+    payload = json.loads(completed.stdout)
+
+    assert payload["server"] == "agentic-data-quality-triage"
+    assert len(payload["tools"]) == len(MCP_TOOL_REGISTRY)
+    assert "Logger configured" not in completed.stdout
+    assert "Logger configured" in completed.stderr
 
 
 def test_register_mcp_tools_uses_registry_names() -> None:

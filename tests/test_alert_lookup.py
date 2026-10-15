@@ -34,6 +34,14 @@ def test_alert_lookup_filters_logical_latest_state_before_limiting() -> None:
     assert sql.index("ORDER BY created_at DESC, alert_key ASC") < sql.index("LIMIT 5")
 
 
+def test_alert_lookup_active_alias_includes_unresolved_lifecycle_states() -> None:
+    """The active operator view must include every non-terminal incident state."""
+    sql = build_alert_lookup_sql(status="active", limit=10)
+
+    assert "status IN ('open', 'acknowledged', 'triaged')" in sql
+    assert "status = 'active'" not in sql
+
+
 def test_alert_lookup_accepts_human_alert_ref() -> None:
     """
     Validate that DQ-style alert refs are resolved through alert_display_id.

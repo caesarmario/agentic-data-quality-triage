@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from agent.llm import client as llm_client
 from agent.graph import (
+    build_ai_investigation_narrative,
     build_llm_report_narrative,
     build_llm_runtime_summary,
     build_report_from_state,
@@ -25,6 +26,7 @@ from agent.state import Alert, EvidenceItem, EvidenceType, Hypothesis, TriageSta
 from agent.llm.client import (
     ExternalLlmExecutionDisabled,
     LlmRequest,
+    LlmResponse,
     build_response,
     run_llm_task,
     run_openai_compatible_route,
@@ -263,17 +265,19 @@ def test_model_routing_config_loads_default_routes() -> None:
     assert config.routes["groq_summary"].model == "openai/gpt-oss-20b"
     assert config.routes["groq_summary"].input_cost_per_1m_tokens == 0.075
     assert config.routes["groq_summary"].output_cost_per_1m_tokens == 0.30
-    assert config.routes["cheap_summary"].fallback_route == "openai_summary"
+    assert config.routes["cheap_summary"].fallback_route == "evidence_summary"
     assert config.routes["evidence_planning"].provider == "gemini"
-    assert config.routes["evidence_planning"].fallback_route == "triage_reasoning"
+    assert config.routes["evidence_planning"].fallback_route == "evidence_summary"
     assert config.routes["evidence_planning"].structured_output_mode == "preferred"
-    assert config.routes["evidence_planning"].max_output_tokens == 4096
+    assert config.routes["evidence_planning"].max_output_tokens == 1200
     assert config.routes["hypothesis_framing"].provider == "gemini"
-    assert config.routes["hypothesis_framing"].fallback_route == "triage_reasoning"
+    assert config.routes["hypothesis_framing"].fallback_route == "evidence_summary"
     assert config.routes["hypothesis_framing"].structured_output_mode == "preferred"
-    assert config.routes["hypothesis_framing"].max_output_tokens == 4096
+    assert config.routes["hypothesis_framing"].max_output_tokens == 3000
     assert config.routes["catalog_qa"].provider == "gemini"
-    assert config.routes["catalog_qa"].fallback_route == "openai_summary"
+    assert config.routes["catalog_qa"].fallback_route == "evidence_summary"
+    assert config.routes["triage_reasoning"].provider == "gemini"
+    assert config.routes["triage_reasoning"].model == "gemini-3.5-flash-lite"
     assert config.routes["triage_reasoning"].structured_output_mode == "preferred"
     assert config.routes["low_confidence_rca"].structured_output_mode == "preferred"
     assert config.routes["cheap_summary"].structured_output_mode == "off"
@@ -781,13 +785,13 @@ def test_resolve_route_uses_heuristic_when_openai_key_is_missing(monkeypatch) ->
         None.
     """
     monkeypatch.setenv("EXTERNAL_LLM_ENABLED", "true")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     resolved = resolve_route(route_name="triage_reasoning", config_path=CONFIG_PATH)
 
-    assert resolved.provider_name == "openai"
+    assert resolved.provider_name == "gemini"
     assert resolved.use_heuristic is True
-    assert resolved.fallback_reason == "missing_api_key:OPENAI_API_KEY"
+    assert resolved.fallback_reason == "missing_api_key:GEMINI_API_KEY"
 
 
 def test_resolve_executable_route_follows_fallback_to_heuristic(monkeypatch) -> None:
@@ -800,7 +804,7 @@ def test_resolve_executable_route_follows_fallback_to_heuristic(monkeypatch) -> 
     Returns:
         None.
     """
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("XAI_API_KEY", raising=False)
 
     resolved = resolve_executable_route(route_name="low_confidence_rca", config_path=CONFIG_PATH)
@@ -820,7 +824,7 @@ def test_run_llm_task_uses_no_llm_fallback_without_api_key(monkeypatch) -> None:
     Returns:
         None.
     """
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     with supervisor_llm_budget_scope(
         max_model_calls=2,
@@ -891,11 +895,11 @@ def test_runtime_provider_failures_follow_configured_fallbacks(monkeypatch) -> N
 
     assert response.used_heuristic is True
     assert response.provider == "heuristic"
-    assert [failure["provider"] for failure in failures] == ["gemini", "openai"]
-    assert response.fallback_reason == "provider_error:openai:RuntimeError"
+    assert [failure["provider"] for failure in failures] == ["gemini"]
+    assert response.fallback_reason == "provider_error:gemini:RuntimeError"
     assert response.metadata["requested_route"] == "cheap_summary"
     assert response.metadata["executed_route"] == "evidence_summary"
-    assert response.metadata["attempted_routes"] == ["cheap_summary", "openai_summary", "evidence_summary"]
+    assert response.metadata["attempted_routes"] == ["cheap_summary", "evidence_summary"]
     assert "No external LLM was called" in response.content
 
 
@@ -948,8 +952,8 @@ def test_supervised_provider_fallback_attempts_consume_model_call_budget(monkeyp
         budget_usage = ledger.snapshot(latency_ms=20)
 
     assert response.used_heuristic is True
-    assert sum(len(item.calls) for item in completion_clients) == 2
-    assert budget_usage.model_calls == 2
+    assert sum(len(item.calls) for item in completion_clients) == 1
+    assert budget_usage.model_calls == 1
     assert budget_usage.tokens > 0
 
 
@@ -992,8 +996,8 @@ def test_catalog_qa_provider_failure_does_not_retry_gemini(monkeypatch) -> None:
     failures = response.metadata["provider_failures"]
 
     assert response.used_heuristic is True
-    assert [failure["provider"] for failure in failures] == ["gemini", "openai"]
-    assert response.metadata["attempted_routes"] == ["catalog_qa", "openai_summary", "evidence_summary"]
+    assert [failure["provider"] for failure in failures] == ["gemini"]
+    assert response.metadata["attempted_routes"] == ["catalog_qa", "evidence_summary"]
 
 
 def test_write_llm_route_audit_event_persists_required_metadata() -> None:
@@ -1131,7 +1135,7 @@ def test_build_llm_report_narrative_uses_heuristic_without_api_key(monkeypatch) 
     Returns:
         None.
     """
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     response = build_llm_report_narrative(state=build_triage_state())
 
@@ -1245,7 +1249,7 @@ def test_llm_response_to_evidence_contains_cost_metadata(monkeypatch) -> None:
     Returns:
         None.
     """
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     response = build_llm_report_narrative(state=build_triage_state())
     evidence = llm_response_to_evidence(response=response)
@@ -1257,6 +1261,65 @@ def test_llm_response_to_evidence_contains_cost_metadata(monkeypatch) -> None:
     assert evidence.rows[0]["executed_route"] == "evidence_summary"
     assert evidence.rows[0]["duration_ms"] >= 0
     assert evidence.rows[0]["estimated_cost_usd"] == 0.0
+
+
+def test_report_uses_validated_external_investigation_narrative() -> None:
+    """Use grounded structured model output as the report's primary operator readout."""
+    state = build_triage_state()
+    response = LlmResponse(
+        agent_run_id=state.agent_run_id,
+        route_name="triage_reasoning",
+        provider="gemini",
+        model="gemini-3.5-flash-lite",
+        content="Structured response rendered by the client.",
+        used_heuristic=False,
+        structured_output={
+            "what_happened": "The affected partition is empty after the landing step completed.",
+            "evidence_reasoning": [
+                {
+                    "evidence_reference": "E1",
+                    "finding": "The guarded row-count result returned zero rows for the affected date.",
+                }
+            ],
+            "likely_impact": "Daily metrics for the affected date can be incomplete.",
+            "uncertainty": "The retained evidence does not yet prove why the source file was absent.",
+            "recommended_next_step": "Confirm the landing object before proposing a bounded backfill.",
+            "approval_rationale": "A backfill can replace downstream partitions and requires human review.",
+        },
+    )
+
+    report = build_report_from_state(state=state, llm_narrative=response)
+
+    assert report.ai_investigation is not None
+    assert report.ai_investigation.source == "external_model"
+    assert report.ai_investigation.provider == "gemini"
+    assert report.ai_investigation.evidence_reasoning[0].startswith("[E1]")
+    assert "The affected partition is empty" in report.summary
+    assert "## AI Investigation" in report.markdown_report
+    assert "Confirm the landing object" in report.markdown_report
+    assert not any("LLM-assisted narrative" in action for action in report.recommended_actions)
+
+
+def test_report_hides_raw_heuristic_content_and_uses_readable_fallback() -> None:
+    """Prevent fallback prompt/context text from leaking into operator reports."""
+    state = build_triage_state()
+    response = LlmResponse(
+        agent_run_id=state.agent_run_id,
+        route_name="triage_reasoning",
+        provider="heuristic",
+        model="heuristic-v1",
+        content="RAW PROMPT AND CONTEXT MUST NOT APPEAR",
+        used_heuristic=True,
+        fallback_reason="external_llm_disabled",
+    )
+
+    narrative = build_ai_investigation_narrative(state=state, response=response)
+    report = build_report_from_state(state=state, llm_narrative=response)
+
+    assert narrative.source == "heuristic_fallback"
+    assert "RAW PROMPT" not in report.markdown_report
+    assert report.ai_investigation is not None
+    assert report.ai_investigation.source == "heuristic_fallback"
 
 
 def test_triage_report_retains_sanitized_llm_runtime_summary() -> None:

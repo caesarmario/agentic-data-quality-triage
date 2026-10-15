@@ -41,14 +41,14 @@ Schedule: none. This DAG is triggered by the platform daily orchestrator or manu
 3. Profile raw, staging, and mart tables.
 4. Run deterministic DQ contract checks.
 5. Generate stable-key alerts from latest failed/warning DQ results.
-6. Push newly discovered DQ alerts through the optional idempotent Discord webhook.
+6. Push newly discovered DQ alerts through the existing DataSentry bot identity.
 
 The daily DAG uses schema `observe` mode so a critical contract finding is persisted and
 alerted before a downstream profile/check can fail. The manual DAG
 `96_dag_dq_schema_drift_detection` remains the strict enforcement gate.
 
-The Discord task succeeds with an explicit `skipped` result when
-`DISCORD_ALERT_WEBHOOK_URL` is not configured. When configured, delivery
+The Discord task succeeds with an explicit `skipped` result when the bot token
+or alerts channel is not configured. When configured, delivery
 failures remain visible as Airflow task failures and can use normal task retry.
 
 Manual `dag_run.conf` examples:
@@ -107,7 +107,7 @@ with DAG(
 
     t30_push_schema_drift_alerts = runner_bash_task(
         task_id="t30_push_schema_drift_alerts",
-        project_command="python -m apps.discord_bot.webhook $DATE_ARGS",
+        project_command="python -m apps.discord_bot.delivery $DATE_ARGS",
         execution_timeout=timedelta(minutes=5),
     )
 
@@ -131,7 +131,7 @@ with DAG(
 
     t70_push_discord_alerts = runner_bash_task(
         task_id="t70_push_discord_alerts",
-        project_command="python -m apps.discord_bot.webhook $DATE_ARGS",
+        project_command="python -m apps.discord_bot.delivery $DATE_ARGS",
         execution_timeout=timedelta(minutes=5),
     )
 

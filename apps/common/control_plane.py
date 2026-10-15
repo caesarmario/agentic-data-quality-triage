@@ -338,6 +338,24 @@ class ControlPlaneClient:
 
         return payload
 
+    def resolution_preview(self, alert_ref: str) -> dict[str, Any]:
+        from urllib.parse import quote
+        return self.request_json("GET", f"/api/v1/alerts/{quote(alert_ref, safe='')}/resolution-preview")
+
+    def create_incident_revalidation(self, alert_ref: str, *, actor: str, idempotency_key: str) -> dict[str, Any]:
+        from urllib.parse import quote
+        return self.request_json("POST", f"/api/v1/alerts/{quote(alert_ref, safe='')}/revalidations",
+                            json_body={"actor": actor, "idempotency_key": idempotency_key}, headers=self.approval_headers())
+
+    def get_incident_revalidation(self, request_id: str) -> dict[str, Any]:
+        from uuid import UUID
+        return self.request_json("GET", f"/api/v1/incident-revalidations/{UUID(request_id)}")
+
+    def resolve_incident(self, alert_ref: str, **body) -> dict[str, Any]:
+        from urllib.parse import quote
+        return self.request_json("POST", f"/api/v1/alerts/{quote(alert_ref, safe='')}/resolve",
+                            json_body=body, headers=self.approval_headers())
+
     def approval_headers(self) -> dict[str, str]:
         """
         Build the authorization header for approval mutation endpoints.
@@ -673,36 +691,48 @@ class ControlPlaneClient:
 
         return payload
 
-    def get_daily_summary(self, dt: str) -> dict[str, Any]:
+    def get_daily_summary(self, dt: str | None = None) -> dict[str, Any]:
         """
         Fetch one deterministic daily DQ summary through the shared API.
 
         Args:
-            dt: Business date in YYYY-MM-DD format.
+            dt: Optional business date in YYYY-MM-DD format. None asks the API
+                for the latest available DQ date.
 
         Returns:
             Validated check and open-alert aggregate payload.
 
         Raises:
-            ValueError: If dt is blank or not a calendar date.
+            ValueError: If a provided dt is not a calendar date.
             ControlPlaneResponseError: If the response identity, totals, or privacy contract fails.
         """
-        try:
-            normalized_dt = date.fromisoformat(dt.strip()).isoformat()
+        normalized_dt = None
 
-        except (AttributeError, ValueError) as exc:
-            raise ValueError("Daily summary requires dt in YYYY-MM-DD format.") from exc
+        if dt is not None:
+            try:
+                normalized_dt = date.fromisoformat(dt.strip()).isoformat()
+
+            except (AttributeError, ValueError) as exc:
+                raise ValueError("Daily summary requires dt in YYYY-MM-DD format.") from exc
 
         payload = self.request_json(
             "GET",
             "/api/v1/summaries/daily",
-            params={"dt": normalized_dt},
+            params={"dt": normalized_dt} if normalized_dt else None,
         )
 
         if FORBIDDEN_READ_API_FIELDS.intersection(payload):
             raise ControlPlaneResponseError("Daily summary API exposed internal query metadata.")
 
-        if str(payload.get("dt") or "") != normalized_dt:
+        response_dt = str(payload.get("dt") or "")
+
+        try:
+            normalized_response_dt = date.fromisoformat(response_dt).isoformat()
+
+        except ValueError as exc:
+            raise ControlPlaneResponseError("Daily summary API returned an invalid target date.") from exc
+
+        if normalized_dt and normalized_response_dt != normalized_dt:
             raise ControlPlaneResponseError("Daily summary API returned a different target date.")
 
         check_counts = payload.get("check_counts")
@@ -2009,16 +2039,19 @@ class ControlPlaneClient:
     def answer_copilot(
         self,
         question: str,
-        alert_key: str,
+        alert_key: str = "",
         report_json_s3_uri: str = "",
         audit_limit: int = 10,
+        conversation_context: list[dict[str, str]] | None = None,
+        language: str = "en",
     ) -> dict[str, Any]:
         """
         Request one grounded Copilot answer through the shared API.
 
         Args:
             question: Operator question.
-            alert_key: Alert Ref or stable system alert key.
+            alert_key: Optional Alert Ref or stable system alert key. Blank
+                requests use bounded active-alert context.
             report_json_s3_uri: Optional persisted triage report JSON URI.
             audit_limit: Maximum recent audit events used by the API.
 
@@ -2026,23 +2059,29 @@ class ControlPlaneClient:
             Typed Copilot response payload.
 
         Raises:
-            ValueError: If alert_key is blank.
+            ValueError: If a report URI is supplied without an alert identity.
             ControlPlaneClientError: If response context does not match the request.
         """
+        from apps.common.i18n import normalize_language
+        language = normalize_language(language)
         normalized_alert_key = alert_key.strip()
 
-        if not normalized_alert_key:
-            raise ValueError("A grounded Copilot API request requires an Alert Ref or alert key.")
+        if report_json_s3_uri.strip() and not normalized_alert_key:
+            raise ValueError("A Copilot report request requires an Alert Ref or alert key.")
 
+        body = {
+            "alert_key": normalized_alert_key,
+            "question": question.strip(),
+            "language": language,
+            "report_json_s3_uri": report_json_s3_uri.strip() or None,
+            "audit_limit": max(1, min(audit_limit, 25)),
+        }
+        if conversation_context is not None:
+            body["conversation_context"] = conversation_context
         payload = self.request_json(
             "POST",
             "/api/v1/copilot/answer",
-            json_body={
-                "alert_key": normalized_alert_key,
-                "question": question.strip(),
-                "report_json_s3_uri": report_json_s3_uri.strip() or None,
-                "audit_limit": max(1, min(audit_limit, 25)),
-            },
+            json_body=body,
         )
 
         if not payload.get("answer"):

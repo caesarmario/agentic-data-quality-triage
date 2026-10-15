@@ -6,6 +6,7 @@
 # --- Importing Libraries
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -14,10 +15,12 @@ import pytest
 
 from apps.common.control_plane import ControlPlaneResponseError, ControlPlaneTransportError
 from apps.discord_bot import bot, service
+from apps.discord_bot.contracts import DiscordRenderResult
 
 
 # --- Defining Constants
 LEGACY_COMMANDS = {
+    "help",
     "alerts",
     "approve",
     "ask",
@@ -30,7 +33,8 @@ LEGACY_COMMANDS = {
     "weekly_summary",
 }
 
-GROUPED_COMMANDS  = {f"dq {command}" for command in LEGACY_COMMANDS}
+GROUPED_ONLY_COMMANDS = {"debug", "language"}
+GROUPED_COMMANDS  = {f"dq {command}" for command in LEGACY_COMMANDS | GROUPED_ONLY_COMMANDS}
 EXPECTED_COMMANDS = LEGACY_COMMANDS | GROUPED_COMMANDS
 
 
@@ -88,7 +92,7 @@ def test_discord_runtime_uses_only_required_gateway_intents() -> None:
     assert bot.intents.message_content is False
     assert bot.intents.members is False
     assert bot.intents.presences is False
-    assert bot.intents.guild_messages is False
+    assert bot.intents.guild_messages is True
     assert bot.intents.dm_messages is False
 
 
@@ -161,7 +165,180 @@ def test_tree_registers_expected_slash_commands() -> None:
         if command.name == "dq"
     )
 
-    assert {command.name for command in dq_command.commands} == LEGACY_COMMANDS
+    assert {command.name for command in dq_command.commands} == LEGACY_COMMANDS | GROUPED_ONLY_COMMANDS
+
+    legacy_ask = next(
+        command
+        for command in bot.tree.get_commands(guild=bot.guild_object())
+        if command.name == "ask"
+    )
+    grouped_ask = next(command for command in dq_command.commands if command.name == "ask")
+
+    assert [parameter.name for parameter in legacy_ask.parameters] == ["question", "alert_key"]
+    assert [parameter.name for parameter in grouped_ask.parameters] == ["question", "alert_key"]
+    assert "response_mode" not in {parameter.name for parameter in legacy_ask.parameters}
+    assert "response_mode" not in {parameter.name for parameter in grouped_ask.parameters}
+
+
+def test_startup_readiness_does_not_post_to_any_channel(monkeypatch) -> None:
+    """Ensure reconnect/readiness diagnostics remain in application logs only."""
+    attempted: list[str] = []
+    monkeypatch.setenv("DISCORD_WELCOME_ENABLED", "false")
+
+    async def fake_sync(**kwargs) -> None:
+        """Avoid Discord command registration network calls."""
+
+    async def unexpected_send_text(*args, **kwargs) -> bool:
+        attempted.append("text")
+        return pytest.fail("Startup must not post channel messages.")
+
+    async def unexpected_send_render(*args, **kwargs) -> bool:
+        attempted.append("embed")
+        return pytest.fail("Startup must not post channel embeds.")
+
+    monkeypatch.setattr(bot, "OPS_CHANNEL_ID", 987)
+    monkeypatch.setattr(bot, "ALERTS_CHANNEL_ID", 456)
+    monkeypatch.setattr(bot.tree, "sync", fake_sync)
+    monkeypatch.setattr(bot, "send_text", unexpected_send_text)
+    monkeypatch.setattr(bot, "send_render", unexpected_send_render)
+
+    asyncio.run(bot.on_ready())
+
+    assert attempted == []
+
+
+def test_legacy_approval_command_only_presents_authoritative_controls(monkeypatch) -> None:
+    """Legacy slash aliases must not bypass confirmation or rejection-reason controls."""
+    calls: dict[str, list[Any]] = {"scope": [], "lookup": [], "render": []}
+
+    class Response:
+        """Capture the ephemeral defer used before authoritative lookup."""
+
+        async def defer(self, **kwargs) -> None:
+            calls.setdefault("defer", []).append(kwargs)
+
+    class Interaction:
+        """Minimal slash-command interaction test double."""
+
+        response = Response()
+
+    monkeypatch.setattr(
+        bot,
+        "validate_interaction_scope",
+        lambda *args, **kwargs: calls["scope"].append(kwargs),
+    )
+    monkeypatch.setattr(
+        bot,
+        "fetch_discord_approval_request",
+        lambda request_id: calls["lookup"].append(request_id)
+        or {
+            "request_id": request_id,
+            "status": "pending",
+            "risk_level": "high",
+            "target_dag_id": "00_dag_dq_platform_daily_orchestrator",
+            "start_date": "2026-10-07",
+            "end_date": "2026-10-07",
+        },
+    )
+
+    async def capture_render(interaction, result, ephemeral=True) -> None:
+        calls["render"].append({"result": result, "ephemeral": ephemeral})
+
+    monkeypatch.setattr(bot, "respond_with_render", capture_render)
+
+    asyncio.run(
+        bot.decide_approval(
+            interaction=Interaction(),
+            request_id="APR-20261007-ABC123",
+            decision="approve",
+            comment="Review requested.",
+        )
+    )
+
+    assert calls["lookup"] == ["APR-20261007-ABC123"]
+    assert calls["scope"][0]["require_approver"] is True
+    assert calls["scope"][0]["require_bot_authored_message"] is False
+    render = calls["render"][0]["result"]
+    labels = {action.label for row in render.action_rows for action in row.actions}
+    fields = {field["name"]: field["value"] for field in render.payload["embeds"][0]["fields"]}
+    assert labels == {"View Plan", "Approve", "Reject"}
+    assert fields["Risk"] == "HIGH"
+    assert "Execute" not in labels
+    assert "Run" not in labels
+    assert calls["render"][0]["ephemeral"] is True
+
+
+def test_dq_debug_is_ephemeral_and_does_not_publish(monkeypatch) -> None:
+    """Ensure technical context remains private to the requesting operator."""
+    calls: list[dict[str, Any]] = []
+
+    class Response:
+        """Interaction response test double."""
+
+        async def defer(self, **kwargs) -> None:
+            calls.append({"defer": kwargs})
+
+    class Followup:
+        """Interaction follow-up test double."""
+
+        async def send(self, **kwargs) -> None:
+            calls.append({"send": kwargs})
+
+    class Interaction:
+        """Minimal Discord interaction test double."""
+
+        response = Response()
+        followup = Followup()
+
+    monkeypatch.setattr(
+        bot,
+        "fetch_discord_debug_context",
+        lambda alert_key: {
+            "alert_ref": "DQ-20260610-A1B2C3",
+            "alert_key": "system-key",
+            "agent_run_id": "run-123",
+            "report_id": "RPT-12345678",
+            "report_uri": "s3://dq-reports/report.md",
+            "provider": "gemini",
+            "model": "gemini-flash",
+            "transport": "local_read_only",
+        },
+    )
+    monkeypatch.setattr(
+        bot,
+        "send_render",
+        lambda *args, **kwargs: pytest.fail("Debug must not publish to a channel."),
+    )
+
+    asyncio.run(bot.dq_debug.callback(Interaction(), "DQ-20260610-A1B2C3"))
+
+    send_call = next(item["send"] for item in calls if "send" in item)
+    assert send_call["ephemeral"] is True
+    assert send_call["embeds"][0].title == "DQ Debug Context"
+    assert "view" not in send_call
+
+
+def test_command_render_omits_none_view_for_read_only_result() -> None:
+    """Read-only command embeds must not pass an invalid explicit None view."""
+    calls: list[dict[str, Any]] = []
+
+    class Followup:
+        async def send(self, **kwargs) -> None:
+            calls.append(kwargs)
+
+    interaction = type("Interaction", (), {"followup": Followup()})()
+    render = DiscordRenderResult(
+        payload={"embeds": [{"title": "Read-only Result"}]},
+        narrative_source="deterministic_fallback",
+        content_hash="read-only-hash",
+        fallback_markdown="Read-only result.",
+    )
+
+    asyncio.run(bot.respond_with_render(interaction, render, ephemeral=True))
+
+    assert calls[0]["ephemeral"] is True
+    assert "view" not in calls[0]
+    assert calls[0]["embeds"][0].title == "Read-only Result"
 
 
 # --- Defining API Readiness Tests
@@ -480,6 +657,96 @@ def test_extended_discord_summaries_use_api_and_only_transport_fallback(
     assert transport == "local"
 
 
+def test_extended_quality_summary_publishes_embed_not_markdown(monkeypatch) -> None:
+    """Weekly, table, and warehouse summaries share the compact embed publisher."""
+    published: list[dict[str, Any]] = []
+    interaction = object()
+    payload = {
+        "scope": "weekly",
+        "start_date": "2026-06-04",
+        "end_date": "2026-06-10",
+        "check_counts": [{"status": "fail", "count": 1}],
+        "alert_counts": [{"severity": "critical", "count": 1}],
+    }
+
+    monkeypatch.setattr(
+        bot,
+        "build_quality_summary_copilot_note",
+        lambda _payload, _responses: "Review the critical failure first.",
+    )
+    monkeypatch.setattr(bot, "build_llm_route_audit_payload", lambda _response: {})
+
+    async def capture_publish(**kwargs) -> None:
+        published.append(kwargs)
+
+    monkeypatch.setattr(bot, "publish_render", capture_publish)
+
+    asyncio.run(
+        bot.publish_extended_quality_summary(
+            interaction=interaction,
+            payload=payload,
+            data_transport="api",
+            acknowledgement="Summary posted.",
+        )
+    )
+
+    assert len(published) == 1
+    result = published[0]["result"]
+    assert published[0]["interaction"] is interaction
+    assert published[0]["channel_id"] == bot.TRIAGE_CHANNEL_ID
+    assert published[0]["channel_id"] != bot.ALERTS_CHANNEL_ID
+    assert len(result.payload["embeds"]) == 1
+    assert result.payload["embeds"][0]["title"] == "Weekly data reliability"
+    assert result.narrative_source == "heuristic_copilot"
+    assert result.payload["embeds"][0]["footer"]["text"] == (
+        "Heuristic analysis · No external model call"
+    )
+
+
+def test_daily_summary_publishes_to_triage_channel(monkeypatch) -> None:
+    """Daily summaries belong in triage, never in the incident-only alerts channel."""
+    published: list[dict[str, Any]] = []
+
+    class Response:
+        async def defer(self, **kwargs: Any) -> None:
+            return None
+
+    interaction = type("Interaction", (), {"response": Response()})()
+
+    monkeypatch.setattr(bot, "ALERTS_CHANNEL_ID", 456)
+    monkeypatch.setattr(bot, "TRIAGE_CHANNEL_ID", 789)
+    monkeypatch.setattr(
+        bot,
+        "fetch_discord_daily_summary",
+        lambda _dt: (
+            {
+                "check_counts": [{"status": "pass", "count": 4}],
+                "alert_counts": [],
+            },
+            "api",
+        ),
+    )
+    monkeypatch.setattr(
+        bot,
+        "build_daily_summary_copilot_note",
+        lambda *_args: "No active reliability issue was found for this date.",
+    )
+
+    async def capture_publish(**kwargs: Any) -> None:
+        published.append(kwargs)
+
+    monkeypatch.setattr(bot, "publish_render", capture_publish)
+
+    asyncio.run(bot.daily_summary.callback(interaction, "2026-06-10"))
+
+    assert len(published) == 1
+    assert published[0]["channel_id"] == 789
+    assert published[0]["channel_id"] != 456
+    assert published[0]["acknowledgement"] == (
+        "Daily summary posted to the configured triage channel."
+    )
+
+
 def test_answer_discord_question_uses_api_correlation(monkeypatch) -> None:
     """
     Ensure grounded Copilot answers retain API audit correlation.
@@ -499,6 +766,11 @@ def test_answer_discord_question_uses_api_correlation(monkeypatch) -> None:
                 "answer": "The partition is empty.",
                 "agent_run_id": "run-123",
                 "alert_key": "system-key",
+                "llm_runtime": {
+                    "provider": "gemini",
+                    "model": "gemini-3.5-flash-lite",
+                    "runtime_mode": "external_model",
+                },
                 "incident_history_count": 2,
             }
 
@@ -509,10 +781,50 @@ def test_answer_discord_question_uses_api_correlation(monkeypatch) -> None:
     assert result == {
         "answer": "The partition is empty.",
         "transport": "api",
+        "alert_ref": "",
         "agent_run_id": "run-123",
         "alert_key": "system-key",
+        "llm_runtime": {
+            "provider": "gemini",
+            "model": "gemini-3.5-flash-lite",
+            "runtime_mode": "external_model",
+        },
         "incident_history_count": 2,
     }
+
+
+def test_answer_discord_question_uses_api_for_global_question(monkeypatch) -> None:
+    """Ensure Discord does not bypass the API when Alert Ref is omitted."""
+    captured: dict[str, Any] = {}
+
+    class ApiClient:
+        """Global Copilot API test double."""
+
+        def answer_copilot(self, **kwargs) -> dict[str, Any]:
+            """Capture the request and return one platform-level answer."""
+            captured.update(kwargs)
+            return {
+                "answer": "Ada dua alert aktif.",
+                "agent_run_id": "run-global",
+                "alert_key": "",
+                "llm_runtime": {
+                    "provider": "gemini",
+                    "model": "gemini-3.5-flash-lite",
+                    "runtime_mode": "external_model",
+                },
+                "incident_history_count": 0,
+            }
+
+    monkeypatch.setattr(service, "build_control_plane_client", lambda **kwargs: ApiClient())
+
+    result = service.answer_discord_question(
+        "Apakah ada error di data quality? Coba list down."
+    )
+
+    assert result["transport"] == "api"
+    assert result["answer"] == "Ada dua alert aktif."
+    assert result["agent_run_id"] == "run-global"
+    assert captured["alert_key"] == ""
 
 
 def test_approval_mutations_require_control_plane_api(monkeypatch) -> None:
@@ -543,6 +855,30 @@ def test_approval_mutations_require_control_plane_api(monkeypatch) -> None:
             "discord:7:mario",
             "Reviewed",
         )
+
+
+def test_discord_approval_uses_top_level_alert_correlation(monkeypatch) -> None:
+    """Keep alert correlation outside execution parameters so API validation succeeds."""
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def create_approval_request(self, **kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {"request_id": "APR-20261007-ABC123", "status": "pending"}
+
+    monkeypatch.setattr(service, "build_control_plane_client", lambda: FakeClient())
+
+    service.create_discord_backfill_approval_request(
+        "2026-10-07",
+        "2026-10-07",
+        "00_dag_dq_platform_daily_orchestrator",
+        "Review one bounded recovery plan.",
+        "discord:7:mario",
+        "orders|dq_failure|2026-10-07|dq.raw_orders|volume|row_count",
+    )
+
+    assert captured["alert_key"].startswith("orders|dq_failure|")
+    assert captured["parameters"] == {}
 
 
 # --- Defining Runtime Surface Tests

@@ -1,0 +1,26 @@
+####
+## Isolated Resolution Acceptance Schema Contract
+## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
+####
+
+contract_version: 1
+contract_name: resolution_acceptance_schema
+dataset: resolution_acceptance
+description: Isolated schema fixture for incident resolution acceptance without modifying orders tables.
+
+policy:
+  missing_table: critical
+  missing_column: critical
+  type_mismatch: critical
+  unexpected_columns: warning
+  position_mismatch: warning
+  default_mismatch: warning
+  fail_on_severity: critical
+
+tables:
+  - qualified_name: dq_resolution_acceptance.schema_fixture
+    check_column_order: true
+    check_defaults: true
+    columns:
+      - {name: dt, data_type: Date}
+      - {name: id, data_type: UInt64}

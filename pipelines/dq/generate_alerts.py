@@ -135,11 +135,11 @@ def fetch_latest_bad_results(client: Any, contract: OrdersDqContract, dt: date) 
             argMax(evidence_s3_uri, run_at)             AS evidence_s3_uri
         FROM {DQ_RESULTS_TABLE}
         WHERE dt = {format_date_literal(dt)}
-          AND status IN ({status_sql})
         GROUP BY
             dt,
             table_name,
             check_name
+        HAVING result_status IN ({status_sql})
         ORDER BY
             result_severity DESC,
             table_name,
@@ -246,9 +246,9 @@ def open_alert_exists(client: Any, alert_key: str, open_status: str) -> bool:
         client=client,
         query=f"""
             SELECT count()
-            FROM {ALERTS_TABLE}
+            FROM {ALERTS_TABLE} FINAL
             WHERE alert_key = {quote_sql_literal(alert_key)}
-              AND status = {quote_sql_literal(open_status)}
+              AND status IN ('open', 'acknowledged', 'triaged')
         """,
         default=0,
     )

@@ -368,6 +368,7 @@ def build_llm_route_audit_payload(response: Any) -> dict[str, Any]:
             metadata.get("structured_output_provider_fallback", False)
         ),
         "provider_failures": metadata.get("provider_failures", []),
+        "copilot_budget": metadata.get("copilot_budget", {}),
     }
 
 

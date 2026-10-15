@@ -409,10 +409,46 @@ def test_answer_copilot_sends_bounded_reference_payload(monkeypatch) -> None:
     assert captured["json"] == {
         "alert_key": "orders|matching-alert",
         "question": "What should I do?",
+        "language": "en",
         "report_json_s3_uri": "s3://dq-artifacts/agent-reports/report.json",
         "audit_limit": 10,
     }
     assert "evidence" not in captured["json"]
+
+
+def test_answer_copilot_allows_global_question_without_alert_key(monkeypatch) -> None:
+    """Ensure the shared client can request bounded platform-level context."""
+    captured: dict[str, Any] = {}
+
+    def fake_request_json(*args, **kwargs) -> dict[str, Any]:
+        """Capture the API body and return a valid global answer."""
+        captured.update(kwargs)
+        return {
+            "answer": "Two active alerts require review.",
+            "context_source": "active_alerts",
+            "incident_history_count": 0,
+            "active_alert_count": 2,
+        }
+
+    client = ControlPlaneClient("http://api:8000")
+    monkeypatch.setattr(client, "request_json", fake_request_json)
+
+    payload = client.answer_copilot(question="List active DQ errors.")
+
+    assert payload["context_source"] == "active_alerts"
+    assert captured["json_body"]["alert_key"] == ""
+    assert captured["json_body"]["report_json_s3_uri"] is None
+
+
+def test_answer_copilot_rejects_global_report_without_alert_identity() -> None:
+    """Ensure an unbound report artifact cannot enter a global Copilot request."""
+    client = ControlPlaneClient("http://api:8000")
+
+    with pytest.raises(ValueError, match="requires an Alert Ref"):
+        client.answer_copilot(
+            question="Explain this report.",
+            report_json_s3_uri="s3://dq-artifacts/agent-reports/report.json",
+        )
 
 
 @pytest.mark.parametrize("invalid_count", [-1, 6, True, "2"])
@@ -575,6 +611,34 @@ def test_get_daily_summary_rejects_invalid_or_mismatched_dates(monkeypatch) -> N
 
     with pytest.raises(ControlPlaneResponseError, match="different target date"):
         api_client.get_daily_summary("2026-06-10")
+
+
+def test_get_daily_summary_allows_latest_date_resolution(monkeypatch) -> None:
+    """An omitted date should trust a valid resolved date from the API."""
+    api_client = ControlPlaneClient("http://api:8000")
+    captured: dict[str, object] = {}
+
+    def fake_request_json(method: str, path: str, **kwargs) -> dict[str, object]:
+        captured.update({"method": method, "path": path, **kwargs})
+
+        return {
+            "status": "success",
+            "dt": "2026-06-10",
+            "check_counts": [{"status": "pass", "count": 9}],
+            "alert_counts": [],
+            "total_checks": 9,
+            "total_open_alerts": 0,
+            "duration_ms": 1,
+            "summary": "Latest daily summary.",
+        }
+
+    monkeypatch.setattr(api_client, "request_json", fake_request_json)
+
+    result = api_client.get_daily_summary()
+
+    assert result["dt"] == "2026-06-10"
+    assert captured["path"] == "/api/v1/summaries/daily"
+    assert captured.get("params") is None
 
 
 # --- Defining Extended Quality Summary Client Tests

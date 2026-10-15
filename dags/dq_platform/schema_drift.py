@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 # --- Defining Constants
-SCHEMA_CONTRACT_NAMES = ("orders",)
+SCHEMA_CONTRACT_NAMES = ("orders", "resolution_acceptance")
 
 SCHEMA_DRIFT_TASK_IDS = (
     "t10_detect_schema_drift",

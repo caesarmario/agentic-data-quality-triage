@@ -84,13 +84,22 @@ def test_build_pytest_command_uses_allowlisted_paths_without_shell() -> None:
 
     assert command[:4] == [sys.executable, "-m", "pytest", "-q"]
     assert command[4:] == [
+        "tests/test_discord_help.py",
+        "tests/test_discord_welcome.py",
+        "tests/test_discord_command_workspace.py",
+        "tests/test_discord_workspaces.py",
+        "tests/test_discord_language_rendering.py",
+        "tests/test_operator_language_contract.py",
+        "tests/test_discord_resolution.py",
         "tests/test_control_plane_client.py",
         "tests/test_copilot_narratives.py",
         "tests/test_daily_summary_tool.py",
         "tests/test_quality_summary_tool.py",
         "tests/test_discord_bot.py",
         "tests/test_discord_formatters.py",
-        "tests/test_discord_webhook.py",
+        "tests/test_discord_delivery.py",
+        "tests/test_discord_interactions.py",
+        "tests/test_discord_mentions.py",
     ]
     assert all(";" not in argument for argument in command)
 

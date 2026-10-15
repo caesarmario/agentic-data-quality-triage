@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 
 from agent.tools.audit_log import write_agent_audit_event
 from agent.tools.clickhouse_sql import rows_to_dicts
-from pipelines.common.clickhouse import build_clickhouse_client, format_date_literal, quote_sql_literal
+from pipelines.common.clickhouse import build_clickhouse_client, format_date_literal, quote_sql_literal, scalar
 from pipelines.common.logging import logger
 from pipelines.seeding.helpers import parse_date
 
@@ -25,6 +25,22 @@ DQ_CHECK_RESULTS_TABLE   = "dq.dq_check_results"
 ALERTS_TABLE             = "dq.alerts"
 OPEN_ALERT_STATUS        = "open"
 MAX_SUMMARY_GROUPS       = 100
+LATEST_SUMMARY_DATE_SQL  = f"""
+    SELECT maxOrNull(dt)
+    FROM
+    (
+        SELECT dt
+        FROM {DQ_CHECK_RESULTS_TABLE}
+        WHERE dt IS NOT NULL
+
+        UNION ALL
+
+        SELECT dt
+        FROM {ALERTS_TABLE} FINAL
+        WHERE dt IS NOT NULL
+          AND alert_type = 'dq_failure'
+    )
+"""
 
 
 # --- Defining Query Helpers
@@ -95,6 +111,31 @@ def query_daily_summary_rows(
     return sql, rows
 
 
+def resolve_daily_summary_date(client: Any, dt: str | None = None) -> str:
+    """
+    Resolve an explicit business date or the latest available DQ date.
+
+    Args:
+        client: clickhouse-connect client instance.
+        dt: Optional explicit business date in YYYY-MM-DD format.
+
+    Returns:
+        Normalized business date.
+
+    Raises:
+        ValueError: If an explicit date is invalid or no DQ date is available.
+    """
+    if dt and dt.strip():
+        return parse_date(dt).isoformat()
+
+    latest_dt = scalar(client, LATEST_SUMMARY_DATE_SQL, default=None)
+
+    if latest_dt is None:
+        raise ValueError("No daily DQ data is available yet.")
+
+    return parse_date(str(latest_dt)).isoformat()
+
+
 def build_daily_summary_payload(
     dt: str,
     rows: list[dict[str, Any]],
@@ -158,7 +199,7 @@ def build_daily_summary_payload(
 
 # --- Defining Public Tool Function
 def fetch_daily_quality_summary(
-    dt: str,
+    dt: str | None = None,
     agent_run_id: UUID | str | None = None,
     clickhouse_host: str | None = None,
     clickhouse_port: int | None = None,
@@ -168,7 +209,8 @@ def fetch_daily_quality_summary(
     Fetch one date's deterministic DQ check and open-alert summary.
 
     Args:
-        dt: Business date in YYYY-MM-DD format.
+        dt: Optional business date in YYYY-MM-DD format. None selects the
+            latest available DQ business date.
         agent_run_id: Optional audit correlation UUID.
         clickhouse_host: Optional ClickHouse host override.
         clickhouse_port: Optional ClickHouse HTTP port override.
@@ -181,12 +223,13 @@ def fetch_daily_quality_summary(
         ValueError: If the date or aggregation result is invalid.
         Exception: If ClickHouse querying or audit persistence fails.
     """
-    normalized_dt         = parse_date(dt).isoformat()
     resolved_client       = client or build_clickhouse_client(host=clickhouse_host, port=clickhouse_port)
     resolved_agent_run_id = UUID(str(agent_run_id)) if agent_run_id else uuid4()
     started_monotonic     = time.monotonic()
+    normalized_dt         = ""
 
     try:
+        normalized_dt = resolve_daily_summary_date(client=resolved_client, dt=dt)
         sql, rows  = query_daily_summary_rows(client=resolved_client, dt=normalized_dt)
         duration_ms = int((time.monotonic() - started_monotonic) * 1000)
         payload     = build_daily_summary_payload(
@@ -203,7 +246,11 @@ def fetch_daily_quality_summary(
             agent_run_id=resolved_agent_run_id,
             tool_name=TOOL_NAME,
             duration_ms=duration_ms,
-            input_payload={"dt": normalized_dt, "alert_status": OPEN_ALERT_STATUS},
+            input_payload={
+                "requested_dt": dt,
+                "resolved_dt": normalized_dt,
+                "alert_status": OPEN_ALERT_STATUS,
+            },
             output_payload={
                 "total_checks": payload["total_checks"],
                 "total_open_alerts": payload["total_open_alerts"],
@@ -233,7 +280,11 @@ def fetch_daily_quality_summary(
             agent_run_id=resolved_agent_run_id,
             tool_name=TOOL_NAME,
             duration_ms=duration_ms,
-            input_payload={"dt": normalized_dt, "alert_status": OPEN_ALERT_STATUS},
+            input_payload={
+                "requested_dt": dt,
+                "resolved_dt": normalized_dt,
+                "alert_status": OPEN_ALERT_STATUS,
+            },
             output_payload={"error_type": type(exc).__name__},
             error_message=str(exc),
         )
