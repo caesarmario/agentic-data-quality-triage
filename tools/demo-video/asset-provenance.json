@@ -246,9 +246,10 @@
   ],
   "diagrams": [
     {
-      "path": "docs/diagrams/architecture.svg",
+      "path": "tools/demo-video/recorded-diagrams/architecture.svg",
       "sha256": "494a72260ac466a6faffd31dc651187aa19b4b682660ff386ef00aafe53e8a30",
-      "label": "Repository diagram; not a UI capture",
+      "recordedFrom": "HEAD:docs/diagrams/architecture.svg",
+      "label": "Recorded repository diagram; predates evidence-driven recovery; not a UI capture",
       "videoRegions": [
         [
           40,
@@ -263,12 +264,13 @@
           145
         ]
       ],
-      "treatment": "Guided detail views of the original SVG; original labels unchanged."
+      "treatment": "Frozen recorded SVG bytes; guided detail views preserve original labels."
     },
     {
-      "path": "docs/diagrams/data-model-overview.svg",
+      "path": "tools/demo-video/recorded-diagrams/data-model-overview.svg",
       "sha256": "1b8d16d20e91f3a75f5462d9dd86ab22d72ffef6a1de1bfbd4207dbd7e2800da",
-      "label": "Repository diagram; not a UI capture",
+      "recordedFrom": "HEAD:docs/diagrams/data-model-overview.svg",
+      "label": "Recorded repository diagram; predates evidence-driven recovery; not a UI capture",
       "videoRegions": [
         [
           35,
@@ -283,7 +285,7 @@
           215
         ]
       ],
-      "treatment": "Guided detail views of the original SVG; original labels unchanged."
+      "treatment": "Frozen recorded SVG bytes; guided detail views preserve original labels."
     }
   ],
   "documentarySources": [

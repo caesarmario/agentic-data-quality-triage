@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1336" viewBox="0 0 1280 1336" role="img" aria-labelledby="erd-recovery-publication-title erd-recovery-publication-desc">
+<title id="erd-recovery-publication-title">Recovery / pinned sources and publication</title>
+<desc id="erd-recovery-publication-desc">Only PostgreSQL-declared foreign keys are shown. Recovery plans reference incident and approval records; executions reference plans; publication rows reference the dataset/partition revision; legacy approval projection rows reference approval requests. Snapshots and recovery outbox events have no declared FK.</desc>
+<defs>
+<marker id="erd-recovery-publication-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#4c6558"/></marker>
+<marker id="erd-recovery-publication-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#22734b"/></marker>
+<marker id="erd-recovery-publication-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#356851"/></marker>
+</defs>
+<rect x="0" y="0" width="1280" height="1336" rx="0" fill="#f7f8f2" stroke="none"/>
+<text x="40" y="40" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">DATASENTRY / REPOSITORY CONTRACT</text>
+<text x="40" y="84" text-anchor="start" fill="#18382a" font-family="Instrument Serif, Georgia, serif" font-size="36" font-weight="400">Recovery / pinned sources and publication</text>
+<text x="40" y="120" text-anchor="start" fill="#4c6558" font-family="Geist, Trebuchet MS, sans-serif" font-size="14" font-weight="400">Versioned source facts, approved recovery state, and guarded partition publication.</text>
+<path d="M 888 280 L 856 280 Q 848 280 848 272 L 848 260 Q 848 252 840 252 L 808 252" fill="none" stroke="#4c6558" stroke-width="1.5" marker-end="url(#erd-recovery-publication-arrow-muted)"/>
+<path d="M 888 656 L 856 656 Q 848 656 848 648 L 848 608 Q 848 600 840 600 L 808 600" fill="none" stroke="#4c6558" stroke-width="1.5" marker-end="url(#erd-recovery-publication-arrow-muted)"/>
+<rect x="40" y="176" width="344" height="248" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="56" y="200" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">POSTGRESQL / TABLE</text>
+<text x="56" y="228" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="16" font-weight="600">dq_control.source_snapshots</text>
+<rect x="41" y="240" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="256" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">snapshot_id</text>
+<text x="368" y="256" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">TEXT</text>
+<text x="56" y="266" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">PK</text>
+<text x="56" y="284" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">dataset</text>
+<text x="368" y="284" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">TEXT</text>
+<rect x="41" y="296" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="312" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">dt</text>
+<text x="368" y="312" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">DATE</text>
+<text x="56" y="340" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">kind</text>
+<text x="368" y="340" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">TEXT</text>
+<rect x="41" y="352" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="368" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">checksum</text>
+<text x="368" y="368" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">CHAR(64)</text>
+<text x="56" y="396" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">manifest</text>
+<text x="368" y="396" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">JSONB</text>
+<text x="56" y="416" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">+ 1 more columns</text>
+<rect x="464" y="176" width="344" height="248" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="480" y="200" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">POSTGRESQL / TABLE</text>
+<text x="480" y="228" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="16" font-weight="600">dq_control.recovery_plans</text>
+<rect x="465" y="240" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="480" y="256" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">plan_id</text>
+<text x="792" y="256" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">UUID</text>
+<text x="480" y="266" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">PK</text>
+<text x="480" y="284" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">alert_key</text>
+<text x="792" y="284" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">TEXT</text>
+<text x="480" y="294" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">FK</text>
+<rect x="465" y="296" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="480" y="312" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">incident_revision</text>
+<text x="792" y="312" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">BIGINT</text>
+<text x="480" y="340" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">plan_hash</text>
+<text x="792" y="340" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">CHAR(64)</text>
+<rect x="465" y="352" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="480" y="368" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">approval_request_id</text>
+<text x="792" y="368" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">TEXT</text>
+<text x="480" y="378" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">FK</text>
+<text x="480" y="396" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">record</text>
+<text x="792" y="396" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">JSONB</text>
+<text x="480" y="416" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">+ 1 more columns</text>
+<rect x="888" y="176" width="344" height="192" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="904" y="200" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">POSTGRESQL / TABLE</text>
+<text x="904" y="228" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="16" font-weight="600">dq_control.recovery_executions</text>
+<rect x="889" y="240" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="904" y="256" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">execution_id</text>
+<text x="1216" y="256" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">UUID</text>
+<text x="904" y="266" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">PK</text>
+<text x="904" y="284" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">plan_id</text>
+<text x="1216" y="284" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">UUID</text>
+<text x="904" y="294" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">FK</text>
+<rect x="889" y="296" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="904" y="312" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">status</text>
+<text x="1216" y="312" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">TEXT</text>
+<text x="904" y="340" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">record</text>
+<text x="1216" y="340" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">JSONB</text>
+<text x="904" y="360" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">+ 2 more columns</text>
+<rect x="40" y="524" width="344" height="248" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="56" y="548" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">POSTGRESQL / TABLE</text>
+<text x="56" y="576" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="16" font-weight="600">dq_control.recovery_outbox</text>
+<rect x="41" y="588" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="604" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">event_id</text>
+<text x="368" y="604" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">UUID</text>
+<text x="56" y="614" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">PK</text>
+<text x="56" y="632" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">aggregate_id</text>
+<text x="368" y="632" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">TEXT</text>
+<rect x="41" y="644" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="660" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">event_type</text>
+<text x="368" y="660" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">TEXT</text>
+<text x="56" y="688" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">audit_done</text>
+<text x="368" y="688" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">BOOLEAN</text>
+<rect x="41" y="700" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="716" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">delivery_done</text>
+<text x="368" y="716" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">BOOLEAN</text>
+<text x="56" y="744" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">error_code</text>
+<text x="368" y="744" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">TEXT</text>
+<text x="56" y="764" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">+ 5 more columns</text>
+<rect x="464" y="524" width="344" height="192" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="480" y="548" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">POSTGRESQL / TABLE</text>
+<text x="480" y="576" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="16" font-weight="600">dq_control.partition_revisions</text>
+<rect x="465" y="588" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="480" y="604" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">dataset</text>
+<text x="792" y="604" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">text</text>
+<text x="480" y="614" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">PK</text>
+<text x="480" y="632" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">partition_dt</text>
+<text x="792" y="632" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">date</text>
+<text x="480" y="642" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">PK</text>
+<rect x="465" y="644" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="480" y="660" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">revision</text>
+<text x="792" y="660" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">bigint</text>
+<text x="480" y="688" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">watermark</text>
+<text x="792" y="688" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">text</text>
+<text x="480" y="708" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">All columns shown</text>
+<rect x="888" y="524" width="344" height="248" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="904" y="548" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">POSTGRESQL / TABLE</text>
+<text x="904" y="576" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="16" font-weight="600">dq_control.partition_publications</text>
+<rect x="889" y="588" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="904" y="604" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">publication_id</text>
+<text x="1216" y="604" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">uuid</text>
+<text x="904" y="614" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">PK</text>
+<text x="904" y="632" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">execution_id</text>
+<text x="1216" y="632" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">text</text>
+<rect x="889" y="644" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="904" y="660" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">dataset</text>
+<text x="1216" y="660" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">text</text>
+<text x="904" y="670" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">FK</text>
+<text x="904" y="688" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">partition_dt</text>
+<text x="1216" y="688" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">date</text>
+<text x="904" y="698" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">FK</text>
+<rect x="889" y="700" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="904" y="716" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">status</text>
+<text x="1216" y="716" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">text</text>
+<text x="904" y="744" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">intent</text>
+<text x="1216" y="744" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">text</text>
+<text x="904" y="764" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">+ 10 more columns</text>
+<rect x="40" y="872" width="344" height="192" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="56" y="896" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">POSTGRESQL / TABLE</text>
+<text x="56" y="924" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="16" font-weight="600">dq_control.approval_legacy_imports</text>
+<rect x="41" y="936" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="952" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">request_id</text>
+<text x="368" y="952" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">TEXT</text>
+<text x="56" y="962" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">PK/FK</text>
+<text x="56" y="980" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">source_hash</text>
+<text x="368" y="980" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">CHAR(64)</text>
+<rect x="41" y="992" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="56" y="1008" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">history_json</text>
+<text x="368" y="1008" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">JSONB</text>
+<text x="56" y="1036" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">imported_at</text>
+<text x="368" y="1036" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">TIMESTAMPTZ</text>
+<text x="56" y="1056" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">All columns shown</text>
+<rect x="464" y="872" width="344" height="220" rx="8" fill="#fdfef9" stroke="#c1cfbe"/>
+<text x="480" y="896" text-anchor="start" fill="#22734b" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="500">POSTGRESQL / TABLE</text>
+<text x="480" y="924" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="16" font-weight="600">dq_control.approval_projection_outbox</text>
+<rect x="465" y="936" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="480" y="952" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">request_id</text>
+<text x="792" y="952" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">TEXT</text>
+<text x="480" y="962" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">PK/FK</text>
+<text x="480" y="980" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">version</text>
+<text x="792" y="980" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">INTEGER</text>
+<text x="480" y="990" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="8" font-weight="500">PK</text>
+<rect x="465" y="992" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="480" y="1008" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">audit_done</text>
+<text x="792" y="1008" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">BOOLEAN</text>
+<text x="480" y="1036" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">projection_done</text>
+<text x="792" y="1036" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">BOOLEAN</text>
+<rect x="465" y="1048" width="342" height="28" rx="0" fill="#edf1e8" stroke="none"/>
+<text x="480" y="1064" text-anchor="start" fill="#18382a" font-family="Geist, Trebuchet MS, sans-serif" font-size="13" font-weight="400">created_at</text>
+<text x="792" y="1064" text-anchor="end" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">TIMESTAMPTZ</text>
+<text x="480" y="1084" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">+ 1 more columns</text>
+<text x="40" y="1180" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">Other FKs: recovery_plans -&gt; incident_controls + approval_requests; legacy import/projection -&gt; approval_requests.</text>
+<text x="40" y="1200" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">Those referenced tables are omitted from this 8-entity view. Publication FK is the tuple (dataset, partition_dt).</text>
+<text x="40" y="1220" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">Source hashes bind content; they do not prove freshness or business validity.</text>
+<path d="M40 1268 H1240" stroke="#c1cfbe"/>
+<text x="40" y="1292" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">PK/FK: PostgreSQL constraints only. Solid gray FK: child N -&gt; parent 1; ON DELETE / UPDATE NO ACTION.</text>
+<text x="40" y="1312" text-anchor="start" fill="#4c6558" font-family="Geist Mono, Consolas, monospace" font-size="11" font-weight="400">Dashed gray: logical only. Solid blue: dbt derivation. Selected columns; full types and all omitted fields in data-model.md.</text>
+</svg>

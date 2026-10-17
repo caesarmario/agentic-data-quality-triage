@@ -20,6 +20,8 @@ flowchart LR
     dq_stg_orders["dq.stg_orders / table"]
   end
   subgraph postgresql[postgresql]
+    dq_control_approval_legacy_imports["dq_control.approval_legacy_imports / table"]
+    dq_control_approval_projection_outbox["dq_control.approval_projection_outbox / table"]
     dq_control_approval_requests["dq_control.approval_requests / table"]
     dq_control_discord_copilot_requests["dq_control.discord_copilot_requests / table"]
     dq_control_discord_incident_workspaces["dq_control.discord_incident_workspaces / table"]
@@ -32,14 +34,26 @@ flowchart LR
     dq_control_incident_resolution_decisions["dq_control.incident_resolution_decisions / table"]
     dq_control_incident_revalidation_keys["dq_control.incident_revalidation_keys / table"]
     dq_control_incident_revalidations["dq_control.incident_revalidations / table"]
+    dq_control_partition_publications["dq_control.partition_publications / table"]
+    dq_control_partition_revisions["dq_control.partition_revisions / table"]
+    dq_control_recovery_executions["dq_control.recovery_executions / table"]
+    dq_control_recovery_outbox["dq_control.recovery_outbox / table"]
+    dq_control_recovery_plans["dq_control.recovery_plans / table"]
+    dq_control_source_snapshots["dq_control.source_snapshots / table"]
   end
   dq_raw_orders -.->|"dbt_derivation"| dq_stg_orders
   dq_stg_orders -.->|"dbt_derivation"| dq_fct_orders_daily
+  dq_control_approval_legacy_imports -->|"FK request_id / NO ACTION"| dq_control_approval_requests
+  dq_control_approval_projection_outbox -->|"FK request_id / NO ACTION"| dq_control_approval_requests
   dq_control_incident_outbox -->|"FK alert_key / NO ACTION"| dq_control_incident_controls
   dq_control_incident_resolution_decisions -->|"FK alert_key / NO ACTION"| dq_control_incident_controls
   dq_control_incident_resolution_decisions -->|"FK request_id / NO ACTION"| dq_control_incident_revalidations
   dq_control_incident_revalidation_keys -->|"FK request_id / NO ACTION"| dq_control_incident_revalidations
   dq_control_incident_revalidations -->|"FK alert_key / NO ACTION"| dq_control_incident_controls
+  dq_control_partition_publications -->|"FK dataset,partition_dt / NO ACTION"| dq_control_partition_revisions
+  dq_control_recovery_executions -->|"FK plan_id / NO ACTION"| dq_control_recovery_plans
+  dq_control_recovery_plans -->|"FK approval_request_id / NO ACTION"| dq_control_approval_requests
+  dq_control_recovery_plans -->|"FK alert_key / NO ACTION"| dq_control_incident_controls
   dq_agent_audit_log -.->|"logical_correlation"| dq_alerts
   dq_agent_run_context_events -.->|"logical_correlation"| dq_incident_memory
   dq_alerts -.->|"logical_correlation"| dq_dq_check_results

@@ -1,5 +1,7 @@
 # Mention Ask acceptance
 
+> Historical acceptance: this record predates the owner-authorized [fresh demo reset](demo-reset.md) on 16 October 2026. The reset does not retain the runtime rows, messages, or logs cited below. This document is not proof that those records remain in the current local stack.
+
 Validation date: 2026-10-08. No remediation or approval decision was executed for this slice.
 
 ## Airflow regression

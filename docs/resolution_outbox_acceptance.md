@@ -1,5 +1,7 @@
 # Resolution Outbox Recovery Acceptance
 
+> Historical acceptance: this record predates the owner-authorized [fresh demo reset](demo-reset.md) on 16 October 2026. The reset does not retain the runtime rows, messages, or logs cited below. This document is not proof that those records remain in the current local stack.
+
 ## What This Proves
 
 An explicit manual fixture run committed one evidence-gated closure, retained a deliberate application failure before Discord delivery, and replayed the same outbox event. PostgreSQL, ClickHouse, the shared API, the child Airflow check, and Discord were real services, not mocked acceptance dependencies.

@@ -1,5 +1,7 @@
 # DataSentry Help Center Acceptance
 
+> Historical acceptance: this record predates the owner-authorized [fresh demo reset](demo-reset.md) on 16 October 2026. The reset does not retain the runtime rows, messages, or logs cited below. This document is not proof that those records remain in the current local stack.
+
 ## Scope
 
 This slice adds deterministic onboarding to the existing green DataSentry bot. It does not change investigation, approval, Resolve, provider routing, warehouse data or public API endpoints. Live checks used the owner's authenticated desktop Discord client with the approved delegated test actions.

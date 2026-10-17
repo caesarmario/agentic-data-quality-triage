@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="erd-approvals-title erd-approvals-desc">
 <title id="erd-approvals-title">Approvals / two distinct stores</title>
-<desc id="erd-approvals-desc">No connector is drawn because these two approval tables are not declared counterparts or FK-linked replicas. The backfill/API path still uses legacy ClickHouse approvals; the approved-action dispatcher uses PostgreSQL control. PostgreSQL advisory locking in parts of the legacy path does not turn ClickHouse into a transactional store.</desc>
+<desc id="erd-approvals-desc">PostgreSQL is authoritative for current approval decisions and execution claims. ClickHouse retains history and receives projections, without a cross-store FK. Idempotent legacy import preserves available identifiers/history but does not grant pinned-source recovery eligibility.</desc>
 <defs>
 <marker id="erd-approvals-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#4c6558"/></marker>
 <marker id="erd-approvals-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#22734b"/></marker>

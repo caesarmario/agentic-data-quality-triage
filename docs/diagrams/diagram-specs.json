@@ -87,7 +87,7 @@
     {
       "slug": "erd-approvals", "title": "Approvals / two distinct stores",
       "subtitle": "Legacy backfill approval evidence and transactional action control coexist.",
-      "caption": "No connector is drawn because these two approval tables are not declared counterparts or FK-linked replicas. The backfill/API path still uses legacy ClickHouse approvals; the approved-action dispatcher uses PostgreSQL control. PostgreSQL advisory locking in parts of the legacy path does not turn ClickHouse into a transactional store.",
+      "caption": "PostgreSQL is authoritative for current approval decisions and execution claims. ClickHouse retains history and receives projections, without a cross-store FK. Idempotent legacy import preserves available identifiers/history but does not grant pinned-source recovery eligibility.",
       "tables": [
         {"name": "dq.approval_requests", "row": 0, "col": 0, "fields": ["request_id", "alert_key", "action_type", "status", "start_date", "end_date", "execution_status", "updated_at"]},
         {"name": "dq_control.approval_requests", "row": 0, "col": 1, "fields": ["request_id", "idempotency_hash", "request_generation", "action_type", "scope_json", "status", "version", "execution_status"]}
@@ -173,6 +173,26 @@
       ],
       "edges": [{"from": "dq.discord_incident_messages", "to": "dq.alerts", "kind": "logical_correlation"}],
       "notes": ["ORDER BY alert_key is not a UNIQUE constraint. Historical webhook values do not imply supported webhook delivery."]
+    },
+    {
+      "slug": "erd-recovery-publication", "title": "Recovery / pinned sources and publication",
+      "subtitle": "Versioned source facts, approved recovery state, and guarded partition publication.",
+      "caption": "Only PostgreSQL-declared foreign keys are shown. Recovery plans reference incident and approval records; executions reference plans; publication rows reference the dataset/partition revision; legacy approval projection rows reference approval requests. Snapshots and recovery outbox events have no declared FK.",
+      "tables": [
+        {"name": "dq_control.source_snapshots", "row": 0, "col": 0, "fields": ["snapshot_id", "dataset", "dt", "kind", "checksum", "manifest"]},
+        {"name": "dq_control.recovery_plans", "row": 0, "col": 1, "fields": ["plan_id", "alert_key", "incident_revision", "plan_hash", "approval_request_id", "record"]},
+        {"name": "dq_control.recovery_executions", "row": 0, "col": 2, "fields": ["execution_id", "plan_id", "status", "record"]},
+        {"name": "dq_control.recovery_outbox", "row": 1, "col": 0, "fields": ["event_id", "aggregate_id", "event_type", "audit_done", "delivery_done", "error_code"]},
+        {"name": "dq_control.partition_revisions", "row": 1, "col": 1, "fields": ["dataset", "partition_dt", "revision", "watermark"]},
+        {"name": "dq_control.partition_publications", "row": 1, "col": 2, "fields": ["publication_id", "execution_id", "dataset", "partition_dt", "status", "intent"]},
+        {"name": "dq_control.approval_legacy_imports", "row": 2, "col": 0, "fields": ["request_id", "source_hash", "history_json", "imported_at"]},
+        {"name": "dq_control.approval_projection_outbox", "row": 2, "col": 1, "fields": ["request_id", "version", "audit_done", "projection_done", "created_at"]}
+      ],
+      "edges": [
+        {"from": "dq_control.recovery_executions", "to": "dq_control.recovery_plans", "kind": "foreign_key"},
+        {"from": "dq_control.partition_publications", "to": "dq_control.partition_revisions", "kind": "foreign_key"}
+      ],
+      "notes": ["Other FKs: recovery_plans -> incident_controls + approval_requests; legacy import/projection -> approval_requests.", "Those referenced tables are omitted from this 8-entity view. Publication FK is the tuple (dataset, partition_dt).", "Source hashes bind content; they do not prove freshness or business validity."]
     }
   ]
 }

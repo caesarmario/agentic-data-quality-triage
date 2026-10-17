@@ -54,7 +54,7 @@ logs/airflow/          Retained task logs mounted from Airflow
 
 Host Python, Node.js, and GNU Make are not required for the container-based walkthrough. Make targets are optional shortcuts for a POSIX-compatible shell. Use the explicit Docker commands on PowerShell.
 
-> Run this stack on a trusted development machine. Several services publish host ports; only the web UI is explicitly bound to loopback by default. This Compose file is not a hardened public deployment. Read the [security boundary](#security-and-operational-boundaries) before exposing anything beyond your laptop.
+> Run this stack on a trusted development machine. All published Compose host ports bind to `127.0.0.1` (localhost-only), including infrastructure, API, and UI ports. Internal service DNS names are unchanged. Loopback binding does not make this a hardened public deployment. Read the [security boundary](#security-and-operational-boundaries) before changing exposure.
 
 ### 1. Clone and create local configuration
 
@@ -88,11 +88,13 @@ Edit `infra/.env` locally. Never commit it or paste its full contents into logs 
 | --- | --- |
 | `TZ`, `AIRFLOW__CORE__DEFAULT_TIMEZONE` | Keep `Asia/Bangkok` |
 | `EXTERNAL_LLM_ENABLED` | Keep `false` |
+| `COPILOT_EXTERNAL_LLM_ENABLED` | Keep `false` for heuristic-only API answers |
+| `DQ_ACCEPTANCE_MANUAL_ONLY` | Defaults to `false`; temporary `true` removes schedules only from DAGs `00` and `90_06` |
 | `LLM_PROVIDER_MAX_RETRIES` | Keep `0` |
 | Provider API keys | Leave blank for the first demo |
 | `DISCORD_BOT_TOKEN`, `DISCORD_ALERTS_CHANNEL_ID` | Optional; scheduled incident cards are delivered by the existing DataSentry bot |
 | `DISCORD_DELIVERY_TIMEOUT_SECONDS`, `DISCORD_DELIVERY_MAX_ALERTS` | Bound bot-authored incident delivery; defaults are shown in `.env.example` |
-| `CONTROL_PLANE_APPROVAL_TOKEN` | Set a long random local secret before using approval mutation endpoints |
+| `CONTROL_PLANE_APPROVAL_TOKEN` | Shared server-side secret for protected writes and both investigation POST routes, even without an LLM |
 | `AIRFLOW_WWW_USER_PASSWORD` | Local login password; example value is not suitable for a shared host |
 | `AIRFLOW__API_AUTH__JWT_SECRET` | Replace the demo value before first initialization; keep consistent across Airflow services |
 | ClickHouse, AWS/S3 and Airflow database credentials | Local demo defaults only; update corresponding service configuration consistently |
@@ -146,7 +148,7 @@ Expected: a working worker Docker client/server connection, `external_llm_enable
 | FastAPI, optional | [localhost:8000/docs](http://localhost:8000/docs) | OpenAPI documentation |
 | Next.js, optional | [localhost:3000](http://localhost:3000) | Product-oriented UI |
 
-Host ports are configurable in `.env.example`. Inside Docker, applications use service DNS names such as `clickhouse`, `seaweed-s3`, and `api`, not host `localhost`.
+Host port numbers are configurable in `.env.example`; their Compose bindings remain `127.0.0.1`. Inside Docker, applications use service DNS names such as `clickhouse`, `seaweed-s3`, and `api`, not host `localhost`.
 
 ### 5. Optional API and web UI
 
@@ -163,7 +165,7 @@ docker compose --env-file infra/.env -f infra/docker-compose.yml --profile web u
 docker compose --env-file infra/.env -f infra/docker-compose.yml --profile web logs --tail 50 web api
 ```
 
-The web container does not receive provider keys or warehouse credentials. It uses the API boundary. Set `CONTROL_PLANE_APPROVAL_TOKEN` in the local environment before using protected approval operations, and recreate the affected API/web services when changing their environment. Do not put this token in browser-visible `NEXT_PUBLIC_*` variables.
+The web container does not receive provider keys or warehouse credentials. It uses the API boundary. Configure the same `CONTROL_PLANE_APPROVAL_TOKEN` in the API and its server-side callers, including Discord, Streamlit, and the Next.js server. It is required for `POST /api/v1/copilot/answer` and `POST /api/v1/triage/run` even in heuristic mode, as well as protected writes. Recreate the affected services after changing their environment. Never put the token in browser-visible `NEXT_PUBLIC_*` variables, frontend requests, URLs, or reports. See the [authorization contract](#fastapi).
 
 <!-- --- Walking Through the First Demo -->
 ## First demo without an API key
@@ -182,6 +184,8 @@ An empty warehouse is fine at this stage. A missing-report check is not appropri
 
 ### 2. Prepare operational DAGs
 
+First complete the [temporary manual-only procedure](#temporary-manual-only-acceptance). Verify that DAG `00` has no effective schedule before enabling it for manual execution. Leave the reconciler `90_06` paused; it is not currently enabled.
+
 Unpause the stage DAGs so triggered runs can execute:
 
 ```text
@@ -195,7 +199,7 @@ docker exec dq_airflow_scheduler airflow dags unpause 40_dag_dq_orders_triage_ag
 
 These DAGs have no schedule of their own. Unpausing them does not create independent daily cron runs.
 
-In Airflow, unpause `00_dag_dq_platform_daily_orchestrator` and inspect any automatically created scheduled run before triggering your demo. Unpausing a scheduled DAG can schedule a run even with catchup disabled. Finish or account for that run first; it may use an automatic incident scenario. After the demo, pause DAG `00` if you do not want unattended daily runs.
+Enable DAG `00` for the manual runs below only after the scheduler has loaded `schedule=None`. Do not briefly enable its cron schedule and race to pause it afterward. Finish with the restore procedure, leaving both `00` and `90_06` paused.
 
 ### 3. Run a clean business date
 
@@ -312,7 +316,7 @@ A complete demo can show the original alert, a report grounded in evidence, a pr
 
 | DAG ID | Purpose | Schedule |
 | --- | --- | --- |
-| `00_dag_dq_platform_daily_orchestrator` | Whole daily data flow | `5 0 * * *`, Asia/Bangkok |
+| `00_dag_dq_platform_daily_orchestrator` | Whole daily data flow | `5 0 * * *`, Asia/Bangkok; `None` only under the acceptance override |
 | `10_dag_dq_orders_landing_orchestrator` | Seed followed by raw load | Triggered/manual |
 | `11_dag_dq_orders_seed_to_s3` | Generate and upload one or more dates | Triggered/manual |
 | `12_dag_dq_orders_load_raw_clickhouse` | Load landing partitions | Triggered/manual |
@@ -323,6 +327,9 @@ A complete demo can show the original alert, a report grounded in evidence, a pr
 | `90_02_dag_dq_platform_approved_actions` | Preview or execute one transactional exact-scope approved action | Manual |
 | `90_03_dag_dq_incident_revalidation` | Read-only incident checks; business PASS/blocked evidence for human closure | Manual, no automatic retry |
 | `90_04_dag_dq_resolution_outbox_acceptance` | Owned fixture setup, delegated closure and application-delivery fault/replay proof | Manual, explicit consent, no LLM |
+| `90_05_dag_dq_incident_recovery` | Execute one approved immutable recovery plan | Manual, no automatic retry |
+| `90_06_dag_dq_recovery_reconciliation` | Inspect existing runs and synchronize control/outbox records; never repair data | Every minute by default; `None` under the acceptance override; paused, not currently enabled |
+| `90_07_dag_dq_recovery_acceptance` | Prepare fixed, owned synthetic recovery fixtures; not a repair path | Manual, explicit fixture work |
 | `91_dag_dq_platform_validation` | Named pytest suite and readiness | Manual |
 | `92_dag_dq_llm_provider_smoke` | Bounded external provider acceptance | Manual |
 | `93_dag_dq_agent_checkpoint_smoke` | Checkpoint/resume validation | Manual |
@@ -334,6 +341,40 @@ A complete demo can show the original alert, a report grounded in evidence, a pr
 | `99_dag_dq_control_plane_resilience_smoke` | Failure isolation and resilience scenarios | Manual |
 
 Airflow logical dates and business partitions are not the same as wall-clock start time. The pipeline resolves business dates in Asia/Bangkok; observability SQL tables retain UTC timestamps. Prefer an explicit `dt` for a demo and inspect the effective date in logs. The UI's timestamp display can depend on its timezone setting.
+
+### Temporary manual-only acceptance
+
+`DQ_ACCEPTANCE_MANUAL_ONLY` defaults to `false` in `.env.example` and Compose. The strict server flag accepts booleans expressed as `true` or `false` (case-insensitive); invalid values fail parsing. At DAG parse time, `true` changes **only** `00_dag_dq_platform_daily_orchestrator` and `90_06_dag_dq_recovery_reconciliation` to `schedule=None`. Other DAG definitions are unchanged. This flag is not a pause command, does not cancel queued/running work, and does not make manual writes safe by itself.
+
+Use this temporary procedure for a controlled local acceptance session or recording. These are operator instructions, not evidence that a run has occurred.
+
+1. Record the starting configuration. Keep the persisted flag at its normal `false` value. Pause both DAGs before changing their scheduling configuration:
+
+```text
+docker exec dq_airflow_scheduler airflow dags pause 00_dag_dq_platform_daily_orchestrator
+docker exec dq_airflow_scheduler airflow dags pause 90_06_dag_dq_recovery_reconciliation
+```
+
+2. Inspect existing queued/running DagRuns and their tasks. Let known work finish; investigate uncertain dispatch or publication outcomes before proceeding. Pausing does not cancel that work. Do not recreate workers during active jobs.
+3. In the same PowerShell session, set a temporary process override and recreate the Airflow services so their environments agree. Preserve volumes and all unrelated settings:
+
+```powershell
+$env:DQ_ACCEPTANCE_MANUAL_ONLY = "true"
+docker compose --env-file infra/.env -f infra/docker-compose.yml up -d --no-deps --force-recreate airflow-api-server airflow-dag-processor airflow-scheduler airflow-triggerer airflow-worker flower
+docker exec dq_airflow_scheduler airflow dags list-import-errors
+```
+
+4. Wait for DAG processing, then inspect the scheduler's effective schedule/timetable in Airflow for **both** DAGs. Require no schedule and paused state before enabling any required manual DAG. Stop if either still has a cron/interval schedule or an import error. Do not recreate Airflow from another shell with the default flag during this session. Keep `90_06` paused unless a separately authorized manual reconciliation is needed; even then, verify its effective schedule is `None` first.
+5. Run only the intended manual DAGs on reviewed synthetic scopes. Retain run IDs, task states, retries, durations, and logs. Do not infer data PASS from Airflow success.
+6. After known work has finished, pause **both** DAGs again using the commands above and verify their paused state. Only then restore normal definitions in the same PowerShell session:
+
+```powershell
+$env:DQ_ACCEPTANCE_MANUAL_ONLY = "false"
+docker compose --env-file infra/.env -f infra/docker-compose.yml up -d --no-deps --force-recreate airflow-api-server airflow-dag-processor airflow-scheduler airflow-triggerer airflow-worker flower
+docker exec dq_airflow_scheduler airflow dags list-import-errors
+```
+
+7. Wait for reprocessing. Verify DAG `00` is back to `5 0 * * *` and `90_06` to a one-minute interval, with **both still paused** and no unexplained queued/running work. The final reconciler state is paused, not enabled. If interrupted, establish both paused states before any restart that restores the default flag. A later decision to enable scheduled operations is separate from acceptance cleanup.
 
 ### Custom dates and backfills
 
@@ -566,15 +607,15 @@ Open `/docs` on the API port for request/response schemas. Selected interfaces i
 | --- | --- |
 | `GET /health` | API health |
 | `GET /api/v1/alerts` | Filtered alerts |
-| `GET /api/v1/summaries/daily` | Daily DQ summary |
+| `GET /api/v1/summaries/daily` | Daily DQ summary with `available`/`empty` availability |
 | `GET /api/v1/summaries/weekly` | Seven-day DQ summary ending on one date |
 | `GET /api/v1/summaries/table` | Bounded health summary for one qualified table |
 | `GET /api/v1/summaries/database` | Bounded warehouse-wide health summary |
 | `GET /api/v1/audit/logs` | Bounded audit lookup |
 | `GET /api/v1/reports/read` | Guarded artifact reading |
 | `GET /api/v1/lineage/dbt` | dbt lineage evidence |
-| `POST /api/v1/copilot/answer` | Context-aware explanation; may call a provider if enabled |
-| `POST /api/v1/triage/run` | Explicit investigation request, not a read-only page view |
+| `POST /api/v1/copilot/answer` | Token required even for heuristic answers; may call a provider if enabled |
+| `POST /api/v1/triage/run` | Token required even in no-LLM mode; explicit investigation, not a page read |
 | `GET /api/v1/approvals/requests` | Approval queue |
 | `GET /api/v1/alerts/{alert_ref}/resolution-preview` | Scope, current blockers, latest check and closure history |
 | `POST /api/v1/alerts/{alert_ref}/revalidations` | Create/reuse a durable check request and trigger allowlisted Airflow DAG; `202` |
@@ -582,6 +623,21 @@ Open `/docs` on the API port for request/response schemas. Selected interfaces i
 | `POST /api/v1/alerts/{alert_ref}/resolve` | Protected, idempotent human confirmation using fresh PASS evidence |
 
 Use OpenAPI for the exact protected create/decision/cancellation schemas rather than constructing arbitrary requests. The local shared approval token is not a substitute for production user authentication and authorization.
+
+Both investigation POST routes require `X-Control-Plane-Token` matching the server's `CONTROL_PLANE_APPROVAL_TOKEN`, regardless of provider settings. Missing/blank server configuration returns HTTP `503`; with the server configured, a missing or wrong caller token returns `401`. Authorization rejects the request before warehouse reads, report/tool access, audit work, or provider calls. `GET /health` remains unprivileged; an API health response does not prove authorization or warehouse health.
+
+The shared Python client supplies its configured server-side token and rejects a protected investigation call locally if that token is absent. It uses `allow_redirects=False` and rejects `3xx` responses. The Next.js proxy uses only its own server-side token for allowlisted privileged routes, never caller-supplied credentials, and uses `redirect: "error"`. It exposes triage, not the Copilot answer route. Configure the direct internal API address; do not use redirecting URLs or follow redirects with credentials. The token never belongs in `NEXT_PUBLIC_*` or browser request headers.
+
+#### Daily summary availability
+
+`GET /api/v1/summaries/daily` returns `status="success"` for a completed request and a separate `availability` value:
+
+| Result | Meaning |
+| --- | --- |
+| `available` | At least one check result or open alert exists. This says data is available, not healthy. |
+| `empty` | No check results or open alerts for the selected date; both totals are zero, both count lists are empty, and the summary is `No quality data yet`. |
+
+With an explicit `dt`, the response keeps that date even when empty. Omit `dt` to select the latest business DQ date; `dt=null` occurs only when that latest date is absent. There is no fabricated today/default date. An empty response is HTTP `200` request success, **not** a healthy warehouse or passing validation. Dependency failures remain errors; they are not converted to empty success. Next.js shows a neutral empty state instead of healthy KPI cards.
 
 ## Resolve with fresh evidence
 
@@ -618,7 +674,7 @@ Discord is optional. The first local demo does not depend on it. For current por
 4. Leave privileged Message Content Intent disabled. The bot accepts slash commands, buttons, and explicit mentions; it does not read unrestricted channel conversations.
 5. Create `dq-alerts`, `dq-triage`, and a private `dq-ops-private` channel. Keep `dq-alerts` incident-only, send summaries and interactive investigation output to `dq-triage`, and reserve `dq-ops-private` for approval and execution-boundary status. Enable Developer Mode in Discord to copy server/channel IDs.
 6. Populate `DISCORD_BOT_TOKEN`, `DISCORD_GUILD_ID`, `DISCORD_ALERTS_CHANNEL_ID`, `DISCORD_TRIAGE_CHANNEL_ID`, and `DISCORD_OPS_CHANNEL_ID` in `infra/.env`. Optionally set `DISCORD_OPERATOR_UI_URL` and `DISCORD_APPROVER_ROLE_IDS`.
-7. Configure a strong `CONTROL_PLANE_APPROVAL_TOKEN` for approval operations. Keep operator channels private; Discord channel organization is not complete application RBAC.
+7. Configure the shared `CONTROL_PLANE_APPROVAL_TOKEN` in the API and bot for protected operations, including heuristic Ask/Copilot and triage. Keep operator channels private; Discord channel organization is not complete application RBAC.
 8. Start the API and bot, then inspect logs:
 
 ```text
@@ -938,6 +994,8 @@ The October 13 desktop acceptance also corrected latest daily snapshot selection
 
 They are historical snapshots. They do not imply that the current provider account is healthy, every optional integration is enabled, or every machine can reproduce a fresh installation without environment work. Test counts change as the suite grows; there is intentionally no unverified coverage/build badge here.
 
+Pre-reset ledgers and media are historical. See [fresh v1 acceptance](datasentry-v1-acceptance.md) for inspected code/operational runs, the schema-contract correction, storage recovery, and live operator evidence. The pre-fix false schema alerts and failed tasks were retained, not deleted or hidden by weakening the checker. Clean-clone, post-commit, and remote CI gates remain separate from an earlier local run.
+
 The [README documentation verification record](readme_acceptance.md) tracks source checks, Airflow acceptance, local browser rendering, and the isolated fresh-clone test separately so one form of evidence is not substituted for another.
 
 ## Security and operational boundaries
@@ -945,7 +1003,7 @@ The [README documentation verification record](readme_acceptance.md) tracks sour
 - Use synthetic data for external-model demonstrations. Do not send customer records, personal information, credentials, or raw environment state to a provider.
 - Keep `.env`, generated auth files, local artifacts, and logs out of public commits. Review screenshots and error output before sharing.
 - The Celery worker's Docker socket mount is privileged host access in practice. Keep this local; use a more isolated execution boundary for a shared deployment.
-- Several infrastructure ports are published without loopback-only bindings. Protect the host network; do not expose this Compose stack directly to the internet.
+- All published host ports bind to `127.0.0.1`. Protect the host and Docker socket; do not expose this Compose stack directly to the internet or treat loopback as user authentication.
 - Guarded SQL restricts statement behavior, table access, date scope, and row limits. Model-written SQL is a proposal, not execution authority.
 - Tool allowlists and budgets are enforced by application policy, not by asking a model to behave.
 - Reports show confidence and missing evidence; confidence is not a guarantee of correctness.
@@ -968,10 +1026,13 @@ The [README documentation verification record](readme_acceptance.md) tracks sour
 | Raw present, mart missing | DAG `20`, dbt logs and selected business date | Asking an LLM to invent a pipeline failure cause |
 | Anomaly check skipped | Minimum available history in the DQ contract | Reporting skipped checks as successful checks |
 | Healthy task but DQ warning | Scenario ground truth and stored check results | Equating task success with trustworthy data |
+| S3 bucket PUT `500` / `no free volumes` | Allocated physical-volume count versus the volume server's `-max`, bucket growth policy, and master/filer/S3 logs; see [storage capacity](#seaweedfs-volume-capacity) | Assuming free disk bytes mean free volume slots, deleting buckets/volumes, or claiming a fix without a rerun |
 | Bucket empty | Its actual writer and whether a relevant run occurred | Assuming all five buckets must fill on every run |
 | No lineage/report | dbt artifact upload or triage run for that specific alert | Displaying another alert's report as a substitute |
 | Discord command missing | Guild ID, command sync, scopes, permissions and API logs | Enabling privileged Message Content Intent unnecessarily |
-| API approval denied | Shared token configuration, identity and request state | Bypassing the approval guard |
+| Protected API call denied, including heuristic Ask/triage | `503`: missing server token; `401`: missing/wrong caller token; check server-side configuration and exact non-redirecting API URL | Bypassing the guard, following redirects, or putting the token in browser variables |
+| Daily summary says `No quality data yet` | `availability`, selected `dt`, and whether any DQ results/open alerts exist | Treating empty request success as a healthy result or suppressing a dependency error |
+| Unexpected schema alerts on initialized tables | Retained pre-fix findings, bootstrap/contract UTC types and default expressions, then a fresh schema-DAG result | Weakening checker severity, disabling defaults, deleting old alerts, or claiming the correction passed before rerun |
 | Gemini connection/DNS failure | Credential-free preflight from `dq_runner`, not just the host | Calling it a billing/quota rejection without provider evidence |
 | Gemini authentication/billing failure | Key's project, account status and actual error category | Retrying with every available paid provider |
 | Gemini quota/rate limit | Provider error details, quota window and current account limits | Treating a screenshot of limits as proof a request was accepted |
@@ -981,9 +1042,15 @@ The [README documentation verification record](readme_acceptance.md) tracks sour
 
 After a failure, retain the original run ID and logs before retrying. Retrying an operational date can replace data; retrying an LLM can spend money. Do not use destructive cleanup as the first troubleshooting step.
 
+### SeaweedFS volume capacity
+
+SeaweedFS physical-volume slots and free disk bytes are separate limits. The reported pre-fix `bucketPut` HTTP `500` occurred with all 20 slots allocated under `-max=20`, despite about 836 GB free. Five bucket collections can each grow seven physical volumes by default; see the official [SeaweedFS S3 API FAQ](https://github.com/seaweedfs/seaweedfs/wiki/S3-API-FAQ#can-not-upload-due-to-no-free-volumes-left).
+
+Compose sets the volume server to `-max=64`. This changes a volume-count ceiling, not disk capacity; a configuration edit alone is not runtime proof. The [v1 ledger](datasentry-v1-acceptance.md) records the retained failed PUTs, service recreate without deleting data, and subsequent successful quality/evidence runs. Inspect effective startup arguments, allocation counts, and free bytes when diagnosing a new failure. Do not delete volumes or reduce retention to make a demo pass.
+
 ## Stopping and restarting
 
-Pause DAG `00` if you do not want a scheduled run during your next session. Let active work finish or handle it explicitly, then stop containers without removing data:
+Leave both DAG `00` and reconciler `90_06` paused after a manual demo. If the acceptance override was used, complete its [restore procedure](#temporary-manual-only-acceptance) before shutdown. Let active work finish or handle uncertain outcomes explicitly, then stop containers without removing data:
 
 ```text
 docker compose --env-file infra/.env -f infra/docker-compose.yml --profile api --profile web --profile discord stop
@@ -1007,6 +1074,17 @@ Start the core stack again with `up -d` from local setup. Start only the optiona
 | Optional real AI | A strict provider response with limits | Provider/model, usage, fallback state and cost estimate |
 
 The checked-in demo set covers the Airflow graph, CH-UI, Streamlit alerts, persisted triage UI, S3 artifact inventory, Discord formatter output, MCP tool inventory, and the Next.js operator UI. Captions identify rendered inventories or formatter output that are not native client screenshots. Regenerate them only from a ready local stack; do not substitute mock images for operational evidence.
+
+### Future live demo recording
+
+The published three-minute video and existing screenshots are historical, not a new DataSentry v1 recording. This runbook is for a future real capture; no recording or acceptance result is implied.
+
+1. Confirm readiness, localhost-only exposure, matching server-side token configuration, and heuristic/no-LLM settings. Use the temporary manual-only procedure above; confirm effective schedules before manual work. Hide secrets, tokens, personal data, and full environment output.
+2. Choose reviewed, unused synthetic scopes. For a recovery story, use a valid registered saved source and a supported fault; if deliberately preparing fixtures with `90_07`, label that segment as synthetic fault setup, not repair. Do not regenerate baseline data and present it as recovery. If no valid source exists, record **Source unavailable** and stop the repair path.
+3. Capture the real incident and evidence in Discord/Streamlit, then **Review Fix**, the pinned source/date/runbook, **Approve Plan**, and the separate **Run Approved Fix** confirmation. Retain the same Alert Ref, plan hash, approval ID, execution ID, and `90_05` DagRun ID across the sequence. Label cuts, waits, and any separate sessions.
+4. Show execution/task outcomes and stored business validation separately. Run **Check Again**, inspect the new `90_03` result, and confirm Resolve with a reason only while scoped PASS evidence is fresh. A blocked, failed, or unknown outcome stays visible; do not splice it into a successful repair.
+5. Show empty daily data as **No quality data yet**, not health. Keep the reconciler labelled paused/not enabled. If an external model is separately authorized, identify the actual provider response and retained usage; a stored report or heuristic response is not a new paid call.
+6. Retain run IDs, task states, retries, durations, logs, validation results, and warnings with the capture. Review captions and footage for secrets, preserve original failures, and restore the flag to `false` with both `00` and `90_06` paused. Keep the existing historical media unchanged until a new recording is actually captured and reviewed; publication is a separate action.
 
 ### Local demo screenshots
 
@@ -1119,7 +1197,7 @@ certification or proof of remediation execution. See the
 
 ## Operational limits
 
-This is a local synthetic-data reference implementation. Approval, execution, verification and closure are separate. The legacy ClickHouse backfill queue is not transactional; the PostgreSQL exact-scope action path has stronger coordination. Published pipeline and revalidation results must be inspected independently. Full-pipeline baseline regeneration used in an acceptance fixture is not autonomous AI repair. Mobile/two-human acceptance remains separate from desktop proof.
+This is a local synthetic-data reference implementation. Approval, execution, verification and closure are separate. PostgreSQL is authoritative for current approvals and recovery; historical ClickHouse approvals remain projections/history and require review before the new recovery path. Recovery uses pinned sources, not baseline regeneration. Cross-table publication is not atomic, direct warehouse writers can bypass platform coordination, and uncertain outcomes need reconciliation. Inspect execution and business validation independently. Mobile/two-human acceptance remains separate from desktop proof. See [recovery operations and upgrade steps](recovery-workflow.md).
 
 ## Glossary
 

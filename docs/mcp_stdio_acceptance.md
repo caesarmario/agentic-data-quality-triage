@@ -5,6 +5,8 @@ Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 
 # MCP Stdio Acceptance
 
+> Historical acceptance: this record predates the owner-authorized [fresh demo reset](demo-reset.md) on 16 October 2026. The reset does not retain the runtime rows, messages, or logs cited below. This document is not proof that those records remain in the current local stack.
+
 ## Verified Scope
 
 On 2026-09-30, the local MCP server was exercised through a real Python MCP

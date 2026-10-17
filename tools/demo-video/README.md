@@ -16,6 +16,12 @@ See [the delivery and regeneration guide](../../docs/demo-video.md) for chapter 
 - `media-verification.json`: measured output contract and artifact hash.
 - `scripts/`: asset preparation, local source checks, rendering and media verification.
 
+## Recorded Diagram Provenance
+
+The existing walkthrough is a recorded documentary composition and predates the evidence-driven recovery workflow. Its architecture and data-model views are frozen copies of the original `HEAD` SVGs in `recorded-diagrams/`; their recorded SHA-256 values remain the provenance boundary. They are intentionally separate from the regenerated current diagrams in `docs/diagrams/`.
+
+`npm run prepare:assets` verifies the pinned hashes and copies these archived SVGs into the Remotion public assets. It must not substitute current repository diagrams or imply that recovery behavior, controls, or runtime were present in the recorded video. The existing movie and its public URL are unchanged.
+
 ## Local Commands
 
 From this directory, with Node.js 22+ and npm:

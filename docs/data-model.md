@@ -4,7 +4,7 @@
 
 Repository contract, not a live database dump. Includes every application-owned `dq` ClickHouse table/view and `dq_control` PostgreSQL table defined under `infra/init`, after filename-ordered ALTER migrations, plus dbt model derivation. Airflow internal tables are deliberately excluded.
 
-**Inventory:** 15 ClickHouse tables, 1 ClickHouse view, 12 PostgreSQL tables; 399 catalog fields (including inherited view fields), 5 enforced foreign keys, 2 dbt models.
+**Inventory:** 15 ClickHouse tables, 1 ClickHouse view, 20 PostgreSQL tables; 460 catalog fields (including inherited view fields), 11 enforced foreign keys, 2 dbt models.
 
 ![Data model overview](diagrams/data-model-overview.svg)
 
@@ -53,7 +53,7 @@ parent_run_id and alert identity correlate context with memory. Temporary contex
 
 ![Approvals / two distinct stores](diagrams/erd-approvals.svg)
 
-No connector is drawn because these two approval tables are not declared counterparts or FK-linked replicas. The backfill/API path still uses legacy ClickHouse approvals; the approved-action dispatcher uses PostgreSQL control. PostgreSQL advisory locking in parts of the legacy path does not turn ClickHouse into a transactional store.
+PostgreSQL is authoritative for current approval decisions and execution claims. ClickHouse retains history and receives projections, without a cross-store FK. Idempotent legacy import preserves available identifiers/history but does not grant pinned-source recovery eligibility.
 
 ### Resolution / scoped revalidation
 
@@ -91,6 +91,12 @@ These tables have independent PKs, not a declared relational parent-child chain.
 
 The message registry correlates to alerts through alert_key. transport/author_id are included after the idempotent bot-delivery ALTERs; legacy_webhook remains a historical default, not an active architecture recommendation.
 
+### Recovery / pinned sources and publication
+
+![Recovery / pinned sources and publication](diagrams/erd-recovery-publication.svg)
+
+Only PostgreSQL-declared foreign keys are shown. Recovery plans reference incident and approval records; executions reference plans; publication rows reference the dataset/partition revision; legacy approval projection rows reference approval requests. Snapshots and recovery outbox events have no declared FK.
+
 ## dbt And View Semantics
 
 `raw_orders -> stg_orders -> fct_orders_daily` is dbt derivation. Staging filters `is_test = 0` and the requested date window, casts types, and computes `net_amount_usd = gross_amount_usd - discount_usd - refund_amount_usd`. The mart groups by `(dt, country, channel)`; `order_count` is `count()`, while `distinct_order_count` is `uniqExact(order_id)`. AOV divides gross amount by distinct orders. These are not SQL foreign keys.
@@ -103,11 +109,17 @@ The dbt project config uses incremental `insert_overwrite`, `MergeTree()` and `d
 
 | Child Column | Referenced Column | Delete / Update | Source |
 |---|---|---|---|
+| `dq_control.approval_legacy_imports.request_id` | `dq_control.approval_requests.request_id` | NO ACTION / NO ACTION | [infra/init/postgres/11_legacy_approval_control.sql:6](../infra/init/postgres/11_legacy_approval_control.sql#L6) |
+| `dq_control.approval_projection_outbox.request_id` | `dq_control.approval_requests.request_id` | NO ACTION / NO ACTION | [infra/init/postgres/11_legacy_approval_control.sql:13](../infra/init/postgres/11_legacy_approval_control.sql#L13) |
 | `dq_control.incident_outbox.alert_key` | `dq_control.incident_controls.alert_key` | NO ACTION / NO ACTION | [infra/init/postgres/03_incident_resolution.sql:41](../infra/init/postgres/03_incident_resolution.sql#L41) |
 | `dq_control.incident_resolution_decisions.alert_key` | `dq_control.incident_controls.alert_key` | NO ACTION / NO ACTION | [infra/init/postgres/03_incident_resolution.sql:34](../infra/init/postgres/03_incident_resolution.sql#L34) |
 | `dq_control.incident_resolution_decisions.request_id` | `dq_control.incident_revalidations.request_id` | NO ACTION / NO ACTION | [infra/init/postgres/03_incident_resolution.sql:35](../infra/init/postgres/03_incident_resolution.sql#L35) |
 | `dq_control.incident_revalidation_keys.request_id` | `dq_control.incident_revalidations.request_id` | NO ACTION / NO ACTION | [infra/init/postgres/03_incident_resolution.sql:26](../infra/init/postgres/03_incident_resolution.sql#L26) |
 | `dq_control.incident_revalidations.alert_key` | `dq_control.incident_controls.alert_key` | NO ACTION / NO ACTION | [infra/init/postgres/03_incident_resolution.sql:15](../infra/init/postgres/03_incident_resolution.sql#L15) |
+| `dq_control.partition_publications.dataset,partition_dt` | `dq_control.partition_revisions.dataset,partition_dt` | NO ACTION / NO ACTION | [infra/init/postgres/10_partition_publication.sql:33](../infra/init/postgres/10_partition_publication.sql#L33) |
+| `dq_control.recovery_executions.plan_id` | `dq_control.recovery_plans.plan_id` | NO ACTION / NO ACTION | [infra/init/postgres/09_evidence_driven_recovery.sql:32](../infra/init/postgres/09_evidence_driven_recovery.sql#L32) |
+| `dq_control.recovery_plans.approval_request_id` | `dq_control.approval_requests.request_id` | NO ACTION / NO ACTION | [infra/init/postgres/09_evidence_driven_recovery.sql:26](../infra/init/postgres/09_evidence_driven_recovery.sql#L26) |
+| `dq_control.recovery_plans.alert_key` | `dq_control.incident_controls.alert_key` | NO ACTION / NO ACTION | [infra/init/postgres/09_evidence_driven_recovery.sql:23](../infra/init/postgres/09_evidence_driven_recovery.sql#L23) |
 
 ## Logical Correlations
 
@@ -612,11 +624,57 @@ dbt: [warehouse/dbt/models/staging/stg_orders.sql:1](../warehouse/dbt/models/sta
 | `incident_scenario` | `String` | no | - | `` | [infra/init/clickhouse/01_orders_tables.sql:63](../infra/init/clickhouse/01_orders_tables.sql#L63) |
 | `transformed_at` | `DateTime64(3, 'UTC')` | no | `now64(3)` | `DEFAULT now64(3)` | [infra/init/clickhouse/01_orders_tables.sql:64](../infra/init/clickhouse/01_orders_tables.sql#L64) |
 
+### `dq_control.approval_legacy_imports`
+
+Store: **postgresql**. Kind: **table**. Fields: **4**.
+
+Sources: [infra/init/postgres/11_legacy_approval_control.sql:5](../infra/init/postgres/11_legacy_approval_control.sql#L5).
+
+| Column | SQL Type | Nullable | Effective Default | Bootstrap Declaration / Modifiers | Source |
+|---|---|---|---|---|---|
+| `request_id` | `TEXT` | no | - | PK member; single-column unique; `PRIMARY KEY REFERENCES dq_control.approval_requests(request_id)` | [infra/init/postgres/11_legacy_approval_control.sql:6](../infra/init/postgres/11_legacy_approval_control.sql#L6) |
+| `source_hash` | `CHAR(64)` | no | - | `NOT NULL CHECK (source_hash ~ '^[0-9a-f]{64}$')` | [infra/init/postgres/11_legacy_approval_control.sql:7](../infra/init/postgres/11_legacy_approval_control.sql#L7) |
+| `history_json` | `JSONB` | no | - | `NOT NULL CHECK (jsonb_typeof(history_json) = 'array')` | [infra/init/postgres/11_legacy_approval_control.sql:8](../infra/init/postgres/11_legacy_approval_control.sql#L8) |
+| `imported_at` | `TIMESTAMPTZ` | no | `now()` | `NOT NULL DEFAULT now()` | [infra/init/postgres/11_legacy_approval_control.sql:9](../infra/init/postgres/11_legacy_approval_control.sql#L9) |
+
+Effective PostgreSQL constraints:
+
+- `approval_legacy_imports_pkey`: `PRIMARY KEY (request_id)` ([infra/init/postgres/11_legacy_approval_control.sql:6](../infra/init/postgres/11_legacy_approval_control.sql#L6)).
+- `approval_legacy_imports_request_id_fkey`: `FOREIGN KEY (request_id) REFERENCES dq_control.approval_requests(request_id)` ([infra/init/postgres/11_legacy_approval_control.sql:6](../infra/init/postgres/11_legacy_approval_control.sql#L6)).
+- `approval_legacy_imports_source_hash_check`: `CHECK (source_hash ~ '^[0-9a-f]{64}$')` ([infra/init/postgres/11_legacy_approval_control.sql:7](../infra/init/postgres/11_legacy_approval_control.sql#L7)).
+- `approval_legacy_imports_history_json_check`: `CHECK (jsonb_typeof(history_json) = 'array')` ([infra/init/postgres/11_legacy_approval_control.sql:8](../infra/init/postgres/11_legacy_approval_control.sql#L8)).
+
+### `dq_control.approval_projection_outbox`
+
+Store: **postgresql**. Kind: **table**. Fields: **6**.
+
+Sources: [infra/init/postgres/11_legacy_approval_control.sql:12](../infra/init/postgres/11_legacy_approval_control.sql#L12).
+
+| Column | SQL Type | Nullable | Effective Default | Bootstrap Declaration / Modifiers | Source |
+|---|---|---|---|---|---|
+| `request_id` | `TEXT` | no | - | PK member; `NOT NULL REFERENCES dq_control.approval_requests(request_id)` | [infra/init/postgres/11_legacy_approval_control.sql:13](../infra/init/postgres/11_legacy_approval_control.sql#L13) |
+| `version` | `INTEGER` | no | - | PK member; `NOT NULL CHECK (version > 0)` | [infra/init/postgres/11_legacy_approval_control.sql:14](../infra/init/postgres/11_legacy_approval_control.sql#L14) |
+| `payload_json` | `JSONB` | no | - | `NOT NULL CHECK (jsonb_typeof(payload_json) = 'object')` | [infra/init/postgres/11_legacy_approval_control.sql:15](../infra/init/postgres/11_legacy_approval_control.sql#L15) |
+| `audit_done` | `BOOLEAN` | no | `false` | `NOT NULL DEFAULT false` | [infra/init/postgres/11_legacy_approval_control.sql:16](../infra/init/postgres/11_legacy_approval_control.sql#L16) |
+| `projection_done` | `BOOLEAN` | no | `false` | `NOT NULL DEFAULT false` | [infra/init/postgres/11_legacy_approval_control.sql:17](../infra/init/postgres/11_legacy_approval_control.sql#L17) |
+| `created_at` | `TIMESTAMPTZ` | no | `now()` | `NOT NULL DEFAULT now()` | [infra/init/postgres/11_legacy_approval_control.sql:18](../infra/init/postgres/11_legacy_approval_control.sql#L18) |
+
+Effective PostgreSQL constraints:
+
+- `approval_projection_outbox_request_id_fkey`: `FOREIGN KEY (request_id) REFERENCES dq_control.approval_requests(request_id)` ([infra/init/postgres/11_legacy_approval_control.sql:13](../infra/init/postgres/11_legacy_approval_control.sql#L13)).
+- `approval_projection_outbox_version_check`: `CHECK (version > 0)` ([infra/init/postgres/11_legacy_approval_control.sql:14](../infra/init/postgres/11_legacy_approval_control.sql#L14)).
+- `approval_projection_outbox_payload_json_check`: `CHECK (jsonb_typeof(payload_json) = 'object')` ([infra/init/postgres/11_legacy_approval_control.sql:15](../infra/init/postgres/11_legacy_approval_control.sql#L15)).
+- `approval_projection_outbox_pkey`: `PRIMARY KEY (request_id, version)` ([infra/init/postgres/11_legacy_approval_control.sql:19](../infra/init/postgres/11_legacy_approval_control.sql#L19)).
+
+Explicit indexes (including partial uniqueness predicates):
+
+- `approval_projection_pending_idx`: `(request_id, version) WHERE NOT (audit_done AND projection_done)` ([infra/init/postgres/11_legacy_approval_control.sql:22](../infra/init/postgres/11_legacy_approval_control.sql#L22)).
+
 ### `dq_control.approval_requests`
 
 Store: **postgresql**. Kind: **table**. Fields: **19**.
 
-Sources: [infra/init/postgres/01_approval_control_store.sql:11](../infra/init/postgres/01_approval_control_store.sql#L11); [infra/init/postgres/01_approval_control_store.sql:46](../infra/init/postgres/01_approval_control_store.sql#L46); [infra/init/postgres/01_approval_control_store.sql:53](../infra/init/postgres/01_approval_control_store.sql#L53); [infra/init/postgres/01_approval_control_store.sql:65](../infra/init/postgres/01_approval_control_store.sql#L65).
+Sources: [infra/init/postgres/01_approval_control_store.sql:11](../infra/init/postgres/01_approval_control_store.sql#L11); [infra/init/postgres/01_approval_control_store.sql:46](../infra/init/postgres/01_approval_control_store.sql#L46); [infra/init/postgres/01_approval_control_store.sql:53](../infra/init/postgres/01_approval_control_store.sql#L53); [infra/init/postgres/01_approval_control_store.sql:65](../infra/init/postgres/01_approval_control_store.sql#L65); [infra/init/postgres/09_evidence_driven_recovery.sql:3](../infra/init/postgres/09_evidence_driven_recovery.sql#L3); [infra/init/postgres/09_evidence_driven_recovery.sql:5](../infra/init/postgres/09_evidence_driven_recovery.sql#L5).
 
 | Column | SQL Type | Nullable | Effective Default | Bootstrap Declaration / Modifiers | Source |
 |---|---|---|---|---|---|
@@ -644,7 +702,6 @@ Effective PostgreSQL constraints:
 
 - `approval_requests_pkey`: `PRIMARY KEY (request_id)` ([infra/init/postgres/01_approval_control_store.sql:12](../infra/init/postgres/01_approval_control_store.sql#L12)).
 - `approval_requests_idempotency_hash_key`: `UNIQUE (idempotency_hash)` ([infra/init/postgres/01_approval_control_store.sql:13](../infra/init/postgres/01_approval_control_store.sql#L13)).
-- `approval_requests_action_type_check`: `CHECK (action_type IN ('backfill', 'rerun_dbt', 'create_ticket', 'post_notification'))` ([infra/init/postgres/01_approval_control_store.sql:15](../infra/init/postgres/01_approval_control_store.sql#L15)).
 - `approval_requests_scope_json_check`: `CHECK (jsonb_typeof(scope_json) = 'object')` ([infra/init/postgres/01_approval_control_store.sql:17](../infra/init/postgres/01_approval_control_store.sql#L17)).
 - `approval_requests_requested_by_check`: `CHECK (length(requested_by) BETWEEN 1 AND 200)` ([infra/init/postgres/01_approval_control_store.sql:18](../infra/init/postgres/01_approval_control_store.sql#L18)).
 - `approval_requests_reason_check`: `CHECK (length(reason) BETWEEN 5 AND 2000)` ([infra/init/postgres/01_approval_control_store.sql:19](../infra/init/postgres/01_approval_control_store.sql#L19)).
@@ -655,6 +712,7 @@ Effective PostgreSQL constraints:
 - `approval_decision_fields`: `CHECK ( (status = 'pending' AND decided_at IS NULL) OR (status IN ('approved', 'rejected') AND decided_by IS NOT NULL AND decided_at IS NOT NULL) OR (status = 'cancelled' AND (decided_at IS NULL OR decided_by IS NOT NULL)) )` ([infra/init/postgres/01_approval_control_store.sql:35](../infra/init/postgres/01_approval_control_store.sql#L35)).
 - `approval_claim_fields`: `CHECK ( (execution_status = 'not_started' AND execution_run_id IS NULL) OR (status = 'approved' AND execution_run_id IS NOT NULL) )` ([infra/init/postgres/01_approval_control_store.sql:40](../infra/init/postgres/01_approval_control_store.sql#L40)).
 - `approval_request_generation_positive`: `CHECK (request_generation BETWEEN 1 AND 1000000)` ([infra/init/postgres/01_approval_control_store.sql:65](../infra/init/postgres/01_approval_control_store.sql#L65)).
+- `approval_requests_action_type_check`: `CHECK (action_type IN ('backfill','rerun_dbt','create_ticket','post_notification','recover_partition'))` ([infra/init/postgres/09_evidence_driven_recovery.sql:5](../infra/init/postgres/09_evidence_driven_recovery.sql#L5)).
 
 Explicit indexes (including partial uniqueness predicates):
 
@@ -665,6 +723,8 @@ Applied idempotent migration declarations:
 - `ALTER TABLE dq_control.approval_requests ADD COLUMN IF NOT EXISTS request_generation INTEGER;` ([infra/init/postgres/01_approval_control_store.sql:46](../infra/init/postgres/01_approval_control_store.sql#L46)).
 - `ALTER TABLE dq_control.approval_requests ALTER COLUMN request_generation SET DEFAULT 1, ALTER COLUMN request_generation SET NOT NULL;` ([infra/init/postgres/01_approval_control_store.sql:53](../infra/init/postgres/01_approval_control_store.sql#L53)).
 - `ALTER TABLE dq_control.approval_requests ADD CONSTRAINT approval_request_generation_positive CHECK (request_generation BETWEEN 1 AND 1000000);` ([infra/init/postgres/01_approval_control_store.sql:65](../infra/init/postgres/01_approval_control_store.sql#L65)).
+- `ALTER TABLE dq_control.approval_requests DROP CONSTRAINT IF EXISTS approval_requests_action_type_check;` ([infra/init/postgres/09_evidence_driven_recovery.sql:3](../infra/init/postgres/09_evidence_driven_recovery.sql#L3)).
+- `ALTER TABLE dq_control.approval_requests ADD CONSTRAINT approval_requests_action_type_check CHECK (action_type IN ('backfill','rerun_dbt','create_ticket','post_notification','recover_partition'));` ([infra/init/postgres/09_evidence_driven_recovery.sql:5](../infra/init/postgres/09_evidence_driven_recovery.sql#L5)).
 
 ### `dq_control.discord_copilot_requests`
 
@@ -942,6 +1002,166 @@ Effective PostgreSQL constraints:
 - `incident_revalidations_alert_key_fkey`: `FOREIGN KEY (alert_key) REFERENCES dq_control.incident_controls(alert_key)` ([infra/init/postgres/03_incident_resolution.sql:15](../infra/init/postgres/03_incident_resolution.sql#L15)).
 - `incident_revalidations_idempotency_hash_key`: `UNIQUE (idempotency_hash)` ([infra/init/postgres/03_incident_resolution.sql:17](../infra/init/postgres/03_incident_resolution.sql#L17)).
 - `incident_revalidations_status_check`: `CHECK (status IN ('queued','running','pass','blocked','error','expired'))` ([infra/init/postgres/03_incident_resolution.sql:18](../infra/init/postgres/03_incident_resolution.sql#L18)).
+
+### `dq_control.partition_publications`
+
+Store: **postgresql**. Kind: **table**. Fields: **16**.
+
+Sources: [infra/init/postgres/10_partition_publication.sql:12](../infra/init/postgres/10_partition_publication.sql#L12); [infra/init/postgres/10_partition_publication.sql:37](../infra/init/postgres/10_partition_publication.sql#L37); [infra/init/postgres/10_partition_publication.sql:39](../infra/init/postgres/10_partition_publication.sql#L39).
+
+| Column | SQL Type | Nullable | Effective Default | Bootstrap Declaration / Modifiers | Source |
+|---|---|---|---|---|---|
+| `publication_id` | `uuid` | no | - | PK member; single-column unique; `PRIMARY KEY` | [infra/init/postgres/10_partition_publication.sql:13](../infra/init/postgres/10_partition_publication.sql#L13) |
+| `execution_id` | `text` | no | - | `NOT NULL` | [infra/init/postgres/10_partition_publication.sql:14](../infra/init/postgres/10_partition_publication.sql#L14) |
+| `dataset` | `text` | no | - | `NOT NULL` | [infra/init/postgres/10_partition_publication.sql:15](../infra/init/postgres/10_partition_publication.sql#L15) |
+| `partition_dt` | `date` | no | - | `NOT NULL` | [infra/init/postgres/10_partition_publication.sql:16](../infra/init/postgres/10_partition_publication.sql#L16) |
+| `target_table` | `text` | no | - | `NOT NULL` | [infra/init/postgres/10_partition_publication.sql:17](../infra/init/postgres/10_partition_publication.sql#L17) |
+| `stage_table` | `text` | no | - | `NOT NULL` | [infra/init/postgres/10_partition_publication.sql:18](../infra/init/postgres/10_partition_publication.sql#L18) |
+| `backup_table` | `text` | no | - | `NOT NULL` | [infra/init/postgres/10_partition_publication.sql:19](../infra/init/postgres/10_partition_publication.sql#L19) |
+| `expected_revision` | `bigint` | no | - | `NOT NULL` | [infra/init/postgres/10_partition_publication.sql:20](../infra/init/postgres/10_partition_publication.sql#L20) |
+| `expected_watermark` | `text` | no | - | `NOT NULL` | [infra/init/postgres/10_partition_publication.sql:21](../infra/init/postgres/10_partition_publication.sql#L21) |
+| `before_fingerprint` | `text` | no | - | `NOT NULL` | [infra/init/postgres/10_partition_publication.sql:22](../infra/init/postgres/10_partition_publication.sql#L22) |
+| `staged_fingerprint` | `text` | no | - | `NOT NULL` | [infra/init/postgres/10_partition_publication.sql:23](../infra/init/postgres/10_partition_publication.sql#L23) |
+| `status` | `text` | no | - | `NOT NULL CHECK (status IN ( 'prepared', 'publishing', 'published', 'unknown', 'compensating', 'compensated', 'aborted' ))` | [infra/init/postgres/10_partition_publication.sql:24](../infra/init/postgres/10_partition_publication.sql#L24) |
+| `intent` | `text` | no | - | `NOT NULL CHECK (intent IN ('daily', 'recovery', 'simulation_empty'))` | [infra/init/postgres/10_partition_publication.sql:28](../infra/init/postgres/10_partition_publication.sql#L28) |
+| `metadata` | `jsonb` | no | `'{}'::jsonb` | `NOT NULL DEFAULT '{}'::jsonb` | [infra/init/postgres/10_partition_publication.sql:29](../infra/init/postgres/10_partition_publication.sql#L29) |
+| `created_at` | `timestamptz` | no | `now()` | `NOT NULL DEFAULT now()` | [infra/init/postgres/10_partition_publication.sql:30](../infra/init/postgres/10_partition_publication.sql#L30) |
+| `updated_at` | `timestamptz` | no | `now()` | `NOT NULL DEFAULT now()` | [infra/init/postgres/10_partition_publication.sql:31](../infra/init/postgres/10_partition_publication.sql#L31) |
+
+Effective PostgreSQL constraints:
+
+- `partition_publications_pkey`: `PRIMARY KEY (publication_id)` ([infra/init/postgres/10_partition_publication.sql:13](../infra/init/postgres/10_partition_publication.sql#L13)).
+- `partition_publications_intent_check`: `CHECK (intent IN ('daily', 'recovery', 'simulation_empty'))` ([infra/init/postgres/10_partition_publication.sql:28](../infra/init/postgres/10_partition_publication.sql#L28)).
+- `partition_publications_execution_id_target_table_partition_dt_key`: `UNIQUE (execution_id, target_table, partition_dt)` ([infra/init/postgres/10_partition_publication.sql:32](../infra/init/postgres/10_partition_publication.sql#L32)).
+- `partition_publications_dataset_partition_dt_key`: `FOREIGN KEY (dataset, partition_dt) REFERENCES dq_control.partition_revisions (dataset, partition_dt)` ([infra/init/postgres/10_partition_publication.sql:33](../infra/init/postgres/10_partition_publication.sql#L33)).
+- `partition_publications_status_check`: `CHECK (status IN ('prepared','publishing','published','unknown','compensating','compensated','aborted'))` ([infra/init/postgres/10_partition_publication.sql:39](../infra/init/postgres/10_partition_publication.sql#L39)).
+
+Explicit indexes (including partial uniqueness predicates):
+
+- `partition_publications_unresolved`: `(dataset, partition_dt) WHERE status IN ('prepared', 'publishing', 'unknown', 'compensating')` ([infra/init/postgres/10_partition_publication.sql:43](../infra/init/postgres/10_partition_publication.sql#L43)).
+
+Applied idempotent migration declarations:
+
+- `ALTER TABLE dq_control.partition_publications DROP CONSTRAINT IF EXISTS partition_publications_status_check;` ([infra/init/postgres/10_partition_publication.sql:37](../infra/init/postgres/10_partition_publication.sql#L37)).
+- `ALTER TABLE dq_control.partition_publications ADD CONSTRAINT partition_publications_status_check CHECK (status IN ('prepared','publishing','published','unknown','compensating','compensated','aborted'));` ([infra/init/postgres/10_partition_publication.sql:39](../infra/init/postgres/10_partition_publication.sql#L39)).
+
+### `dq_control.partition_revisions`
+
+Store: **postgresql**. Kind: **table**. Fields: **4**.
+
+Sources: [infra/init/postgres/10_partition_publication.sql:4](../infra/init/postgres/10_partition_publication.sql#L4).
+
+| Column | SQL Type | Nullable | Effective Default | Bootstrap Declaration / Modifiers | Source |
+|---|---|---|---|---|---|
+| `dataset` | `text` | no | - | PK member; `NOT NULL` | [infra/init/postgres/10_partition_publication.sql:5](../infra/init/postgres/10_partition_publication.sql#L5) |
+| `partition_dt` | `date` | no | - | PK member; `NOT NULL` | [infra/init/postgres/10_partition_publication.sql:6](../infra/init/postgres/10_partition_publication.sql#L6) |
+| `revision` | `bigint` | no | `0` | `NOT NULL DEFAULT 0 CHECK (revision >= 0)` | [infra/init/postgres/10_partition_publication.sql:7](../infra/init/postgres/10_partition_publication.sql#L7) |
+| `watermark` | `text` | no | `''` | `NOT NULL DEFAULT ''` | [infra/init/postgres/10_partition_publication.sql:8](../infra/init/postgres/10_partition_publication.sql#L8) |
+
+Effective PostgreSQL constraints:
+
+- `partition_revisions_revision_check`: `CHECK (revision >= 0)` ([infra/init/postgres/10_partition_publication.sql:7](../infra/init/postgres/10_partition_publication.sql#L7)).
+- `partition_revisions_pkey`: `PRIMARY KEY (dataset, partition_dt)` ([infra/init/postgres/10_partition_publication.sql:9](../infra/init/postgres/10_partition_publication.sql#L9)).
+
+### `dq_control.recovery_executions`
+
+Store: **postgresql**. Kind: **table**. Fields: **6**.
+
+Sources: [infra/init/postgres/09_evidence_driven_recovery.sql:30](../infra/init/postgres/09_evidence_driven_recovery.sql#L30).
+
+| Column | SQL Type | Nullable | Effective Default | Bootstrap Declaration / Modifiers | Source |
+|---|---|---|---|---|---|
+| `execution_id` | `UUID` | no | - | PK member; single-column unique; `PRIMARY KEY` | [infra/init/postgres/09_evidence_driven_recovery.sql:31](../infra/init/postgres/09_evidence_driven_recovery.sql#L31) |
+| `plan_id` | `UUID` | no | - | single-column unique; `NOT NULL UNIQUE REFERENCES dq_control.recovery_plans(plan_id)` | [infra/init/postgres/09_evidence_driven_recovery.sql:32](../infra/init/postgres/09_evidence_driven_recovery.sql#L32) |
+| `status` | `TEXT` | no | - | `NOT NULL CHECK (status IN ('queued','running','succeeded','failed','unknown'))` | [infra/init/postgres/09_evidence_driven_recovery.sql:33](../infra/init/postgres/09_evidence_driven_recovery.sql#L33) |
+| `record` | `JSONB` | no | - | `NOT NULL` | [infra/init/postgres/09_evidence_driven_recovery.sql:34](../infra/init/postgres/09_evidence_driven_recovery.sql#L34) |
+| `created_at` | `TIMESTAMPTZ` | no | `now()` | `NOT NULL DEFAULT now()` | [infra/init/postgres/09_evidence_driven_recovery.sql:35](../infra/init/postgres/09_evidence_driven_recovery.sql#L35) |
+| `updated_at` | `TIMESTAMPTZ` | no | `now()` | `NOT NULL DEFAULT now()` | [infra/init/postgres/09_evidence_driven_recovery.sql:36](../infra/init/postgres/09_evidence_driven_recovery.sql#L36) |
+
+Effective PostgreSQL constraints:
+
+- `recovery_executions_pkey`: `PRIMARY KEY (execution_id)` ([infra/init/postgres/09_evidence_driven_recovery.sql:31](../infra/init/postgres/09_evidence_driven_recovery.sql#L31)).
+- `recovery_executions_plan_id_key`: `UNIQUE (plan_id)` ([infra/init/postgres/09_evidence_driven_recovery.sql:32](../infra/init/postgres/09_evidence_driven_recovery.sql#L32)).
+- `recovery_executions_plan_id_fkey`: `FOREIGN KEY (plan_id) REFERENCES dq_control.recovery_plans(plan_id)` ([infra/init/postgres/09_evidence_driven_recovery.sql:32](../infra/init/postgres/09_evidence_driven_recovery.sql#L32)).
+- `recovery_executions_status_check`: `CHECK (status IN ('queued','running','succeeded','failed','unknown'))` ([infra/init/postgres/09_evidence_driven_recovery.sql:33](../infra/init/postgres/09_evidence_driven_recovery.sql#L33)).
+
+### `dq_control.recovery_outbox`
+
+Store: **postgresql**. Kind: **table**. Fields: **11**.
+
+Sources: [infra/init/postgres/09_evidence_driven_recovery.sql:38](../infra/init/postgres/09_evidence_driven_recovery.sql#L38); [infra/init/postgres/09_evidence_driven_recovery.sql:49](../infra/init/postgres/09_evidence_driven_recovery.sql#L49); [infra/init/postgres/09_evidence_driven_recovery.sql:50](../infra/init/postgres/09_evidence_driven_recovery.sql#L50); [infra/init/postgres/09_evidence_driven_recovery.sql:51](../infra/init/postgres/09_evidence_driven_recovery.sql#L51).
+
+| Column | SQL Type | Nullable | Effective Default | Bootstrap Declaration / Modifiers | Source |
+|---|---|---|---|---|---|
+| `event_id` | `UUID` | no | - | PK member; single-column unique; `PRIMARY KEY` | [infra/init/postgres/09_evidence_driven_recovery.sql:39](../infra/init/postgres/09_evidence_driven_recovery.sql#L39) |
+| `aggregate_id` | `TEXT` | no | - | `NOT NULL` | [infra/init/postgres/09_evidence_driven_recovery.sql:40](../infra/init/postgres/09_evidence_driven_recovery.sql#L40) |
+| `event_type` | `TEXT` | no | - | `NOT NULL` | [infra/init/postgres/09_evidence_driven_recovery.sql:41](../infra/init/postgres/09_evidence_driven_recovery.sql#L41) |
+| `payload` | `JSONB` | no | - | `NOT NULL` | [infra/init/postgres/09_evidence_driven_recovery.sql:42](../infra/init/postgres/09_evidence_driven_recovery.sql#L42) |
+| `audit_done` | `BOOLEAN` | no | `false` | `NOT NULL DEFAULT false` | [infra/init/postgres/09_evidence_driven_recovery.sql:43](../infra/init/postgres/09_evidence_driven_recovery.sql#L43) |
+| `delivery_done` | `BOOLEAN` | no | `false` | `NOT NULL DEFAULT false` | [infra/init/postgres/09_evidence_driven_recovery.sql:44](../infra/init/postgres/09_evidence_driven_recovery.sql#L44) |
+| `error_code` | `TEXT` | no | `''` | `NOT NULL DEFAULT ''` | [infra/init/postgres/09_evidence_driven_recovery.sql:45](../infra/init/postgres/09_evidence_driven_recovery.sql#L45) |
+| `created_at` | `TIMESTAMPTZ` | no | `now()` | `NOT NULL DEFAULT now()` | [infra/init/postgres/09_evidence_driven_recovery.sql:46](../infra/init/postgres/09_evidence_driven_recovery.sql#L46) |
+| `delivery_state` | `TEXT` | no | `'pending'` | `NOT NULL DEFAULT 'pending'` | [infra/init/postgres/09_evidence_driven_recovery.sql:49](../infra/init/postgres/09_evidence_driven_recovery.sql#L49) |
+| `message_id` | `TEXT` | no | `''` | `NOT NULL DEFAULT ''` | [infra/init/postgres/09_evidence_driven_recovery.sql:50](../infra/init/postgres/09_evidence_driven_recovery.sql#L50) |
+| `author_id` | `TEXT` | no | `''` | `NOT NULL DEFAULT ''` | [infra/init/postgres/09_evidence_driven_recovery.sql:51](../infra/init/postgres/09_evidence_driven_recovery.sql#L51) |
+
+Effective PostgreSQL constraints:
+
+- `recovery_outbox_pkey`: `PRIMARY KEY (event_id)` ([infra/init/postgres/09_evidence_driven_recovery.sql:39](../infra/init/postgres/09_evidence_driven_recovery.sql#L39)).
+- `recovery_outbox_aggregate_id_event_type_key`: `UNIQUE (aggregate_id, event_type)` ([infra/init/postgres/09_evidence_driven_recovery.sql:47](../infra/init/postgres/09_evidence_driven_recovery.sql#L47)).
+
+Applied idempotent migration declarations:
+
+- `ALTER TABLE dq_control.recovery_outbox ADD COLUMN IF NOT EXISTS delivery_state TEXT NOT NULL DEFAULT 'pending';` ([infra/init/postgres/09_evidence_driven_recovery.sql:49](../infra/init/postgres/09_evidence_driven_recovery.sql#L49)).
+- `ALTER TABLE dq_control.recovery_outbox ADD COLUMN IF NOT EXISTS message_id TEXT NOT NULL DEFAULT '';` ([infra/init/postgres/09_evidence_driven_recovery.sql:50](../infra/init/postgres/09_evidence_driven_recovery.sql#L50)).
+- `ALTER TABLE dq_control.recovery_outbox ADD COLUMN IF NOT EXISTS author_id TEXT NOT NULL DEFAULT '';` ([infra/init/postgres/09_evidence_driven_recovery.sql:51](../infra/init/postgres/09_evidence_driven_recovery.sql#L51)).
+
+### `dq_control.recovery_plans`
+
+Store: **postgresql**. Kind: **table**. Fields: **7**.
+
+Sources: [infra/init/postgres/09_evidence_driven_recovery.sql:21](../infra/init/postgres/09_evidence_driven_recovery.sql#L21).
+
+| Column | SQL Type | Nullable | Effective Default | Bootstrap Declaration / Modifiers | Source |
+|---|---|---|---|---|---|
+| `plan_id` | `UUID` | no | - | PK member; single-column unique; `PRIMARY KEY` | [infra/init/postgres/09_evidence_driven_recovery.sql:22](../infra/init/postgres/09_evidence_driven_recovery.sql#L22) |
+| `alert_key` | `TEXT` | no | - | `NOT NULL REFERENCES dq_control.incident_controls(alert_key)` | [infra/init/postgres/09_evidence_driven_recovery.sql:23](../infra/init/postgres/09_evidence_driven_recovery.sql#L23) |
+| `incident_revision` | `BIGINT` | no | - | `NOT NULL CHECK (incident_revision > 0)` | [infra/init/postgres/09_evidence_driven_recovery.sql:24](../infra/init/postgres/09_evidence_driven_recovery.sql#L24) |
+| `plan_hash` | `CHAR(64)` | no | - | single-column unique; `NOT NULL UNIQUE` | [infra/init/postgres/09_evidence_driven_recovery.sql:25](../infra/init/postgres/09_evidence_driven_recovery.sql#L25) |
+| `approval_request_id` | `TEXT` | no | - | single-column unique; `NOT NULL UNIQUE REFERENCES dq_control.approval_requests(request_id)` | [infra/init/postgres/09_evidence_driven_recovery.sql:26](../infra/init/postgres/09_evidence_driven_recovery.sql#L26) |
+| `record` | `JSONB` | no | - | `NOT NULL` | [infra/init/postgres/09_evidence_driven_recovery.sql:27](../infra/init/postgres/09_evidence_driven_recovery.sql#L27) |
+| `created_at` | `TIMESTAMPTZ` | no | `now()` | `NOT NULL DEFAULT now()` | [infra/init/postgres/09_evidence_driven_recovery.sql:28](../infra/init/postgres/09_evidence_driven_recovery.sql#L28) |
+
+Effective PostgreSQL constraints:
+
+- `recovery_plans_pkey`: `PRIMARY KEY (plan_id)` ([infra/init/postgres/09_evidence_driven_recovery.sql:22](../infra/init/postgres/09_evidence_driven_recovery.sql#L22)).
+- `recovery_plans_alert_key_fkey`: `FOREIGN KEY (alert_key) REFERENCES dq_control.incident_controls(alert_key)` ([infra/init/postgres/09_evidence_driven_recovery.sql:23](../infra/init/postgres/09_evidence_driven_recovery.sql#L23)).
+- `recovery_plans_incident_revision_check`: `CHECK (incident_revision > 0)` ([infra/init/postgres/09_evidence_driven_recovery.sql:24](../infra/init/postgres/09_evidence_driven_recovery.sql#L24)).
+- `recovery_plans_plan_hash_key`: `UNIQUE (plan_hash)` ([infra/init/postgres/09_evidence_driven_recovery.sql:25](../infra/init/postgres/09_evidence_driven_recovery.sql#L25)).
+- `recovery_plans_approval_request_id_key`: `UNIQUE (approval_request_id)` ([infra/init/postgres/09_evidence_driven_recovery.sql:26](../infra/init/postgres/09_evidence_driven_recovery.sql#L26)).
+- `recovery_plans_approval_request_id_fkey`: `FOREIGN KEY (approval_request_id) REFERENCES dq_control.approval_requests(request_id)` ([infra/init/postgres/09_evidence_driven_recovery.sql:26](../infra/init/postgres/09_evidence_driven_recovery.sql#L26)).
+
+### `dq_control.source_snapshots`
+
+Store: **postgresql**. Kind: **table**. Fields: **7**.
+
+Sources: [infra/init/postgres/09_evidence_driven_recovery.sql:9](../infra/init/postgres/09_evidence_driven_recovery.sql#L9).
+
+| Column | SQL Type | Nullable | Effective Default | Bootstrap Declaration / Modifiers | Source |
+|---|---|---|---|---|---|
+| `snapshot_id` | `TEXT` | no | - | PK member; single-column unique; `PRIMARY KEY` | [infra/init/postgres/09_evidence_driven_recovery.sql:10](../infra/init/postgres/09_evidence_driven_recovery.sql#L10) |
+| `dataset` | `TEXT` | no | - | `NOT NULL CHECK (dataset = 'orders')` | [infra/init/postgres/09_evidence_driven_recovery.sql:11](../infra/init/postgres/09_evidence_driven_recovery.sql#L11) |
+| `dt` | `DATE` | no | - | `NOT NULL` | [infra/init/postgres/09_evidence_driven_recovery.sql:12](../infra/init/postgres/09_evidence_driven_recovery.sql#L12) |
+| `kind` | `TEXT` | no | - | `NOT NULL CHECK (kind IN ('upstream','landing'))` | [infra/init/postgres/09_evidence_driven_recovery.sql:13](../infra/init/postgres/09_evidence_driven_recovery.sql#L13) |
+| `checksum` | `CHAR(64)` | no | - | `NOT NULL` | [infra/init/postgres/09_evidence_driven_recovery.sql:14](../infra/init/postgres/09_evidence_driven_recovery.sql#L14) |
+| `manifest` | `JSONB` | no | - | `NOT NULL` | [infra/init/postgres/09_evidence_driven_recovery.sql:15](../infra/init/postgres/09_evidence_driven_recovery.sql#L15) |
+| `created_at` | `TIMESTAMPTZ` | no | `now()` | `NOT NULL DEFAULT now()` | [infra/init/postgres/09_evidence_driven_recovery.sql:16](../infra/init/postgres/09_evidence_driven_recovery.sql#L16) |
+
+Effective PostgreSQL constraints:
+
+- `source_snapshots_pkey`: `PRIMARY KEY (snapshot_id)` ([infra/init/postgres/09_evidence_driven_recovery.sql:10](../infra/init/postgres/09_evidence_driven_recovery.sql#L10)).
+- `source_snapshots_dataset_check`: `CHECK (dataset = 'orders')` ([infra/init/postgres/09_evidence_driven_recovery.sql:11](../infra/init/postgres/09_evidence_driven_recovery.sql#L11)).
+- `source_snapshots_kind_check`: `CHECK (kind IN ('upstream','landing'))` ([infra/init/postgres/09_evidence_driven_recovery.sql:13](../infra/init/postgres/09_evidence_driven_recovery.sql#L13)).
 
 ## Reproducibility And Limits
 

@@ -18,12 +18,34 @@ The overview intentionally collapses individual tables, tool nodes, supervisor i
 
 ## Approval Is Not Execution
 
-Two approval stores coexist. Do not describe them as one migrated transactional workflow:
+PostgreSQL is authoritative for current approval decisions and execution claims. ClickHouse retains legacy history and receives projections; it is not a second decision authority:
 
-- **Legacy backfill approval:** `dq.approval_requests` in ClickHouse is used by the existing approval API/queue and [backfill dispatcher](../dags/90_dag_dq_platform_backfill_dispatcher.py). Requests retain dates, target DAG, scope parameters, decisions and execution status. Some decision paths use PostgreSQL advisory locking and incident controls; that does not give ClickHouse relational constraints or atomic cross-store transactions. See [queue implementation](../agent/tools/approval_queue.py) and [dispatcher runtime](../dags/dq_platform/backfill_dispatcher.py).
+- **Legacy backfill approval:** Historical `dq.approval_requests` rows remain in ClickHouse. An idempotent importer preserves identifiers and available history in the control store. Imported requests have `legacy_review_required` eligibility; they do not acquire pinned-source recovery authorization. New generic backfill previews remain simulation-only, not recovery plans. See [queue implementation](../agent/tools/approval_queue.py), [importer](../scripts/migrate_legacy_approvals.py), and [dispatcher](../dags/dq_platform/backfill_dispatcher.py).
 - **Transactional approved actions:** `dq_control.approval_requests` in PostgreSQL contains PK/UNIQUE/CHECK constraints, versioned decisions, exact scope, execution claims and outcomes. The [approved-action dispatcher](../dags/90_02_dag_dq_platform_approved_actions.py) uses [guarded action executors](../agent/tools/approved_actions.py). A value allowed in a DDL CHECK does not prove that every action is wired through every client. Provider-specific ticket/notification delivery also requires explicit configuration/readiness.
 - **Human approval:** grants permission for the exact stored request. It is not proof of execution, business recovery or successful downstream delivery. Cancellation is a pre-dispatch authorization operation, not an Airflow stop/clear API. Prefer the current implementation over older [cancellation notes](approval_cancellation_semantics.md), whose local-store discussion predates later advisory-lock/control additions.
 - **Airflow execution:** dispatch and child-run completion are distinct states. `dispatched` does not mean the target workload finished, and successful execution does not imply the incident is healthy. Ambiguous external delivery may require manual reconciliation rather than automatic retry.
+
+## Evidence-Driven Recovery
+
+Daily generation captures immutable upstream input before injecting a delivery fault, then captures the actual landing input. Seed identity does not depend on the scenario. Existing history is not regenerated. Recovery reads the exact registered upstream snapshot and checksum approved in the plan; it cannot select a new source, seed a baseline, change a scenario, or use arbitrary SQL.
+
+```mermaid
+flowchart LR
+  I[Incident and trusted context] --> P[Server-selected immutable plan]
+  S[Versioned source and active contracts] --> P
+  P --> A[Human approval]
+  A --> C[Separate execution confirmation]
+  C --> D[Airflow recovery DAG 90_05]
+  D --> B[Isolated staging and backup journal]
+  B --> R[Approved partition replacement]
+  R --> V[Deterministic verification]
+  V --> H[Fresh Resolve check and human closure]
+  Q[Reconciler DAG 90_06] -. reads existing execution .-> D
+```
+
+The three runbooks are raw replay, derived rebuild, and replay plus rebuild. The model may explain or suggest; deterministic eligibility selects the minimum action and pins source, incident revision, contract/code hashes, targets, validation, and compensation scope. Schema drift and unavailable/invalid sources remain manual/blocked. The same bounded `IncidentContextBundle` feeds LangGraph and Copilot; simulation labels and evaluator ground truth are excluded.
+
+All platform writers coordinate per dataset/date in PostgreSQL. Raw and dbt publication clone actual target structure, build isolated outputs, validate the approved scope, journal backups, and replace partitions. Each replacement is atomic, but the group of tables is not. A partial or unknown outcome is visible and must be reconciled before any further write. [Contracts, APIs, and acceptance](recovery-workflow.md).
 
 ## Resolve Is Not Repair
 

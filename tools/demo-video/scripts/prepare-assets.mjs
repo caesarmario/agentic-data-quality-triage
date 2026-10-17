@@ -21,6 +21,15 @@ export const captures = [
   {id: 'incident-queue', source: 'streamlit-english-light-20261013.jpg', crop: [379, 540, 890, 540]},
 ];
 
+const recordedDiagrams = [
+  {name: 'architecture.svg', source: 'tools/demo-video/recorded-diagrams/architecture.svg',
+    sha256: '494a72260ac466a6faffd31dc651187aa19b4b682660ff386ef00aafe53e8a30',
+    recordedFrom: 'HEAD:docs/diagrams/architecture.svg', videoRegions: [[40,184,610,145],[688,184,632,145]]},
+  {name: 'data-model-overview.svg', source: 'tools/demo-video/recorded-diagrams/data-model-overview.svg',
+    sha256: '1b8d16d20e91f3a75f5462d9dd86ab22d72ffef6a1de1bfbd4207dbd7e2800da',
+    recordedFrom: 'HEAD:docs/diagrams/data-model-overview.svg', videoRegions: [[35,184,748,215],[815,184,431,215]]},
+];
+
 export const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const captureRoot = process.argv.find((arg) => arg.startsWith('--captures='))?.slice(11);
 const manifestPath = path.join(tooling, 'asset-provenance.json');
@@ -55,14 +64,17 @@ for (const entry of captures) {
     inspectedBeforeUse: true});
 }
 const diagrams = [];
-for (const name of ['architecture.svg', 'data-model-overview.svg']) {
+for (const diagram of recordedDiagrams) {
   if (process.argv.includes('--captures-only')) continue;
-  const bytes = await fs.readFile(path.join(root, 'docs/diagrams', name));
+  const bytes = await fs.readFile(path.join(root, diagram.source));
   if (bytes.toString().includes('<script')) throw new Error('Scripted SVG not permitted');
-  await fs.writeFile(path.join(publicDir, name), bytes);
-  diagrams.push({path: `docs/diagrams/${name}`, sha256: hash(bytes), label: 'Repository diagram; not a UI capture',
-    videoRegions: name === 'architecture.svg' ? [[40,184,610,145],[688,184,632,145]] : [[35,184,748,215],[815,184,431,215]],
-    treatment: 'Guided detail views of the original SVG; original labels unchanged.'});
+  const actual = hash(bytes);
+  if (actual !== diagram.sha256) throw new Error(`Recorded diagram hash changed: ${diagram.source}`);
+  await fs.writeFile(path.join(publicDir, diagram.name), bytes);
+  diagrams.push({path: diagram.source, sha256: actual, recordedFrom: diagram.recordedFrom,
+    label: 'Recorded repository diagram; predates evidence-driven recovery; not a UI capture',
+    videoRegions: diagram.videoRegions,
+    treatment: 'Frozen recorded SVG bytes; guided detail views preserve original labels.'});
 }
 await fs.writeFile(manifestPath, JSON.stringify({
   schemaVersion: 1,

@@ -13,12 +13,12 @@
     ]
   },
   "counts": {
-    "objects": 28,
+    "objects": 36,
     "clickhouse_tables": 15,
     "clickhouse_views": 1,
-    "postgresql_tables": 12,
-    "columns": 399,
-    "foreign_keys": 5,
+    "postgresql_tables": 20,
+    "columns": 460,
+    "foreign_keys": 11,
     "dbt_models": 2
   },
   "objects": [
@@ -7556,6 +7556,424 @@
       }
     },
     {
+      "name": "dq_control.approval_legacy_imports",
+      "store": "postgresql",
+      "kind": "table",
+      "source": {
+        "path": "infra/init/postgres/11_legacy_approval_control.sql",
+        "line": 5,
+        "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L5"
+      },
+      "sources": [
+        {
+          "path": "infra/init/postgres/11_legacy_approval_control.sql",
+          "line": 5,
+          "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L5"
+        }
+      ],
+      "columns": [
+        {
+          "name": "request_id",
+          "type": "TEXT",
+          "nullable": false,
+          "default": null,
+          "modifiers": "PRIMARY KEY REFERENCES dq_control.approval_requests(request_id)",
+          "declaration": "request_id TEXT PRIMARY KEY REFERENCES dq_control.approval_requests(request_id)",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 6,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L6"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/11_legacy_approval_control.sql",
+              "line": 6,
+              "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L6"
+            }
+          ],
+          "primary_key": true,
+          "unique": true
+        },
+        {
+          "name": "source_hash",
+          "type": "CHAR(64)",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL CHECK (source_hash ~ '^[0-9a-f]{64}$')",
+          "declaration": "source_hash CHAR(64) NOT NULL CHECK (source_hash ~ '^[0-9a-f]{64}$')",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 7,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L7"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/11_legacy_approval_control.sql",
+              "line": 7,
+              "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L7"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "history_json",
+          "type": "JSONB",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL CHECK (jsonb_typeof(history_json) = 'array')",
+          "declaration": "history_json JSONB NOT NULL CHECK (jsonb_typeof(history_json) = 'array')",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 8,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L8"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/11_legacy_approval_control.sql",
+              "line": 8,
+              "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L8"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "imported_at",
+          "type": "TIMESTAMPTZ",
+          "nullable": false,
+          "default": "now()",
+          "modifiers": "NOT NULL DEFAULT now()",
+          "declaration": "imported_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 9,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L9"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/11_legacy_approval_control.sql",
+              "line": 9,
+              "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L9"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        }
+      ],
+      "constraints": [
+        {
+          "name": "approval_legacy_imports_pkey",
+          "kind": "primary_key",
+          "sql": "PRIMARY KEY (request_id)",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 6,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L6"
+          }
+        },
+        {
+          "name": "approval_legacy_imports_request_id_fkey",
+          "kind": "foreign_key",
+          "sql": "FOREIGN KEY (request_id) REFERENCES dq_control.approval_requests(request_id)",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 6,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L6"
+          }
+        },
+        {
+          "name": "approval_legacy_imports_source_hash_check",
+          "kind": "check",
+          "sql": "CHECK (source_hash ~ '^[0-9a-f]{64}$')",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 7,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L7"
+          }
+        },
+        {
+          "name": "approval_legacy_imports_history_json_check",
+          "kind": "check",
+          "sql": "CHECK (jsonb_typeof(history_json) = 'array')",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 8,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L8"
+          }
+        }
+      ],
+      "indexes": [],
+      "migrations": [],
+      "relationships": [
+        {
+          "kind": "foreign_key",
+          "from": "dq_control.approval_legacy_imports",
+          "to": "dq_control.approval_requests",
+          "from_columns": [
+            "request_id"
+          ],
+          "to_columns": [
+            "request_id"
+          ],
+          "enforced": true,
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "constraint": "approval_legacy_imports_request_id_fkey",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 6,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L6"
+          }
+        }
+      ],
+      "primary_key": [
+        "request_id"
+      ],
+      "unique_constraints": [],
+      "engine": null,
+      "partition_by": null,
+      "order_by": null,
+      "ttl": null
+    },
+    {
+      "name": "dq_control.approval_projection_outbox",
+      "store": "postgresql",
+      "kind": "table",
+      "source": {
+        "path": "infra/init/postgres/11_legacy_approval_control.sql",
+        "line": 12,
+        "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L12"
+      },
+      "sources": [
+        {
+          "path": "infra/init/postgres/11_legacy_approval_control.sql",
+          "line": 12,
+          "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L12"
+        }
+      ],
+      "columns": [
+        {
+          "name": "request_id",
+          "type": "TEXT",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL REFERENCES dq_control.approval_requests(request_id)",
+          "declaration": "request_id TEXT NOT NULL REFERENCES dq_control.approval_requests(request_id)",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 13,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L13"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/11_legacy_approval_control.sql",
+              "line": 13,
+              "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L13"
+            }
+          ],
+          "primary_key": true,
+          "unique": false
+        },
+        {
+          "name": "version",
+          "type": "INTEGER",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL CHECK (version > 0)",
+          "declaration": "version INTEGER NOT NULL CHECK (version > 0)",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 14,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L14"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/11_legacy_approval_control.sql",
+              "line": 14,
+              "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L14"
+            }
+          ],
+          "primary_key": true,
+          "unique": false
+        },
+        {
+          "name": "payload_json",
+          "type": "JSONB",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL CHECK (jsonb_typeof(payload_json) = 'object')",
+          "declaration": "payload_json JSONB NOT NULL CHECK (jsonb_typeof(payload_json) = 'object')",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 15,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L15"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/11_legacy_approval_control.sql",
+              "line": 15,
+              "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L15"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "audit_done",
+          "type": "BOOLEAN",
+          "nullable": false,
+          "default": "false",
+          "modifiers": "NOT NULL DEFAULT false",
+          "declaration": "audit_done BOOLEAN NOT NULL DEFAULT false",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 16,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L16"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/11_legacy_approval_control.sql",
+              "line": 16,
+              "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L16"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "projection_done",
+          "type": "BOOLEAN",
+          "nullable": false,
+          "default": "false",
+          "modifiers": "NOT NULL DEFAULT false",
+          "declaration": "projection_done BOOLEAN NOT NULL DEFAULT false",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 17,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L17"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/11_legacy_approval_control.sql",
+              "line": 17,
+              "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L17"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "created_at",
+          "type": "TIMESTAMPTZ",
+          "nullable": false,
+          "default": "now()",
+          "modifiers": "NOT NULL DEFAULT now()",
+          "declaration": "created_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 18,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L18"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/11_legacy_approval_control.sql",
+              "line": 18,
+              "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L18"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        }
+      ],
+      "constraints": [
+        {
+          "name": "approval_projection_outbox_request_id_fkey",
+          "kind": "foreign_key",
+          "sql": "FOREIGN KEY (request_id) REFERENCES dq_control.approval_requests(request_id)",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 13,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L13"
+          }
+        },
+        {
+          "name": "approval_projection_outbox_version_check",
+          "kind": "check",
+          "sql": "CHECK (version > 0)",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 14,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L14"
+          }
+        },
+        {
+          "name": "approval_projection_outbox_payload_json_check",
+          "kind": "check",
+          "sql": "CHECK (jsonb_typeof(payload_json) = 'object')",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 15,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L15"
+          }
+        },
+        {
+          "name": "approval_projection_outbox_pkey",
+          "kind": "primary_key",
+          "sql": "PRIMARY KEY (request_id, version)",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 19,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L19"
+          }
+        }
+      ],
+      "indexes": [
+        {
+          "name": "approval_projection_pending_idx",
+          "unique": false,
+          "definition": "(request_id, version) WHERE NOT (audit_done AND projection_done)",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 22,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L22"
+          }
+        }
+      ],
+      "migrations": [],
+      "relationships": [
+        {
+          "kind": "foreign_key",
+          "from": "dq_control.approval_projection_outbox",
+          "to": "dq_control.approval_requests",
+          "from_columns": [
+            "request_id"
+          ],
+          "to_columns": [
+            "request_id"
+          ],
+          "enforced": true,
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "constraint": "approval_projection_outbox_request_id_fkey",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 13,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L13"
+          }
+        }
+      ],
+      "primary_key": [
+        "request_id",
+        "version"
+      ],
+      "unique_constraints": [],
+      "engine": null,
+      "partition_by": null,
+      "order_by": null,
+      "ttl": null
+    },
+    {
       "name": "dq_control.approval_requests",
       "store": "postgresql",
       "kind": "table",
@@ -7584,6 +8002,16 @@
           "path": "infra/init/postgres/01_approval_control_store.sql",
           "line": 65,
           "href": "../../infra/init/postgres/01_approval_control_store.sql#L65"
+        },
+        {
+          "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+          "line": 3,
+          "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L3"
+        },
+        {
+          "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+          "line": 5,
+          "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L5"
         }
       ],
       "columns": [
@@ -8043,16 +8471,6 @@
           }
         },
         {
-          "name": "approval_requests_action_type_check",
-          "kind": "check",
-          "sql": "CHECK (action_type IN ('backfill', 'rerun_dbt', 'create_ticket', 'post_notification'))",
-          "source": {
-            "path": "infra/init/postgres/01_approval_control_store.sql",
-            "line": 15,
-            "href": "../../infra/init/postgres/01_approval_control_store.sql#L15"
-          }
-        },
-        {
           "name": "approval_requests_scope_json_check",
           "kind": "check",
           "sql": "CHECK (jsonb_typeof(scope_json) = 'object')",
@@ -8151,6 +8569,16 @@
             "line": 65,
             "href": "../../infra/init/postgres/01_approval_control_store.sql#L65"
           }
+        },
+        {
+          "name": "approval_requests_action_type_check",
+          "kind": "check",
+          "sql": "CHECK (action_type IN ('backfill','rerun_dbt','create_ticket','post_notification','recover_partition'))",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 5,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L5"
+          }
         }
       ],
       "indexes": [
@@ -8189,9 +8617,85 @@
             "line": 65,
             "href": "../../infra/init/postgres/01_approval_control_store.sql#L65"
           }
+        },
+        {
+          "sql": "ALTER TABLE dq_control.approval_requests DROP CONSTRAINT IF EXISTS approval_requests_action_type_check;",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 3,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L3"
+          }
+        },
+        {
+          "sql": "ALTER TABLE dq_control.approval_requests ADD CONSTRAINT approval_requests_action_type_check CHECK (action_type IN ('backfill','rerun_dbt','create_ticket','post_notification','recover_partition'));",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 5,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L5"
+          }
         }
       ],
       "relationships": [
+        {
+          "kind": "foreign_key",
+          "from": "dq_control.approval_legacy_imports",
+          "to": "dq_control.approval_requests",
+          "from_columns": [
+            "request_id"
+          ],
+          "to_columns": [
+            "request_id"
+          ],
+          "enforced": true,
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "constraint": "approval_legacy_imports_request_id_fkey",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 6,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L6"
+          }
+        },
+        {
+          "kind": "foreign_key",
+          "from": "dq_control.approval_projection_outbox",
+          "to": "dq_control.approval_requests",
+          "from_columns": [
+            "request_id"
+          ],
+          "to_columns": [
+            "request_id"
+          ],
+          "enforced": true,
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "constraint": "approval_projection_outbox_request_id_fkey",
+          "source": {
+            "path": "infra/init/postgres/11_legacy_approval_control.sql",
+            "line": 13,
+            "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L13"
+          }
+        },
+        {
+          "kind": "foreign_key",
+          "from": "dq_control.recovery_plans",
+          "to": "dq_control.approval_requests",
+          "from_columns": [
+            "approval_request_id"
+          ],
+          "to_columns": [
+            "request_id"
+          ],
+          "enforced": true,
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "constraint": "recovery_plans_approval_request_id_fkey",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 26,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L26"
+          }
+        },
         {
           "kind": "logical_correlation",
           "enforced": false,
@@ -10318,6 +10822,26 @@
           }
         },
         {
+          "kind": "foreign_key",
+          "from": "dq_control.recovery_plans",
+          "to": "dq_control.incident_controls",
+          "from_columns": [
+            "alert_key"
+          ],
+          "to_columns": [
+            "alert_key"
+          ],
+          "enforced": true,
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "constraint": "recovery_plans_alert_key_fkey",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 23,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L23"
+          }
+        },
+        {
           "kind": "logical_correlation",
           "enforced": false,
           "from": "dq_control.approval_requests",
@@ -11317,6 +11841,1769 @@
       "partition_by": null,
       "order_by": null,
       "ttl": null
+    },
+    {
+      "name": "dq_control.partition_publications",
+      "store": "postgresql",
+      "kind": "table",
+      "source": {
+        "path": "infra/init/postgres/10_partition_publication.sql",
+        "line": 12,
+        "href": "../../infra/init/postgres/10_partition_publication.sql#L12"
+      },
+      "sources": [
+        {
+          "path": "infra/init/postgres/10_partition_publication.sql",
+          "line": 12,
+          "href": "../../infra/init/postgres/10_partition_publication.sql#L12"
+        },
+        {
+          "path": "infra/init/postgres/10_partition_publication.sql",
+          "line": 37,
+          "href": "../../infra/init/postgres/10_partition_publication.sql#L37"
+        },
+        {
+          "path": "infra/init/postgres/10_partition_publication.sql",
+          "line": 39,
+          "href": "../../infra/init/postgres/10_partition_publication.sql#L39"
+        }
+      ],
+      "columns": [
+        {
+          "name": "publication_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "modifiers": "PRIMARY KEY",
+          "declaration": "publication_id uuid PRIMARY KEY",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 13,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L13"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 13,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L13"
+            }
+          ],
+          "primary_key": true,
+          "unique": true
+        },
+        {
+          "name": "execution_id",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "execution_id text NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 14,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L14"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 14,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L14"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "dataset",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "dataset text NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 15,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L15"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 15,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L15"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "partition_dt",
+          "type": "date",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "partition_dt date NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 16,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L16"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 16,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L16"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "target_table",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "target_table text NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 17,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L17"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 17,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L17"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "stage_table",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "stage_table text NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 18,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L18"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 18,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L18"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "backup_table",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "backup_table text NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 19,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L19"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 19,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L19"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "expected_revision",
+          "type": "bigint",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "expected_revision bigint NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 20,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L20"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 20,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L20"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "expected_watermark",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "expected_watermark text NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 21,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L21"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 21,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L21"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "before_fingerprint",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "before_fingerprint text NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 22,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L22"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 22,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L22"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "staged_fingerprint",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "staged_fingerprint text NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 23,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L23"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 23,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L23"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL CHECK (status IN ( 'prepared', 'publishing', 'published', 'unknown', 'compensating', 'compensated', 'aborted' ))",
+          "declaration": "status text NOT NULL CHECK (status IN ( 'prepared', 'publishing', 'published', 'unknown', 'compensating', 'compensated', 'aborted' ))",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 24,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L24"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 24,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L24"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "intent",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL CHECK (intent IN ('daily', 'recovery', 'simulation_empty'))",
+          "declaration": "intent text NOT NULL CHECK (intent IN ('daily', 'recovery', 'simulation_empty'))",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 28,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L28"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 28,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L28"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "nullable": false,
+          "default": "'{}'::jsonb",
+          "modifiers": "NOT NULL DEFAULT '{}'::jsonb",
+          "declaration": "metadata jsonb NOT NULL DEFAULT '{}'::jsonb",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 29,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L29"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 29,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L29"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "modifiers": "NOT NULL DEFAULT now()",
+          "declaration": "created_at timestamptz NOT NULL DEFAULT now()",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 30,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L30"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 30,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L30"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "modifiers": "NOT NULL DEFAULT now()",
+          "declaration": "updated_at timestamptz NOT NULL DEFAULT now()",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 31,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L31"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 31,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L31"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        }
+      ],
+      "constraints": [
+        {
+          "name": "partition_publications_pkey",
+          "kind": "primary_key",
+          "sql": "PRIMARY KEY (publication_id)",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 13,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L13"
+          }
+        },
+        {
+          "name": "partition_publications_intent_check",
+          "kind": "check",
+          "sql": "CHECK (intent IN ('daily', 'recovery', 'simulation_empty'))",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 28,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L28"
+          }
+        },
+        {
+          "name": "partition_publications_execution_id_target_table_partition_dt_key",
+          "kind": "unique",
+          "sql": "UNIQUE (execution_id, target_table, partition_dt)",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 32,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L32"
+          }
+        },
+        {
+          "name": "partition_publications_dataset_partition_dt_key",
+          "kind": "foreign_key",
+          "sql": "FOREIGN KEY (dataset, partition_dt) REFERENCES dq_control.partition_revisions (dataset, partition_dt)",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 33,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L33"
+          }
+        },
+        {
+          "name": "partition_publications_status_check",
+          "kind": "check",
+          "sql": "CHECK (status IN ('prepared','publishing','published','unknown','compensating','compensated','aborted'))",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 39,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L39"
+          }
+        }
+      ],
+      "indexes": [
+        {
+          "name": "partition_publications_unresolved",
+          "unique": false,
+          "definition": "(dataset, partition_dt) WHERE status IN ('prepared', 'publishing', 'unknown', 'compensating')",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 43,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L43"
+          }
+        }
+      ],
+      "migrations": [
+        {
+          "sql": "ALTER TABLE dq_control.partition_publications DROP CONSTRAINT IF EXISTS partition_publications_status_check;",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 37,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L37"
+          }
+        },
+        {
+          "sql": "ALTER TABLE dq_control.partition_publications ADD CONSTRAINT partition_publications_status_check CHECK (status IN ('prepared','publishing','published','unknown','compensating','compensated','aborted'));",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 39,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L39"
+          }
+        }
+      ],
+      "relationships": [
+        {
+          "kind": "foreign_key",
+          "from": "dq_control.partition_publications",
+          "to": "dq_control.partition_revisions",
+          "from_columns": [
+            "dataset",
+            "partition_dt"
+          ],
+          "to_columns": [
+            "dataset",
+            "partition_dt"
+          ],
+          "enforced": true,
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "constraint": "partition_publications_dataset_partition_dt_key",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 33,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L33"
+          }
+        }
+      ],
+      "primary_key": [
+        "publication_id"
+      ],
+      "unique_constraints": [
+        [
+          "execution_id",
+          "target_table",
+          "partition_dt"
+        ]
+      ],
+      "engine": null,
+      "partition_by": null,
+      "order_by": null,
+      "ttl": null
+    },
+    {
+      "name": "dq_control.partition_revisions",
+      "store": "postgresql",
+      "kind": "table",
+      "source": {
+        "path": "infra/init/postgres/10_partition_publication.sql",
+        "line": 4,
+        "href": "../../infra/init/postgres/10_partition_publication.sql#L4"
+      },
+      "sources": [
+        {
+          "path": "infra/init/postgres/10_partition_publication.sql",
+          "line": 4,
+          "href": "../../infra/init/postgres/10_partition_publication.sql#L4"
+        }
+      ],
+      "columns": [
+        {
+          "name": "dataset",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "dataset text NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 5,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L5"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 5,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L5"
+            }
+          ],
+          "primary_key": true,
+          "unique": false
+        },
+        {
+          "name": "partition_dt",
+          "type": "date",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "partition_dt date NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 6,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L6"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 6,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L6"
+            }
+          ],
+          "primary_key": true,
+          "unique": false
+        },
+        {
+          "name": "revision",
+          "type": "bigint",
+          "nullable": false,
+          "default": "0",
+          "modifiers": "NOT NULL DEFAULT 0 CHECK (revision >= 0)",
+          "declaration": "revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0)",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 7,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L7"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 7,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L7"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "watermark",
+          "type": "text",
+          "nullable": false,
+          "default": "''",
+          "modifiers": "NOT NULL DEFAULT ''",
+          "declaration": "watermark text NOT NULL DEFAULT ''",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 8,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L8"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/10_partition_publication.sql",
+              "line": 8,
+              "href": "../../infra/init/postgres/10_partition_publication.sql#L8"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        }
+      ],
+      "constraints": [
+        {
+          "name": "partition_revisions_revision_check",
+          "kind": "check",
+          "sql": "CHECK (revision >= 0)",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 7,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L7"
+          }
+        },
+        {
+          "name": "partition_revisions_pkey",
+          "kind": "primary_key",
+          "sql": "PRIMARY KEY (dataset, partition_dt)",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 9,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L9"
+          }
+        }
+      ],
+      "indexes": [],
+      "migrations": [],
+      "relationships": [
+        {
+          "kind": "foreign_key",
+          "from": "dq_control.partition_publications",
+          "to": "dq_control.partition_revisions",
+          "from_columns": [
+            "dataset",
+            "partition_dt"
+          ],
+          "to_columns": [
+            "dataset",
+            "partition_dt"
+          ],
+          "enforced": true,
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "constraint": "partition_publications_dataset_partition_dt_key",
+          "source": {
+            "path": "infra/init/postgres/10_partition_publication.sql",
+            "line": 33,
+            "href": "../../infra/init/postgres/10_partition_publication.sql#L33"
+          }
+        }
+      ],
+      "primary_key": [
+        "dataset",
+        "partition_dt"
+      ],
+      "unique_constraints": [],
+      "engine": null,
+      "partition_by": null,
+      "order_by": null,
+      "ttl": null
+    },
+    {
+      "name": "dq_control.recovery_executions",
+      "store": "postgresql",
+      "kind": "table",
+      "source": {
+        "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+        "line": 30,
+        "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L30"
+      },
+      "sources": [
+        {
+          "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+          "line": 30,
+          "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L30"
+        }
+      ],
+      "columns": [
+        {
+          "name": "execution_id",
+          "type": "UUID",
+          "nullable": false,
+          "default": null,
+          "modifiers": "PRIMARY KEY",
+          "declaration": "execution_id UUID PRIMARY KEY",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 31,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L31"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 31,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L31"
+            }
+          ],
+          "primary_key": true,
+          "unique": true
+        },
+        {
+          "name": "plan_id",
+          "type": "UUID",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL UNIQUE REFERENCES dq_control.recovery_plans(plan_id)",
+          "declaration": "plan_id UUID NOT NULL UNIQUE REFERENCES dq_control.recovery_plans(plan_id)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 32,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L32"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 32,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L32"
+            }
+          ],
+          "primary_key": false,
+          "unique": true
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL CHECK (status IN ('queued','running','succeeded','failed','unknown'))",
+          "declaration": "status TEXT NOT NULL CHECK (status IN ('queued','running','succeeded','failed','unknown'))",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 33,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L33"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 33,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L33"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "record",
+          "type": "JSONB",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "record JSONB NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 34,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L34"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 34,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L34"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "created_at",
+          "type": "TIMESTAMPTZ",
+          "nullable": false,
+          "default": "now()",
+          "modifiers": "NOT NULL DEFAULT now()",
+          "declaration": "created_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 35,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L35"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 35,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L35"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "updated_at",
+          "type": "TIMESTAMPTZ",
+          "nullable": false,
+          "default": "now()",
+          "modifiers": "NOT NULL DEFAULT now()",
+          "declaration": "updated_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 36,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L36"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 36,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L36"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        }
+      ],
+      "constraints": [
+        {
+          "name": "recovery_executions_pkey",
+          "kind": "primary_key",
+          "sql": "PRIMARY KEY (execution_id)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 31,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L31"
+          }
+        },
+        {
+          "name": "recovery_executions_plan_id_key",
+          "kind": "unique",
+          "sql": "UNIQUE (plan_id)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 32,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L32"
+          }
+        },
+        {
+          "name": "recovery_executions_plan_id_fkey",
+          "kind": "foreign_key",
+          "sql": "FOREIGN KEY (plan_id) REFERENCES dq_control.recovery_plans(plan_id)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 32,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L32"
+          }
+        },
+        {
+          "name": "recovery_executions_status_check",
+          "kind": "check",
+          "sql": "CHECK (status IN ('queued','running','succeeded','failed','unknown'))",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 33,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L33"
+          }
+        }
+      ],
+      "indexes": [],
+      "migrations": [],
+      "relationships": [
+        {
+          "kind": "foreign_key",
+          "from": "dq_control.recovery_executions",
+          "to": "dq_control.recovery_plans",
+          "from_columns": [
+            "plan_id"
+          ],
+          "to_columns": [
+            "plan_id"
+          ],
+          "enforced": true,
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "constraint": "recovery_executions_plan_id_fkey",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 32,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L32"
+          }
+        }
+      ],
+      "primary_key": [
+        "execution_id"
+      ],
+      "unique_constraints": [
+        [
+          "plan_id"
+        ]
+      ],
+      "engine": null,
+      "partition_by": null,
+      "order_by": null,
+      "ttl": null
+    },
+    {
+      "name": "dq_control.recovery_outbox",
+      "store": "postgresql",
+      "kind": "table",
+      "source": {
+        "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+        "line": 38,
+        "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L38"
+      },
+      "sources": [
+        {
+          "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+          "line": 38,
+          "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L38"
+        },
+        {
+          "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+          "line": 49,
+          "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L49"
+        },
+        {
+          "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+          "line": 50,
+          "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L50"
+        },
+        {
+          "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+          "line": 51,
+          "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L51"
+        }
+      ],
+      "columns": [
+        {
+          "name": "event_id",
+          "type": "UUID",
+          "nullable": false,
+          "default": null,
+          "modifiers": "PRIMARY KEY",
+          "declaration": "event_id UUID PRIMARY KEY",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 39,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L39"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 39,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L39"
+            }
+          ],
+          "primary_key": true,
+          "unique": true
+        },
+        {
+          "name": "aggregate_id",
+          "type": "TEXT",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "aggregate_id TEXT NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 40,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L40"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 40,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L40"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "event_type",
+          "type": "TEXT",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "event_type TEXT NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 41,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L41"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 41,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L41"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "payload",
+          "type": "JSONB",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "payload JSONB NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 42,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L42"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 42,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L42"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "audit_done",
+          "type": "BOOLEAN",
+          "nullable": false,
+          "default": "false",
+          "modifiers": "NOT NULL DEFAULT false",
+          "declaration": "audit_done BOOLEAN NOT NULL DEFAULT false",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 43,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L43"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 43,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L43"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "delivery_done",
+          "type": "BOOLEAN",
+          "nullable": false,
+          "default": "false",
+          "modifiers": "NOT NULL DEFAULT false",
+          "declaration": "delivery_done BOOLEAN NOT NULL DEFAULT false",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 44,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L44"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 44,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L44"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "error_code",
+          "type": "TEXT",
+          "nullable": false,
+          "default": "''",
+          "modifiers": "NOT NULL DEFAULT ''",
+          "declaration": "error_code TEXT NOT NULL DEFAULT ''",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 45,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L45"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 45,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L45"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "created_at",
+          "type": "TIMESTAMPTZ",
+          "nullable": false,
+          "default": "now()",
+          "modifiers": "NOT NULL DEFAULT now()",
+          "declaration": "created_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 46,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L46"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 46,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L46"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "delivery_state",
+          "type": "TEXT",
+          "nullable": false,
+          "default": "'pending'",
+          "modifiers": "NOT NULL DEFAULT 'pending'",
+          "declaration": "delivery_state TEXT NOT NULL DEFAULT 'pending'",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 49,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L49"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 49,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L49"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "message_id",
+          "type": "TEXT",
+          "nullable": false,
+          "default": "''",
+          "modifiers": "NOT NULL DEFAULT ''",
+          "declaration": "message_id TEXT NOT NULL DEFAULT ''",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 50,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L50"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 50,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L50"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "author_id",
+          "type": "TEXT",
+          "nullable": false,
+          "default": "''",
+          "modifiers": "NOT NULL DEFAULT ''",
+          "declaration": "author_id TEXT NOT NULL DEFAULT ''",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 51,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L51"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 51,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L51"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        }
+      ],
+      "constraints": [
+        {
+          "name": "recovery_outbox_pkey",
+          "kind": "primary_key",
+          "sql": "PRIMARY KEY (event_id)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 39,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L39"
+          }
+        },
+        {
+          "name": "recovery_outbox_aggregate_id_event_type_key",
+          "kind": "unique",
+          "sql": "UNIQUE (aggregate_id, event_type)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 47,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L47"
+          }
+        }
+      ],
+      "indexes": [],
+      "migrations": [
+        {
+          "sql": "ALTER TABLE dq_control.recovery_outbox ADD COLUMN IF NOT EXISTS delivery_state TEXT NOT NULL DEFAULT 'pending';",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 49,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L49"
+          }
+        },
+        {
+          "sql": "ALTER TABLE dq_control.recovery_outbox ADD COLUMN IF NOT EXISTS message_id TEXT NOT NULL DEFAULT '';",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 50,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L50"
+          }
+        },
+        {
+          "sql": "ALTER TABLE dq_control.recovery_outbox ADD COLUMN IF NOT EXISTS author_id TEXT NOT NULL DEFAULT '';",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 51,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L51"
+          }
+        }
+      ],
+      "relationships": [],
+      "primary_key": [
+        "event_id"
+      ],
+      "unique_constraints": [
+        [
+          "aggregate_id",
+          "event_type"
+        ]
+      ],
+      "engine": null,
+      "partition_by": null,
+      "order_by": null,
+      "ttl": null
+    },
+    {
+      "name": "dq_control.recovery_plans",
+      "store": "postgresql",
+      "kind": "table",
+      "source": {
+        "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+        "line": 21,
+        "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L21"
+      },
+      "sources": [
+        {
+          "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+          "line": 21,
+          "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L21"
+        }
+      ],
+      "columns": [
+        {
+          "name": "plan_id",
+          "type": "UUID",
+          "nullable": false,
+          "default": null,
+          "modifiers": "PRIMARY KEY",
+          "declaration": "plan_id UUID PRIMARY KEY",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 22,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L22"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 22,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L22"
+            }
+          ],
+          "primary_key": true,
+          "unique": true
+        },
+        {
+          "name": "alert_key",
+          "type": "TEXT",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL REFERENCES dq_control.incident_controls(alert_key)",
+          "declaration": "alert_key TEXT NOT NULL REFERENCES dq_control.incident_controls(alert_key)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 23,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L23"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 23,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L23"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "incident_revision",
+          "type": "BIGINT",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL CHECK (incident_revision > 0)",
+          "declaration": "incident_revision BIGINT NOT NULL CHECK (incident_revision > 0)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 24,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L24"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 24,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L24"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "plan_hash",
+          "type": "CHAR(64)",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL UNIQUE",
+          "declaration": "plan_hash CHAR(64) NOT NULL UNIQUE",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 25,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L25"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 25,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L25"
+            }
+          ],
+          "primary_key": false,
+          "unique": true
+        },
+        {
+          "name": "approval_request_id",
+          "type": "TEXT",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL UNIQUE REFERENCES dq_control.approval_requests(request_id)",
+          "declaration": "approval_request_id TEXT NOT NULL UNIQUE REFERENCES dq_control.approval_requests(request_id)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 26,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L26"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 26,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L26"
+            }
+          ],
+          "primary_key": false,
+          "unique": true
+        },
+        {
+          "name": "record",
+          "type": "JSONB",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "record JSONB NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 27,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L27"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 27,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L27"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "created_at",
+          "type": "TIMESTAMPTZ",
+          "nullable": false,
+          "default": "now()",
+          "modifiers": "NOT NULL DEFAULT now()",
+          "declaration": "created_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 28,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L28"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 28,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L28"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        }
+      ],
+      "constraints": [
+        {
+          "name": "recovery_plans_pkey",
+          "kind": "primary_key",
+          "sql": "PRIMARY KEY (plan_id)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 22,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L22"
+          }
+        },
+        {
+          "name": "recovery_plans_alert_key_fkey",
+          "kind": "foreign_key",
+          "sql": "FOREIGN KEY (alert_key) REFERENCES dq_control.incident_controls(alert_key)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 23,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L23"
+          }
+        },
+        {
+          "name": "recovery_plans_incident_revision_check",
+          "kind": "check",
+          "sql": "CHECK (incident_revision > 0)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 24,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L24"
+          }
+        },
+        {
+          "name": "recovery_plans_plan_hash_key",
+          "kind": "unique",
+          "sql": "UNIQUE (plan_hash)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 25,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L25"
+          }
+        },
+        {
+          "name": "recovery_plans_approval_request_id_key",
+          "kind": "unique",
+          "sql": "UNIQUE (approval_request_id)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 26,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L26"
+          }
+        },
+        {
+          "name": "recovery_plans_approval_request_id_fkey",
+          "kind": "foreign_key",
+          "sql": "FOREIGN KEY (approval_request_id) REFERENCES dq_control.approval_requests(request_id)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 26,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L26"
+          }
+        }
+      ],
+      "indexes": [],
+      "migrations": [],
+      "relationships": [
+        {
+          "kind": "foreign_key",
+          "from": "dq_control.recovery_executions",
+          "to": "dq_control.recovery_plans",
+          "from_columns": [
+            "plan_id"
+          ],
+          "to_columns": [
+            "plan_id"
+          ],
+          "enforced": true,
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "constraint": "recovery_executions_plan_id_fkey",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 32,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L32"
+          }
+        },
+        {
+          "kind": "foreign_key",
+          "from": "dq_control.recovery_plans",
+          "to": "dq_control.approval_requests",
+          "from_columns": [
+            "approval_request_id"
+          ],
+          "to_columns": [
+            "request_id"
+          ],
+          "enforced": true,
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "constraint": "recovery_plans_approval_request_id_fkey",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 26,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L26"
+          }
+        },
+        {
+          "kind": "foreign_key",
+          "from": "dq_control.recovery_plans",
+          "to": "dq_control.incident_controls",
+          "from_columns": [
+            "alert_key"
+          ],
+          "to_columns": [
+            "alert_key"
+          ],
+          "enforced": true,
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "constraint": "recovery_plans_alert_key_fkey",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 23,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L23"
+          }
+        }
+      ],
+      "primary_key": [
+        "plan_id"
+      ],
+      "unique_constraints": [
+        [
+          "plan_hash"
+        ],
+        [
+          "approval_request_id"
+        ]
+      ],
+      "engine": null,
+      "partition_by": null,
+      "order_by": null,
+      "ttl": null
+    },
+    {
+      "name": "dq_control.source_snapshots",
+      "store": "postgresql",
+      "kind": "table",
+      "source": {
+        "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+        "line": 9,
+        "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L9"
+      },
+      "sources": [
+        {
+          "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+          "line": 9,
+          "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L9"
+        }
+      ],
+      "columns": [
+        {
+          "name": "snapshot_id",
+          "type": "TEXT",
+          "nullable": false,
+          "default": null,
+          "modifiers": "PRIMARY KEY",
+          "declaration": "snapshot_id TEXT PRIMARY KEY",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 10,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L10"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 10,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L10"
+            }
+          ],
+          "primary_key": true,
+          "unique": true
+        },
+        {
+          "name": "dataset",
+          "type": "TEXT",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL CHECK (dataset = 'orders')",
+          "declaration": "dataset TEXT NOT NULL CHECK (dataset = 'orders')",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 11,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L11"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 11,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L11"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "dt",
+          "type": "DATE",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "dt DATE NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 12,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L12"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 12,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L12"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "kind",
+          "type": "TEXT",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL CHECK (kind IN ('upstream','landing'))",
+          "declaration": "kind TEXT NOT NULL CHECK (kind IN ('upstream','landing'))",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 13,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L13"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 13,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L13"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "checksum",
+          "type": "CHAR(64)",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "checksum CHAR(64) NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 14,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L14"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 14,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L14"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "manifest",
+          "type": "JSONB",
+          "nullable": false,
+          "default": null,
+          "modifiers": "NOT NULL",
+          "declaration": "manifest JSONB NOT NULL",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 15,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L15"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 15,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L15"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "created_at",
+          "type": "TIMESTAMPTZ",
+          "nullable": false,
+          "default": "now()",
+          "modifiers": "NOT NULL DEFAULT now()",
+          "declaration": "created_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 16,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L16"
+          },
+          "sources": [
+            {
+              "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+              "line": 16,
+              "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L16"
+            }
+          ],
+          "primary_key": false,
+          "unique": false
+        }
+      ],
+      "constraints": [
+        {
+          "name": "source_snapshots_pkey",
+          "kind": "primary_key",
+          "sql": "PRIMARY KEY (snapshot_id)",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 10,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L10"
+          }
+        },
+        {
+          "name": "source_snapshots_dataset_check",
+          "kind": "check",
+          "sql": "CHECK (dataset = 'orders')",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 11,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L11"
+          }
+        },
+        {
+          "name": "source_snapshots_kind_check",
+          "kind": "check",
+          "sql": "CHECK (kind IN ('upstream','landing'))",
+          "source": {
+            "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+            "line": 13,
+            "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L13"
+          }
+        }
+      ],
+      "indexes": [],
+      "migrations": [],
+      "relationships": [],
+      "primary_key": [
+        "snapshot_id"
+      ],
+      "unique_constraints": [],
+      "engine": null,
+      "partition_by": null,
+      "order_by": null,
+      "ttl": null
     }
   ],
   "relationships": [
@@ -11342,6 +13629,46 @@
         "path": "warehouse/dbt/models/marts/fct_orders_daily.sql",
         "line": 13,
         "href": "../../warehouse/dbt/models/marts/fct_orders_daily.sql#L13"
+      }
+    },
+    {
+      "kind": "foreign_key",
+      "from": "dq_control.approval_legacy_imports",
+      "to": "dq_control.approval_requests",
+      "from_columns": [
+        "request_id"
+      ],
+      "to_columns": [
+        "request_id"
+      ],
+      "enforced": true,
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "constraint": "approval_legacy_imports_request_id_fkey",
+      "source": {
+        "path": "infra/init/postgres/11_legacy_approval_control.sql",
+        "line": 6,
+        "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L6"
+      }
+    },
+    {
+      "kind": "foreign_key",
+      "from": "dq_control.approval_projection_outbox",
+      "to": "dq_control.approval_requests",
+      "from_columns": [
+        "request_id"
+      ],
+      "to_columns": [
+        "request_id"
+      ],
+      "enforced": true,
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "constraint": "approval_projection_outbox_request_id_fkey",
+      "source": {
+        "path": "infra/init/postgres/11_legacy_approval_control.sql",
+        "line": 13,
+        "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L13"
       }
     },
     {
@@ -11442,6 +13769,88 @@
         "path": "infra/init/postgres/03_incident_resolution.sql",
         "line": 15,
         "href": "../../infra/init/postgres/03_incident_resolution.sql#L15"
+      }
+    },
+    {
+      "kind": "foreign_key",
+      "from": "dq_control.partition_publications",
+      "to": "dq_control.partition_revisions",
+      "from_columns": [
+        "dataset",
+        "partition_dt"
+      ],
+      "to_columns": [
+        "dataset",
+        "partition_dt"
+      ],
+      "enforced": true,
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "constraint": "partition_publications_dataset_partition_dt_key",
+      "source": {
+        "path": "infra/init/postgres/10_partition_publication.sql",
+        "line": 33,
+        "href": "../../infra/init/postgres/10_partition_publication.sql#L33"
+      }
+    },
+    {
+      "kind": "foreign_key",
+      "from": "dq_control.recovery_executions",
+      "to": "dq_control.recovery_plans",
+      "from_columns": [
+        "plan_id"
+      ],
+      "to_columns": [
+        "plan_id"
+      ],
+      "enforced": true,
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "constraint": "recovery_executions_plan_id_fkey",
+      "source": {
+        "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+        "line": 32,
+        "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L32"
+      }
+    },
+    {
+      "kind": "foreign_key",
+      "from": "dq_control.recovery_plans",
+      "to": "dq_control.approval_requests",
+      "from_columns": [
+        "approval_request_id"
+      ],
+      "to_columns": [
+        "request_id"
+      ],
+      "enforced": true,
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "constraint": "recovery_plans_approval_request_id_fkey",
+      "source": {
+        "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+        "line": 26,
+        "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L26"
+      }
+    },
+    {
+      "kind": "foreign_key",
+      "from": "dq_control.recovery_plans",
+      "to": "dq_control.incident_controls",
+      "from_columns": [
+        "alert_key"
+      ],
+      "to_columns": [
+        "alert_key"
+      ],
+      "enforced": true,
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "constraint": "recovery_plans_alert_key_fkey",
+      "source": {
+        "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+        "line": 23,
+        "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L23"
       }
     },
     {
@@ -11709,6 +14118,46 @@
   "foreign_keys": [
     {
       "kind": "foreign_key",
+      "from": "dq_control.approval_legacy_imports",
+      "to": "dq_control.approval_requests",
+      "from_columns": [
+        "request_id"
+      ],
+      "to_columns": [
+        "request_id"
+      ],
+      "enforced": true,
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "constraint": "approval_legacy_imports_request_id_fkey",
+      "source": {
+        "path": "infra/init/postgres/11_legacy_approval_control.sql",
+        "line": 6,
+        "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L6"
+      }
+    },
+    {
+      "kind": "foreign_key",
+      "from": "dq_control.approval_projection_outbox",
+      "to": "dq_control.approval_requests",
+      "from_columns": [
+        "request_id"
+      ],
+      "to_columns": [
+        "request_id"
+      ],
+      "enforced": true,
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "constraint": "approval_projection_outbox_request_id_fkey",
+      "source": {
+        "path": "infra/init/postgres/11_legacy_approval_control.sql",
+        "line": 13,
+        "href": "../../infra/init/postgres/11_legacy_approval_control.sql#L13"
+      }
+    },
+    {
+      "kind": "foreign_key",
       "from": "dq_control.incident_outbox",
       "to": "dq_control.incident_controls",
       "from_columns": [
@@ -11805,6 +14254,88 @@
         "path": "infra/init/postgres/03_incident_resolution.sql",
         "line": 15,
         "href": "../../infra/init/postgres/03_incident_resolution.sql#L15"
+      }
+    },
+    {
+      "kind": "foreign_key",
+      "from": "dq_control.partition_publications",
+      "to": "dq_control.partition_revisions",
+      "from_columns": [
+        "dataset",
+        "partition_dt"
+      ],
+      "to_columns": [
+        "dataset",
+        "partition_dt"
+      ],
+      "enforced": true,
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "constraint": "partition_publications_dataset_partition_dt_key",
+      "source": {
+        "path": "infra/init/postgres/10_partition_publication.sql",
+        "line": 33,
+        "href": "../../infra/init/postgres/10_partition_publication.sql#L33"
+      }
+    },
+    {
+      "kind": "foreign_key",
+      "from": "dq_control.recovery_executions",
+      "to": "dq_control.recovery_plans",
+      "from_columns": [
+        "plan_id"
+      ],
+      "to_columns": [
+        "plan_id"
+      ],
+      "enforced": true,
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "constraint": "recovery_executions_plan_id_fkey",
+      "source": {
+        "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+        "line": 32,
+        "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L32"
+      }
+    },
+    {
+      "kind": "foreign_key",
+      "from": "dq_control.recovery_plans",
+      "to": "dq_control.approval_requests",
+      "from_columns": [
+        "approval_request_id"
+      ],
+      "to_columns": [
+        "request_id"
+      ],
+      "enforced": true,
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "constraint": "recovery_plans_approval_request_id_fkey",
+      "source": {
+        "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+        "line": 26,
+        "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L26"
+      }
+    },
+    {
+      "kind": "foreign_key",
+      "from": "dq_control.recovery_plans",
+      "to": "dq_control.incident_controls",
+      "from_columns": [
+        "alert_key"
+      ],
+      "to_columns": [
+        "alert_key"
+      ],
+      "enforced": true,
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "constraint": "recovery_plans_alert_key_fkey",
+      "source": {
+        "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+        "line": 23,
+        "href": "../../infra/init/postgres/09_evidence_driven_recovery.sql#L23"
       }
     }
   ],
@@ -12171,6 +14702,18 @@
       "sha256": "508df37d67cff7068b129d18e30fa757262f01e79da069b90a3983264098fc02"
     },
     {
+      "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+      "sha256": "58d7971d2c3ed0b4711f1ebd1a155156a993506cec85f960164ef8404444d1a1"
+    },
+    {
+      "path": "infra/init/postgres/10_partition_publication.sql",
+      "sha256": "a39333f8d3fdbd910722d7c938a831cce86f584ce73342b7a86b5c73ed308aa4"
+    },
+    {
+      "path": "infra/init/postgres/11_legacy_approval_control.sql",
+      "sha256": "7174f47b49aaf77c7e2339e052e5b60b48e295156f0e81f79f2ad8f33ed42ebc"
+    },
+    {
       "path": "warehouse/dbt/.user.yml",
       "sha256": "63cac64e257670600dcb35a031c637e8c85b044ebfb186af4cc996a1cf6d1f8d"
     },
@@ -12196,7 +14739,7 @@
     },
     {
       "path": "warehouse/dbt/models/sources.yml",
-      "sha256": "6f68c4724632f88588cc10a66f8b1f0843e673132be43412a5c441ea2cc382a7"
+      "sha256": "d0849f1df2c2b6e2b0519b7c7f5fc1cbd412089badd52dcc61e2ab56b1cca6e7"
     },
     {
       "path": "warehouse/dbt/models/staging/schema.yml",

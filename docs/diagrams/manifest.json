@@ -5,12 +5,12 @@
   "public_api": "build_catalog(root=None) -> dict; read-only",
   "catalog": "docs/diagrams/schema-catalog.json",
   "counts": {
-    "objects": 28,
+    "objects": 36,
     "clickhouse_tables": 15,
     "clickhouse_views": 1,
-    "postgresql_tables": 12,
-    "columns": 399,
-    "foreign_keys": 5,
+    "postgresql_tables": 20,
+    "columns": 460,
+    "foreign_keys": 11,
     "dbt_models": 2
   },
   "detail_diagram_objects": [
@@ -30,6 +30,8 @@
     "dq.schema_drift_results",
     "dq.schema_snapshots",
     "dq.stg_orders",
+    "dq_control.approval_legacy_imports",
+    "dq_control.approval_projection_outbox",
     "dq_control.approval_requests",
     "dq_control.discord_copilot_requests",
     "dq_control.discord_incident_workspaces",
@@ -41,7 +43,13 @@
     "dq_control.incident_outbox",
     "dq_control.incident_resolution_decisions",
     "dq_control.incident_revalidation_keys",
-    "dq_control.incident_revalidations"
+    "dq_control.incident_revalidations",
+    "dq_control.partition_publications",
+    "dq_control.partition_revisions",
+    "dq_control.recovery_executions",
+    "dq_control.recovery_outbox",
+    "dq_control.recovery_plans",
+    "dq_control.source_snapshots"
   ],
   "inputs": [
     {
@@ -117,6 +125,18 @@
       "sha256": "508df37d67cff7068b129d18e30fa757262f01e79da069b90a3983264098fc02"
     },
     {
+      "path": "infra/init/postgres/09_evidence_driven_recovery.sql",
+      "sha256": "58d7971d2c3ed0b4711f1ebd1a155156a993506cec85f960164ef8404444d1a1"
+    },
+    {
+      "path": "infra/init/postgres/10_partition_publication.sql",
+      "sha256": "a39333f8d3fdbd910722d7c938a831cce86f584ce73342b7a86b5c73ed308aa4"
+    },
+    {
+      "path": "infra/init/postgres/11_legacy_approval_control.sql",
+      "sha256": "7174f47b49aaf77c7e2339e052e5b60b48e295156f0e81f79f2ad8f33ed42ebc"
+    },
+    {
       "path": "warehouse/dbt/.user.yml",
       "sha256": "63cac64e257670600dcb35a031c637e8c85b044ebfb186af4cc996a1cf6d1f8d"
     },
@@ -142,7 +162,7 @@
     },
     {
       "path": "warehouse/dbt/models/sources.yml",
-      "sha256": "6f68c4724632f88588cc10a66f8b1f0843e673132be43412a5c441ea2cc382a7"
+      "sha256": "d0849f1df2c2b6e2b0519b7c7f5fc1cbd412089badd52dcc61e2ab56b1cca6e7"
     },
     {
       "path": "warehouse/dbt/models/staging/schema.yml",
@@ -162,15 +182,15 @@
     },
     {
       "path": "scripts/build_repository_diagrams.py",
-      "sha256": "75a6aa03bc7506e91a5ad9b3ab47a26848e940b01346965845279a29183d0107"
+      "sha256": "bbb629dbab01a460731a666cfe0e18665be5fe84a4cb96dc2e5f6c617bddf523"
     },
     {
       "path": "docs/architecture.md",
-      "sha256": "19cdd6b3b539a3c52d269ec3f29002d6f8f974336822ee111cfc90c0c595bdb4"
+      "sha256": "e032db665cda171cc3f214edadbc24a4a2302acb26be3268ec77af81982fa928"
     },
     {
       "path": "docs/diagrams/diagram-specs.json",
-      "sha256": "57461d409db2a364aa4d1367fe81566d94602fe73d76e7b768547fc8323dec25"
+      "sha256": "fd89b70d2b0ce8f4a10731b0bf2024ca11dd400cb20ceebbebcf01f59daceb53"
     },
     {
       "path": "docs/diagrams/style-tokens.json",
@@ -178,25 +198,25 @@
     },
     {
       "path": "docs/diagrams/architecture.json",
-      "sha256": "04bfc5003084d015cdb7d26d2fc273408d089a237203a02395a72b2a0ef6d537"
+      "sha256": "8824e2f11b4281af151005b52f850f8db13488e936a42198d8434ee78d147a8f"
     }
   ],
   "artifacts": [
     {
       "path": "docs/data-model.md",
-      "sha256": "a6af7a8fa2bb0d42a4a6a6058eeae8c123a9314f1855cbdea3d170c1b60a4483"
+      "sha256": "67509dde657fb8e515cfd4c7473952d141f8be3e772333678863bbff62a2291a"
     },
     {
       "path": "docs/diagrams/architecture.svg",
-      "sha256": "494a72260ac466a6faffd31dc651187aa19b4b682660ff386ef00aafe53e8a30"
+      "sha256": "bacbf0c718db4e27bf815923debd1ec9993d93a3ce6362b3fc681e27b39cf216"
     },
     {
       "path": "docs/diagrams/data-model-overview.svg",
-      "sha256": "1b8d16d20e91f3a75f5462d9dd86ab22d72ffef6a1de1bfbd4207dbd7e2800da"
+      "sha256": "6985787dcf2771be2cb41097521faa99c50ae98d4b4ca66b0d6ee811a555c1dd"
     },
     {
       "path": "docs/diagrams/data-model.mmd",
-      "sha256": "a60c708a2bd6ab44b8a7d6718241453d90a94f9d7bd5c5cc908b3d0d4c98cc92"
+      "sha256": "d990a498169512105ba865fee7acff4b070834eeb230e719461079a6ffa58834"
     },
     {
       "path": "docs/diagrams/erd-alert-view.svg",
@@ -204,7 +224,7 @@
     },
     {
       "path": "docs/diagrams/erd-approvals.svg",
-      "sha256": "a30d9c1fc39e59421aab0c3fd955b60ca3e3a58852793a5d2f0957f33269bdb1"
+      "sha256": "12d36ab966a0d0542a19685ebf29e6bdbfd8ea3a08a1e16de4ca5c4208ebbfcc"
     },
     {
       "path": "docs/diagrams/erd-context.svg",
@@ -231,6 +251,10 @@
       "sha256": "83abc0a53255d1a1cfcc6829cab7cb2efe6c2ffcf302e441a10f8c7172432c3d"
     },
     {
+      "path": "docs/diagrams/erd-recovery-publication.svg",
+      "sha256": "c3c32d37f34c971c4fd9ba5a9a04022248c5fce01d2f8d10d6bd2e5de080e3fc"
+    },
+    {
       "path": "docs/diagrams/erd-resolution-decisions.svg",
       "sha256": "18597539a73c655a734efaa66a474258012d8619f2833c3ffee02cabe6b00195"
     },
@@ -248,7 +272,7 @@
     },
     {
       "path": "docs/diagrams/schema-catalog.json",
-      "sha256": "1408476d2bd660e6725373cc367fd8799d9318a99dfd579a3afa1b80752ba8eb"
+      "sha256": "bbf5a025670c6f12ec67418f5d8d0300985057d35836e6c64b4b74fb69851b9e"
     }
   ],
   "self_hash_excluded": true,

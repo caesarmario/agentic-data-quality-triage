@@ -1,5 +1,7 @@
 # Repository Refresh Acceptance
 
+> Historical acceptance: this record predates the owner-authorized [fresh demo reset](demo-reset.md) on 16 October 2026. The reset does not retain the runtime rows, messages, or logs cited below. This document is not proof that those records remain in the current local stack.
+
 ## Publication scope
 
 The owner approved publication of the existing local implementation and the documentation/media refresh to `origin/main`. The starting local and remote commit was `84274aea3290e24aeac31aab983d12e8fe74ec22`. No `master` branch is created and no force push is used.

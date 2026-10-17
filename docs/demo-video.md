@@ -2,6 +2,8 @@
 
 A 180-second silent documentary tour with burned-in English captions and a [WebVTT sidecar](../tools/demo-video/captions.en.vtt). The source combines **actual retained UI captures**, repository diagrams, and clearly labelled acceptance-record summaries. It is not a recording of one end-to-end autonomous repair.
 
+This recording predates saved-source recovery. Its diagram assets are frozen in `tools/demo-video/recorded-diagrams/`; current architecture and table definitions are documented separately. The movie does not demonstrate the new recovery runbooks, their live approval/execution, or their acceptance results.
+
 ![DataSentry recorded walkthrough poster](images/demo-refresh-poster.png)
 
 ## Delivery

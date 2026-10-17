@@ -5,6 +5,8 @@ Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 
 # README Documentation Acceptance
 
+> Historical acceptance: this record predates the owner-authorized [fresh demo reset](demo-reset.md) on 16 October 2026. The reset does not retain the runtime rows, messages, or logs cited below. This document is not proof that those records remain in the current local stack.
+
 ## Change scope
 
 Documentation pass dated 2026-09-22, Asia/Bangkok. The project owner requested a

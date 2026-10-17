@@ -51,7 +51,7 @@ System guide · No AI call
 
 The rendered title uses a small compass icon and green accent; neither an uptime indicator nor a claim of healthy data is included. The PostgreSQL service-message registry is separate from the incident registry. Creation is serialized, the delivery intent is committed before Discord I/O, and uncertain acknowledgements remain pending until reconciliation. Reconnect skips unchanged content. Old history is neither removed nor pinned.
 
-Quick Start opens **Show Incidents** (private, `active`, maximum five) and explains the short `DQ-...` reference. **Commands** has three pages with actual registered inputs. **Button Guide** has two pages:
+Quick Start opens **Show Incidents** (private, `active`, maximum five) and explains the short `DQ-...` reference. **Commands** has three pages with actual registered inputs. **Button Guide** has three pages: investigation, approval/closure, and saved-source recovery.
 
 | Investigation | Meaning |
 | --- | --- |
@@ -73,6 +73,15 @@ Quick Start opens **Show Incidents** (private, `active`, maximum five) and expla
 | Close Incident | Enter a reason after fresh passing evidence |
 | Confirm Close | Save closure only while every safety gate remains valid |
 | Cancel | Leave the panel or cancel the available step; not a data rollback |
+
+| Saved-source recovery | Meaning |
+| --- | --- |
+| Review Fix | Inspect the server-selected source, one-date scope, validation, and rollback. No data changes. |
+| Approve Plan | Record human approval of the immutable plan. Nothing runs yet. |
+| Run Approved Fix | Separately confirm and execute the approved partition recovery through Airflow. This is a bounded data-changing action. |
+| Track Execution | Read the same execution, business validation, and pending synchronization state. Never start another fix. |
+
+Recovery plans and execution status belong in `dq-ops-private`. Investigation stays in the incident thread. Recovery does not close the incident; Resolve still needs a fresh PASS, a reason, and final confirmation. Generic backfill previews are simulation-only and cannot replace a pinned-source recovery plan. [Recovery workflow](recovery-workflow.md) and [local evidence](evidence-driven-recovery-acceptance.md).
 
 Guide navigation never includes executable approval, remediation or closure controls. **Safety & AI** explains that generated advice can be wrong, evidence is distinct from a hypothesis, approval is distinct from execution, and Resolve needs a fresh PASS, reason and confirmation.
 

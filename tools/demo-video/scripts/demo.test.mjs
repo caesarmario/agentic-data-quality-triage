@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
-import {root, tooling, chapterBounds, qaFrames} from './paths.mjs';
+import {root, tooling, publicDir, chapterBounds, qaFrames} from './paths.mjs';
 import {timecode} from './captions.mjs';
 
 const read = async (name) => JSON.parse(await fs.readFile(path.join(tooling, name), 'utf8'));
@@ -48,9 +48,19 @@ test('all public UI assets have crop provenance and matching hashes', async () =
 test('both repository diagrams are present, attributed and hash matched', async () => {
   const manifest = await read('asset-provenance.json');
   assert.equal(manifest.diagrams.length, 2);
+  const recorded = new Map([
+    ['tools/demo-video/recorded-diagrams/architecture.svg', '494a72260ac466a6faffd31dc651187aa19b4b682660ff386ef00aafe53e8a30'],
+    ['tools/demo-video/recorded-diagrams/data-model-overview.svg', '1b8d16d20e91f3a75f5462d9dd86ab22d72ffef6a1de1bfbd4207dbd7e2800da'],
+  ]);
   for (const diagram of manifest.diagrams) {
+    assert.equal(recorded.get(diagram.path), diagram.sha256);
+    assert.equal(diagram.recordedFrom, diagram.path.endsWith('architecture.svg')
+      ? 'HEAD:docs/diagrams/architecture.svg' : 'HEAD:docs/diagrams/data-model-overview.svg');
+    assert.match(diagram.label, /predates evidence-driven recovery/);
     const bytes = await fs.readFile(path.join(root, diagram.path));
     assert.equal(createHash('sha256').update(bytes).digest('hex'), diagram.sha256);
+    const served = await fs.readFile(path.join(publicDir, path.basename(diagram.path)));
+    assert.equal(createHash('sha256').update(served).digest('hex'), diagram.sha256);
   }
 });
 test('public manifests contain no local user paths or private capture roots', async () => {
