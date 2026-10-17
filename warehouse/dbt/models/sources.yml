@@ -10,10 +10,11 @@ version: 2
 sources:
   - name: raw
     description: Raw event-level data loaded from SeaweedFS S3 landing into ClickHouse.
-    schema: "{{ env_var('CLICKHOUSE_DB', 'dq') }}"
+    schema: "{{ env_var('DBT_INPUT_SCHEMA', env_var('CLICKHOUSE_DB', 'dq')) }}"
 
     tables:
       - name: raw_orders
+        identifier: "{{ env_var('DBT_RAW_ORDERS_TABLE', 'raw_orders') }}"
         description: Event-level order records loaded idempotently by dt partition.
         columns:
           - name: dt

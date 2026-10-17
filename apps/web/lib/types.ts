@@ -23,7 +23,8 @@ export type Alert = {
 
 export type AlertList = { row_count: number; alerts: Alert[]; summary: string };
 export type DailySummary = {
-  dt: string;
+  dt: string | null;
+  availability: "available" | "empty";
   check_counts: { status: string; count: number }[];
   alert_counts: { severity: string; count: number }[];
   total_checks: number;

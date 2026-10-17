@@ -3,7 +3,6 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
-# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
@@ -16,7 +15,6 @@ from pathlib import Path
 from typing import Sequence
 
 
-# --- Configuring Project Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -26,16 +24,17 @@ from dags.dq_platform.validation import VALIDATION_SUITE_NAMES
 from pipelines.common.logging import logger
 
 
-# --- Defining Constants
 VALIDATION_EXTERNAL_LLM_ENABLED = "false"
 
 VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
     "all": (),
     "airflow": (
+        "tests/test_demo_reset.py",
         "tests/test_resolution_outbox_acceptance.py",
         "tests/test_airflow_dag_design.py",
         "tests/test_airflow_run_identity.py",
         "tests/test_backfill_approval_gate.py",
+        "tests/test_recovery_airflow.py",
         "tests/test_validation_suite.py",
     ),
     "agent": (
@@ -53,14 +52,20 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_evidence_interpretation.py",
         "tests/test_evidence_worker.py",
         "tests/test_evidence_worker_integration.py",
+        "tests/test_incident_context_bundle.py",
         "tests/test_provider_connectivity.py",
         "tests/test_hypothesis_framing.py",
         "tests/test_human_display_helpers.py",
         "tests/test_incident_history_tool.py",
+        "tests/test_legacy_approval_migration.py",
         "tests/test_llm_routing.py",
         "tests/test_llm_provider_errors.py",
         "tests/test_llm_provider_smoke.py",
         "tests/test_metadata_lineage_agent.py",
+        "tests/test_recovery_contracts.py",
+        "tests/test_recovery_operator.py",
+        "tests/test_recovery_runtime.py",
+        "tests/test_recovery_service.py",
         "tests/test_schema_drift_evidence.py",
         "tests/test_schema_drift_agent.py",
         "tests/test_s3_artifacts.py",
@@ -72,6 +77,8 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_triage_evaluation.py",
     ),
     "api": (
+        "tests/test_model_api_auth.py",
+        "tests/test_daily_summary_api.py",
         "tests/test_resolution_outbox_acceptance.py",
         "tests/test_operator_language_contract.py",
         "tests/test_operator_language_smoke.py",
@@ -80,6 +87,7 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_resolution_store.py",
         "tests/test_resolution_producer.py",
         "tests/test_incident_revalidation.py",
+        "tests/test_recovery_airflow.py",
         "tests/test_airflow_revalidation_api.py",
         "tests/test_daily_summary_tool.py",
         "tests/test_quality_summary_tool.py",
@@ -95,6 +103,7 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_validation_suite.py",
     ),
     "discord": (
+        "tests/test_demo_reset_discord.py",
         "tests/test_discord_help.py",
         "tests/test_discord_welcome.py",
         "tests/test_discord_command_workspace.py",
@@ -114,7 +123,9 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
     ),
     "dq": (
         "tests/test_dq_evidence.py",
+        "tests/test_dq_segments.py",
         "tests/test_incident_policy.py",
+        "tests/test_recovery_contracts.py",
     ),
     "llm": (
         "tests/test_airflow_dag_design.py",
@@ -147,8 +158,14 @@ VALIDATION_SUITES: dict[str, tuple[str, ...]] = {
         "tests/test_validation_suite.py",
     ),
     "pipelines": (
+        "tests/test_demo_reset.py",
+        "tests/test_demo_reset_discord.py",
         "tests/test_dq_evidence.py",
+        "tests/test_dq_segments.py",
         "tests/test_incident_policy.py",
+        "tests/test_orchestrator_stage_flags.py",
+        "tests/test_partition_publication.py",
+        "tests/test_source_snapshots.py",
         "tests/test_smoke_readiness.py",
     ),
     "schema": (
@@ -177,7 +194,6 @@ if set(VALIDATION_SUITES) != set(VALIDATION_SUITE_NAMES):
     raise RuntimeError("Validation suite registry does not match Airflow validation suite names.")
 
 
-# --- Defining Validation Helpers
 def list_validation_suites() -> tuple[str, ...]:
     """
     Return validation suite names accepted by the Airflow validation DAG.
@@ -289,7 +305,6 @@ def run_validation_suite(suite: str) -> int:
     return completed.returncode
 
 
-# --- Defining CLI Helpers
 def build_parser() -> argparse.ArgumentParser:
     """
     Build the command-line parser for Airflow validation tasks.
@@ -333,7 +348,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     return run_validation_suite(args.suite)
 
 
-# --- Running CLI Entrypoint
 if __name__ == "__main__":
     raise SystemExit(main())
 

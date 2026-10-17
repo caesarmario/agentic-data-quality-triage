@@ -4,7 +4,13 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { browserCapability, browserRequestError, readBoundedBody, MAX_REQUEST_BYTES } from '../lib/proxy-policy.ts';
+import { browserCapability, browserRequestError, readBoundedBody, requiresControlPlaneToken, MAX_REQUEST_BYTES } from '../lib/proxy-policy.ts';
+
+test('server credentials protect billable triage as well as approvals', () => {
+  assert.equal(requiresControlPlaneToken('triage'), true);
+  assert.equal(requiresControlPlaneToken('approval'), true);
+  assert.equal(requiresControlPlaneToken('read'), false);
+});
 
 // --- Exercising Exact Route Boundaries
 for (const [method, path, expected] of [

@@ -124,10 +124,10 @@ def buttons(render):
 def test_incident_and_triage_have_resolve_without_overflow():
     rows = formatters.incident_action_rows(REF, "TRIAGED", "https://example.test/workspace")
     assert [item.label for item in rows[0].actions] == ["Investigate", "Evidence", "Ask AI"]
-    assert [item.label for item in rows[1].actions] == ["Open Workspace", "Resolve"]
+    assert [item.label for item in rows[1].actions] == ["Open Workspace", "Review Fix", "Resolve"]
     triage = formatters.triage_action_rows(REF, has_report=True)
     assert [item.label for item in triage[0].actions] == ["Run New Investigation", "Evidence", "Ask AI", "View Report"]
-    assert [item.label for item in triage[1].actions] == ["Resolve", "Draft Action"]
+    assert [item.label for item in triage[1].actions] == ["Review Fix", "Resolve", "Draft Action"]
     assert all(len(row.actions) <= 5 for row in triage)
 
 

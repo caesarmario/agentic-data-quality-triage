@@ -292,13 +292,16 @@ def daily_health_status(check_counts: dict[str, int], alert_counts: dict[str, in
     """
     failed   = check_counts.get("fail", 0)
     critical = alert_counts.get("critical", 0)
-    warnings = check_counts.get("warn", 0) + alert_counts.get("warning", 0)
+    warnings = check_counts.get("warn", 0) + check_counts.get("skip", 0) + sum(alert_counts.values())
 
     if failed or critical:
         return tr('Needs Attention'), tr('Critical signals are present. Review the highest-priority alert before trusting downstream data.')
 
     if warnings:
         return tr('Review Recommended'), tr('No critical signal is present, but warning-level checks should be reviewed.')
+
+    if not sum(check_counts.values()):
+        return tr('No quality data yet'), tr('No DQ check result exists for this date. Wait for the scheduled pipeline before trusting the data.')
 
     return tr('Healthy'), tr('No failed checks or open critical alerts were found for this date.')
 
@@ -814,7 +817,7 @@ def format_triage_result(
 
 # --- Defining Summary And Action Formatters
 def format_daily_summary(
-    dt: str,
+    dt: str | None,
     check_rows: list[dict[str, Any]],
     alert_rows: list[dict[str, Any]],
     assistant_note: str = "",
@@ -824,7 +827,7 @@ def format_daily_summary(
     Format a daily DQ summary message.
 
     Args:
-        dt: Business date in YYYY-MM-DD format.
+        dt: Business date in YYYY-MM-DD format, or None without a latest date.
         check_rows: DQ check status count rows.
         alert_rows: Alert severity count rows.
         assistant_note: Optional LLM-assisted natural language readout.
@@ -847,7 +850,7 @@ def format_daily_summary(
 
     lines = [
         tr('# 📊 DQ Daily Summary'),
-        f"## {dt}",
+        f"## {dt}" if dt else tr('## No quality data yet'),
         "",
         tr('### Day Status'),
         f"**{health_label}**",
@@ -871,7 +874,7 @@ def format_daily_summary(
             tr("\u26a0\ufe0f Open Warning `{v0}`", v0=alert_counts.get('warning', 0)),
             "",
             tr('### Next Commands'),
-            f"/dq alerts dt:{dt} status:open limit:10",
+            f"/dq alerts dt:{dt} status:open limit:10" if dt else "/dq alerts status:open limit:10",
             "/dq triage alert_key:<Alert Ref>",
         ]
     )
@@ -1443,6 +1446,8 @@ def incident_action_rows(
         )
 
     if not resolved:
+        navigation.append(DiscordActionSpec("recovery", tr("Review Fix"), "secondary",
+                                            custom_id=f"dqrec:v1:review:{alert_ref}"))
         navigation.append(DiscordActionSpec("resolve", tr("Resolve"), "secondary",
                                             custom_id=f"dq:v1:resolve:{alert_ref}"))
     rows = [DiscordActionRow(tuple(actions))]
@@ -1482,6 +1487,7 @@ def triage_action_rows(
     if operator_ui_url.strip():
         second_row.append(DiscordActionSpec("workspace", tr("Open Workspace"), "link", url=operator_ui_url.strip()))
     second_row.extend([
+        DiscordActionSpec("recovery", tr("Review Fix"), "secondary", custom_id=f"dqrec:v1:review:{alert_ref}"),
         DiscordActionSpec("resolve", tr("Resolve"), "secondary", custom_id=f"dq:v1:resolve:{alert_ref}"),
         DiscordActionSpec("draft", tr("Draft Action"), "secondary", custom_id=f"dq:v1:draft:{alert_ref}"),
     ])
@@ -1993,7 +1999,7 @@ def render_triage_embed(
 
 
 def render_daily_summary_embed(
-    dt: str,
+    dt: str | None,
     check_rows: list[dict[str, Any]],
     alert_rows: list[dict[str, Any]],
     assistant_note: str = "",
@@ -2005,25 +2011,32 @@ def render_daily_summary_embed(
     alerts = {str(row.get("severity") or "unknown").lower(): int(row.get("count") or 0) for row in alert_rows}
     total_checks = sum(checks.values())
     total_alerts = sum(alerts.values())
+    health_label, health_text = daily_health_status(checks, alerts)
     runtime      = dict(llm_runtime or {})
     source       = _narrative_source(assistant_note, runtime)
     provider, model = _runtime_identity(runtime)
     fallback     = (
         tr("{v0} checks completed with {v1} active alerts.", v0=total_checks, v1=total_alerts)
         if total_checks or total_alerts
-        else tr('No daily quality results are available for this date.')
+        else tr('No quality data yet')
     )
     fields = [
+        (tr('Day Status'), f"**{health_label}**\n{health_text}", False),
         (tr('Checks'), tr("{v0} total \u00b7 {v1} passed \u00b7 {v2} failed", v0=total_checks, v1=checks.get('pass', 0), v2=checks.get('fail', 0)), False),
         (tr('Incidents'), tr("{v0} total \u00b7 {v1} critical \u00b7 {v2} warning", v0=total_alerts, v1=alerts.get('critical', 0), v2=alerts.get('warning', 0)), False),
         (tr('Next'), "`/dq alerts status:active`", False),
     ]
 
     return _embed_result(
-        title=tr("Daily Data Quality \u00b7 {v0}", v0=dt),
+        title=tr("Daily Data Quality \u00b7 {v0}", v0=dt) if dt else tr('Daily Data Quality'),
         description=assistant_note.strip() or fallback,
         fields=fields,
-        color=DISCORD_COLORS["critical"] if total_alerts else DISCORD_COLORS["success"],
+        color=(
+            DISCORD_COLORS["critical"] if checks.get("fail", 0) or alerts.get("critical", 0)
+            else DISCORD_COLORS["warning"] if total_alerts or checks.get("warn", 0) or checks.get("skip", 0)
+            else DISCORD_COLORS["neutral"] if not total_checks
+            else DISCORD_COLORS["success"]
+        ),
         narrative_source=source,
         fallback_markdown=format_daily_summary(dt, check_rows, alert_rows, assistant_note, data_transport),
         footer=provenance_footer(source, provider, model),

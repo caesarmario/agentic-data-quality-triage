@@ -42,7 +42,7 @@ def catalog():
 
 @pytest.mark.parametrize("locale", ["en", "id"])
 @pytest.mark.parametrize("topic,page", [("start", 0), ("commands", 0), ("commands", 1), ("commands", 2),
-                                       ("buttons", 0), ("buttons", 1), ("safety", 0)])
+                                       ("buttons", 0), ("buttons", 1), ("buttons", 2), ("safety", 0)])
 def test_help_bounds_locales_and_readonly_actions(locale, topic, page):
     with language_context(locale):
         result = guide.render_help(topic, page, catalog=catalog())
@@ -65,7 +65,7 @@ def test_help_bounds_locales_and_readonly_actions(locale, topic, page):
     assert "No AI call" in e["footer"]["text"] if locale == "en" else "Tidak ada panggilan AI" in e["footer"]["text"]
 
 
-@pytest.mark.parametrize("topic,page", [("commands", 1), ("commands", 2), ("buttons", 1)])
+@pytest.mark.parametrize("topic,page", [("commands", 1), ("commands", 2), ("buttons", 1), ("buttons", 2)])
 def test_gateway_navigation_preserves_unique_serialized_custom_ids(topic, page):
     async def check():
         result = guide.render_help(topic, page, catalog=catalog())
@@ -79,6 +79,18 @@ def test_gateway_navigation_preserves_unique_serialized_custom_ids(topic, page):
                 replay = await guide.HelpActionButton.from_custom_id(None, item, match)
                 assert replay.custom_id == item.custom_id
     asyncio.run(check())
+
+
+def test_indonesian_recovery_guide_translates_every_action_label_without_mutation_controls():
+    with language_context("id"):
+        result = guide.render_help("buttons", 2, catalog=catalog())
+    embed = result.payload["embeds"][0]
+    assert [field["name"] for field in embed["fields"][:5]] == [
+        "Tinjau Perbaikan", "Setujui Rencana", "Jalankan Perbaikan yang Disetujui",
+        "Pantau Eksekusi", "Tutup Incident",
+    ]
+    assert all(action.custom_id.startswith("dqhelp:v1:")
+               for row in result.action_rows for action in row.actions if action.custom_id)
 
 
 def test_registration_and_catalog_use_actual_inputs_and_keep_aliases():

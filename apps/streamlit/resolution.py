@@ -31,6 +31,13 @@ ACTIVE_PANEL_KEY = "resolution_active_alert_ref"
 RESOLUTION_NOTICE_KEY = "resolution_last_decision_notice"
 MAX_EVIDENCE_AGE = timedelta(minutes=10)
 
+
+def synchronization_notice(resolved: bool) -> str:
+    """A pending incident projection is not evidence that closure was saved."""
+    if resolved:
+        return 'Synchronization is incomplete. The decision is saved, but ClickHouse or Discord status may still differ.'
+    return 'Incident updates are waiting to synchronize. No closure decision has been saved.'
+
 STATUS_COPY = {
     "queued": ('Check queued.', 'The incident is not closed. No data has been changed.'),
     "running": ('Check running.', 'Only data or schema conditions are checked. The incident is not closed.'),
@@ -357,7 +364,7 @@ def _show_result(view: dict[str, Any]) -> None:
     display(view["heading"])
     st.write(view["explanation"])
     if view["synchronization_pending"]:
-        st.warning(tr('Synchronization is incomplete. The decision is saved, but ClickHouse or Discord status may still differ.'))
+        st.warning(tr(synchronization_notice(view["resolved"])))
     if view["expected"] is not None or view["observed"] is not None:
         left, right = st.columns(2)
         left.write(tr('**Expected**'))
@@ -365,7 +372,7 @@ def _show_result(view: dict[str, Any]) -> None:
         right.write(tr('**Observed**'))
         right.write(view["observed"] if view["observed"] is not None else tr('Not available'))
     if view["summary"] and not view["resolved"]:
-        st.write(view["summary"])
+        st.write(tr(view["summary"]))
     if view["resolved"]:
         resolution = view["resolution"] or {}
         st.write(tr('**Closed by:** ') + str(resolution.get("resolved_by") or resolution.get("actor") or tr('Not available')))

@@ -18,6 +18,7 @@ from dq_platform.helpers import (
     default_dag_args,
     default_user_defined_macros,
     finish_task,
+    optional_stage,
     single_date_conf,
     start_task,
 )
@@ -44,6 +45,9 @@ Schedule: none. This DAG is triggered by the platform daily orchestrator or manu
 
 This DAG keeps Airflow as the scheduler/orchestrator. Data movement remains in the
 modular Python pipeline code executed by `dq_runner`.
+
+`run_seed` and `run_load` default to true and accept only booleans or true/false
+strings. Either stage can be disabled without skipping the other enabled stage.
 
 Manual `dag_run.conf` examples:
 
@@ -111,7 +115,16 @@ with DAG(
 
     t90_finish = finish_task()
 
-    t00_start >> t10_trigger_seed_to_s3 >> t20_trigger_load_raw_clickhouse >> t90_finish
+    t05_seed, t15_seed_done = optional_stage(
+        task_id="t05_choose_seed", flags=("run_seed",), task=t10_trigger_seed_to_s3,
+    )
+    t16_load, t25_load_done = optional_stage(
+        task_id="t16_choose_load", flags=("run_load",), task=t20_trigger_load_raw_clickhouse,
+    )
+
+    t00_start >> t05_seed
+    t15_seed_done >> t16_load
+    t25_load_done >> t90_finish
 
 
 logger.info("Loaded DAG | dag_id=%s", DAG_ID)

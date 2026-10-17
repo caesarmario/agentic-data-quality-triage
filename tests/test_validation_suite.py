@@ -84,6 +84,7 @@ def test_build_pytest_command_uses_allowlisted_paths_without_shell() -> None:
 
     assert command[:4] == [sys.executable, "-m", "pytest", "-q"]
     assert command[4:] == [
+        "tests/test_demo_reset_discord.py",
         "tests/test_discord_help.py",
         "tests/test_discord_welcome.py",
         "tests/test_discord_command_workspace.py",
@@ -118,6 +119,7 @@ def test_api_validation_suite_covers_server_and_shared_client_contracts() -> Non
     assert "tests/test_api_app.py" in command
     assert "tests/test_control_plane_client.py" in command
     assert "tests/test_smoke_readiness.py" in command
+    assert "tests/test_recovery_airflow.py" in command
 
 
 def test_all_suite_targets_the_repository_test_directory() -> None:
@@ -130,6 +132,13 @@ def test_all_suite_targets_the_repository_test_directory() -> None:
     command = run_validation_suite.build_pytest_command("all")
 
     assert command[-1] == "tests"
+
+
+def test_maintenance_reset_contracts_are_in_named_validation_suites():
+    assert "tests/test_demo_reset.py" in run_validation_suite.build_pytest_command("airflow")
+    assert "tests/test_demo_reset_discord.py" in run_validation_suite.build_pytest_command("discord")
+    assert {"tests/test_demo_reset.py", "tests/test_demo_reset_discord.py"}.issubset(
+        run_validation_suite.build_pytest_command("pipelines"))
 
 
 def test_llm_suite_uses_provider_router_and_smoke_contract_tests() -> None:
@@ -185,6 +194,32 @@ def test_agent_suite_covers_context_memory_and_supervisor_contracts() -> None:
     assert "tests/test_supervisor_resilience.py" in command
     assert "tests/test_table_health_tool.py" in command
     assert "tests/test_smoke_readiness.py" not in command
+    for recovery_test in (
+        "tests/test_incident_context_bundle.py",
+        "tests/test_legacy_approval_migration.py",
+        "tests/test_recovery_contracts.py",
+        "tests/test_recovery_operator.py",
+        "tests/test_recovery_runtime.py",
+        "tests/test_recovery_service.py",
+    ):
+        assert recovery_test in command
+
+
+def test_recovery_source_and_publication_tests_are_in_named_suites() -> None:
+    """Keep recovery contracts, source snapshots, publication, and DAG tests discoverable by name."""
+    airflow = run_validation_suite.build_pytest_command("airflow")
+    dq = run_validation_suite.build_pytest_command("dq")
+    pipelines = run_validation_suite.build_pytest_command("pipelines")
+
+    assert "tests/test_recovery_airflow.py" in airflow
+    assert "tests/test_recovery_contracts.py" in dq
+    for path in (
+        "tests/test_dq_segments.py",
+        "tests/test_orchestrator_stage_flags.py",
+        "tests/test_partition_publication.py",
+        "tests/test_source_snapshots.py",
+    ):
+        assert path in pipelines
 
 
 def test_life_suite_uses_evaluator_and_airflow_contract_tests() -> None:
@@ -313,6 +348,48 @@ def test_trigger_command_contains_valid_json_without_shell_interpolation() -> No
     assert json.loads(command[conf_index]) == {"validation_suite": "all"}
     assert command[0:3] == ["airflow", "dags", "trigger"]
     assert ";" not in "".join(command)
+
+
+def test_empty_demo_boundary_flows_from_cli_as_normalized_json(monkeypatch, capsys) -> None:
+    """Carry the explicit reset receipt boundary without consulting a live service."""
+    commands = []
+    monkeypatch.setattr(trigger_airflow_validation, "run_command", commands.append)
+    assert trigger_airflow_validation.main([
+        "--expect-empty-demo", "--empty-demo-audit-since", "2026-10-16T10:00:00+07:00",
+    ]) == 0
+    payload = json.loads(commands[1][commands[1].index("-c") + 1])
+    assert payload == {"validation_suite": "all", "expect_empty_demo": True,
+                       "empty_demo_audit_since": "2026-10-16T03:00:00+00:00"}
+    assert "VALIDATION_EMPTY_DEMO_AUDIT_SINCE=2026-10-16T03:00:00+00:00" in capsys.readouterr().out
+    command = trigger_airflow_validation.build_trigger_command("all", "manual__test", expect_empty_demo=True)
+    assert json.loads(command[command.index("-c") + 1]) == {
+        "validation_suite": "all", "expect_empty_demo": True}
+
+
+@pytest.mark.parametrize("boundary,enabled", [("2026-10-16T03:00:00Z", False),
+                                            ("2026-10-16T03:00:00+07:60", True)])
+def test_invalid_boundary_never_unpauses_or_triggers(monkeypatch, boundary, enabled) -> None:
+    commands = []
+    monkeypatch.setattr(trigger_airflow_validation, "run_command", commands.append)
+    with pytest.raises(ValueError):
+        trigger_airflow_validation.trigger_validation("all", expect_empty_demo=enabled,
+                                                       empty_demo_audit_since=boundary)
+    assert commands == []
+
+
+def test_boundary_cli_requires_explicit_empty_demo_opt_in(monkeypatch) -> None:
+    commands = []
+    monkeypatch.setattr(trigger_airflow_validation, "run_command", commands.append)
+    with pytest.raises(SystemExit) as error:
+        trigger_airflow_validation.main(["--empty-demo-audit-since", "2026-10-16T03:00:00Z"])
+    assert error.value.code == 2
+    assert commands == []
+
+
+@pytest.mark.parametrize("enabled", [None, "false", "true", 0, 1])
+def test_empty_demo_trigger_opt_in_is_a_boolean(enabled) -> None:
+    with pytest.raises(ValueError, match="expect_empty_demo must be a boolean"):
+        trigger_airflow_validation.build_trigger_command("all", "manual__test", expect_empty_demo=enabled)
 
 
 def test_trigger_command_can_require_optional_api_readiness() -> None:

@@ -206,6 +206,7 @@ def test_persistent_dynamic_handlers_are_registered() -> None:
         interactions.IncidentActionButton,
         interactions.ApprovalActionButton,
         __import__("apps.discord_bot.help", fromlist=["HelpActionButton"]).HelpActionButton,
+        __import__("apps.discord_bot.recovery", fromlist=["RecoveryButton"]).RecoveryButton,
     ]
 
 

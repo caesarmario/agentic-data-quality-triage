@@ -12,8 +12,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from agent.tools import daily_summary
+from apps.api.schemas import DailySummaryResponse
 
 
 # --- Defining Test Fakes
@@ -178,6 +180,7 @@ def test_fetch_daily_quality_summary_aggregates_and_audits(monkeypatch) -> None:
     )
 
     assert payload["dt"] == "2026-06-10"
+    assert payload["availability"] == "available"
     assert payload["check_counts"] == [
         {"status": "fail", "count": 3},
         {"status": "pass", "count": 9},
@@ -269,31 +272,45 @@ def test_explicit_schema_date_bypasses_latest_lookup_and_keeps_alert_scope(monke
     assert audits[0]["input_payload"]["resolved_dt"] == "2026-10-13"
 
 
+@pytest.mark.parametrize("requested_dt", [None, "", "   "])
 @pytest.mark.parametrize("alerts", [(), (("2026-10-13", "schema_drift"),)])
-def test_latest_summary_without_dq_data_raises_and_audits_failure(monkeypatch, alerts) -> None:
-    """Empty and schema-only datasets cannot yield an epoch or schema summary date."""
+def test_latest_summary_without_dq_data_returns_empty_and_audits_success(monkeypatch, alerts, requested_dt) -> None:
+    """Empty and schema-only datasets return no date without fabricating evidence."""
     client = FakeLatestDateClickHouseClient(check_dates=(), alerts=alerts)
     audits = []
     monkeypatch.setattr(daily_summary, "write_agent_audit_event", lambda **kwargs: audits.append(kwargs))
 
-    with pytest.raises(ValueError, match="No daily DQ data is available yet"):
-        daily_summary.fetch_daily_quality_summary(client=client)
+    payload = daily_summary.fetch_daily_quality_summary(dt=requested_dt, client=client)
 
+    assert payload["status"] == "success"
+    assert payload["availability"] == "empty"
+    assert payload["dt"] is None
+    assert payload["check_counts"] == payload["alert_counts"] == []
+    assert payload["total_checks"] == payload["total_open_alerts"] == 0
+    assert payload["summary"] == "No quality data yet"
+    public = DailySummaryResponse.model_validate(payload).model_dump(mode="json")
+    assert public["dt"] is None
+    assert public["availability"] == "empty"
+    assert "sql" not in public
     assert client.queries == [daily_summary.LATEST_SUMMARY_DATE_SQL]
     assert len(audits) == 1
-    assert audits[0]["status"] == "failed"
-    assert audits[0]["input_payload"]["resolved_dt"] == ""
-    assert audits[0]["output_payload"] == {"error_type": "ValueError"}
+    assert audits[0]["status"] == "success"
+    assert audits[0]["input_payload"]["requested_dt"] == requested_dt
+    assert audits[0]["input_payload"]["resolved_dt"] is None
+    assert audits[0]["output_payload"] == {
+        "availability": "empty", "total_checks": 0, "total_open_alerts": 0,
+    }
+    assert audits[0]["sql"] == daily_summary.LATEST_SUMMARY_DATE_SQL
+    assert audits[0]["row_count"] == 0
 
 
-def test_latest_summary_with_no_scalar_rows_raises() -> None:
+def test_latest_summary_with_no_scalar_rows_has_no_date() -> None:
     """A missing scalar result follows the same no-data path as a null maximum."""
     class EmptyClient:
         def query(self, sql: str) -> FakeQueryResult:
             return FakeQueryResult(column_names=["maxOrNull(dt)"], result_rows=[])
 
-    with pytest.raises(ValueError, match="No daily DQ data is available yet"):
-        daily_summary.resolve_daily_summary_date(EmptyClient())
+    assert daily_summary.resolve_daily_summary_date(EmptyClient()) is None
 
 
 def test_explicit_date_without_rows_returns_zero_totals_and_audits(monkeypatch) -> None:
@@ -311,12 +328,14 @@ def test_explicit_date_without_rows_returns_zero_totals_and_audits(monkeypatch) 
     payload = daily_summary.fetch_daily_quality_summary(dt="2026-10-13", client=client)
 
     assert payload["status"] == "success"
+    assert payload["availability"] == "empty"
     assert payload["dt"] == "2026-10-13"
     assert payload["check_counts"] == payload["alert_counts"] == []
     assert payload["total_checks"] == payload["total_open_alerts"] == 0
     assert len(client.queries) == 1
     assert audits[0]["status"] == "success"
     assert audits[0]["row_count"] == 0
+    assert DailySummaryResponse.model_validate(payload).model_dump(mode="json")["dt"] == "2026-10-13"
 
 
 @pytest.mark.parametrize("fail_latest", [True, False])
@@ -346,3 +365,94 @@ def test_summary_query_errors_propagate_and_audit_failure(monkeypatch, fail_late
     assert audits[0]["input_payload"]["resolved_dt"] == ("" if fail_latest else "2026-06-10")
     assert audits[0]["output_payload"] == {"error_type": "RuntimeError"}
     assert audits[0]["error_message"] == str(error)
+
+
+@pytest.mark.parametrize("requested_dt", ["not-a-date", "2026-02-30", "2026-13-01"])
+def test_invalid_summary_date_still_raises_and_audits(monkeypatch, requested_dt) -> None:
+    """An invalid request must not be converted into a successful empty response."""
+    client = FakeClickHouseClient()
+    audits = []
+    monkeypatch.setattr(daily_summary, "write_agent_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    with pytest.raises(ValueError):
+        daily_summary.fetch_daily_quality_summary(dt=requested_dt, client=client)
+
+    assert client.queries == []
+    assert len(audits) == 1
+    assert audits[0]["status"] == "failed"
+    assert audits[0]["output_payload"] == {"error_type": "ValueError"}
+
+
+def test_empty_summary_audit_dependency_error_still_propagates(monkeypatch) -> None:
+    """A failed audit write cannot be disguised as a successful empty summary."""
+    client = FakeLatestDateClickHouseClient(check_dates=())
+
+    def fail_audit(**kwargs):
+        raise RuntimeError("Audit persistence unavailable")
+
+    monkeypatch.setattr(daily_summary, "write_agent_audit_event", fail_audit)
+
+    with pytest.raises(RuntimeError, match="Audit persistence unavailable"):
+        daily_summary.fetch_daily_quality_summary(client=client)
+
+
+@pytest.mark.parametrize("category,label", [("check", "pass"), ("alert", "warning")])
+def test_summary_with_only_alerts_or_checks_is_available(category, label) -> None:
+    """Alert-only summaries are available but are not evidence of healthy checks."""
+    payload = daily_summary.build_daily_summary_payload(
+        "2026-10-16", [{"category": category, "label": label, "count": 1}],
+    )
+
+    assert payload["availability"] == "available"
+    assert payload["dt"] == "2026-10-16"
+    assert DailySummaryResponse.model_validate(payload).availability == "available"
+
+
+def test_summary_payload_cannot_attach_evidence_to_a_null_date() -> None:
+    with pytest.raises(ValueError, match="business date"):
+        daily_summary.build_daily_summary_payload(None, [{"category": "check", "label": "pass", "count": 1}])
+
+
+def test_zero_count_rows_normalize_to_empty_collections() -> None:
+    payload = daily_summary.build_daily_summary_payload(
+        "2026-10-16", [{"category": "check", "label": "pass", "count": 0}],
+    )
+
+    assert payload["availability"] == "empty"
+    assert payload["check_counts"] == payload["alert_counts"] == []
+    assert payload["summary"] == "No quality data yet"
+
+
+@pytest.mark.parametrize("updates", [
+    {"availability": "unknown"},
+    {"availability": "available"},
+    {"status": "failed"},
+    {"dt": "invalid"},
+    {"total_checks": 1},
+    {"check_counts": [{"status": "pass", "count": 0}]},
+    {"alert_counts": [{"severity": "warning", "count": 0}]},
+    {"check_counts": [{"status": "pass", "count": 1}], "total_checks": 1},
+    {"alert_counts": [{"severity": "critical", "count": 1}], "total_open_alerts": 1},
+])
+def test_daily_response_rejects_invalid_empty_contract(updates) -> None:
+    payload = daily_summary.build_daily_summary_payload(None, [])
+
+    with pytest.raises(ValidationError):
+        DailySummaryResponse.model_validate({**payload, **updates})
+
+
+@pytest.mark.parametrize("updates", [{"dt": None}, {"availability": "empty"}])
+def test_daily_response_requires_date_for_available_data(updates) -> None:
+    payload = daily_summary.build_daily_summary_payload(
+        "2026-10-16", [{"category": "check", "label": "pass", "count": 1}],
+    )
+
+    with pytest.raises(ValidationError):
+        DailySummaryResponse.model_validate({**payload, **updates})
+
+
+def test_daily_response_rejects_dated_available_summary_without_evidence() -> None:
+    payload = daily_summary.build_daily_summary_payload("2026-10-16", [])
+
+    with pytest.raises(ValidationError, match="nonzero totals"):
+        DailySummaryResponse.model_validate({**payload, "availability": "available"})

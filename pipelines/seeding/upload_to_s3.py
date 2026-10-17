@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,16 @@ from typing import Any
 from pipelines.common.logging import logger
 from pipelines.seeding.config import OrdersSeedConfig, load_orders_config
 from pipelines.seeding.helpers import parse_date
+from pipelines.seeding.snapshots import (
+    MAX_MANIFEST_BYTES,
+    SNAPSHOT_BUCKET,
+    SNAPSHOT_PREFIX,
+    SnapshotValidationError,
+    capture_receipt_path,
+    publish_landing_snapshot,
+    publish_snapshot,
+    read_local_snapshot,
+)
 
 
 # --- Defining Constants
@@ -98,6 +110,9 @@ def upload_file_to_s3(
     """
     source_path = Path(local_path)
 
+    if key == SNAPSHOT_PREFIX or key.startswith(SNAPSHOT_PREFIX + "/"):
+        raise SnapshotValidationError("Use the immutable snapshot publisher for snapshot keys")
+
     if not source_path.exists():
         logger.error("Upload source file does not exist | path=%s", source_path)
         raise FileNotFoundError(f"Upload source file does not exist: {source_path}")
@@ -126,6 +141,9 @@ def upload_orders_partition(
     config: OrdersSeedConfig,
     local_path: str | Path | None = None,
     endpoint_url: str | None = None,
+    *,
+    s3_client: Any = None,
+    correlation_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Upload one generated orders partition to the configured landing bucket.
@@ -135,18 +153,57 @@ def upload_orders_partition(
         config: Validated orders seeding config.
         local_path: Optional explicit local Parquet path.
         endpoint_url: Optional explicit S3 endpoint URL.
+        s3_client: Optional injected S3-compatible client.
+        correlation_id: Optional opaque pipeline correlation override.
 
     Returns:
         Summary dictionary with local path, bucket, key, and S3 URI.
     """
     source_path = Path(local_path) if local_path else config.output.local_path(dt)
     object_key  = config.output.object_key(dt)
-    s3_uri      = upload_file_to_s3(
-        local_path=source_path,
-        bucket=config.output.bucket,
-        key=object_key,
-        endpoint_url=endpoint_url,
-    )
+    if config.output.bucket != SNAPSHOT_BUCKET or config.output.prefix != "orders":
+        raise SnapshotValidationError("Orders snapshots require the allowlisted landing scope")
+    if (re.fullmatch(rf"orders/dt={re.escape(dt.isoformat())}/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.parquet", object_key) is None
+            or ".." in object_key):
+        raise SnapshotValidationError("Legacy landing key outside allowlisted partition")
+    landing = read_local_snapshot(source_path)
+    receipt_path = capture_receipt_path(source_path)
+    manifests = {}
+    if receipt_path.exists():
+        try:
+            receipt = json.loads(read_local_snapshot(receipt_path, MAX_MANIFEST_BYTES))
+            if (set(receipt) != {"dt", "source_sha256", "landing_sha256", "correlation_id"}
+                    or receipt["dt"] != dt.isoformat()
+                    or receipt["landing_sha256"] != hashlib.sha256(landing).hexdigest()
+                    or not isinstance(receipt["source_sha256"], str)
+                    or len(receipt["source_sha256"]) != 64
+                    or any(c not in "0123456789abcdef" for c in receipt["source_sha256"])):
+                raise ValueError("Invalid receipt")
+        except (ValueError, TypeError, KeyError):
+            raise SnapshotValidationError("Snapshot capture receipt mismatch") from None
+        captured_source = read_local_snapshot(source_path.with_name(f"source-{receipt['source_sha256']}.parquet"))
+        if hashlib.sha256(captured_source).hexdigest() != receipt["source_sha256"]:
+            raise SnapshotValidationError("Captured source checksum mismatch")
+        run_id = correlation_id or receipt["correlation_id"]
+    else:
+        # Existing standalone developer uploads remain possible, but never pretend
+        # an old faulted file is an upstream source. Configured runtime fails closed.
+        if os.getenv("DQ_CONTROL_DATABASE_URL", "").strip():
+            raise SnapshotValidationError("Runtime upload requires a pre-fault source capture")
+        captured_source = None
+        run_id = correlation_id or f"orders-{dt.isoformat()}-v1"
+
+    client = s3_client if s3_client is not None else build_s3_client(endpoint_url)
+    if captured_source is not None:
+        upstream = publish_snapshot(captured_source, dt=dt, kind="upstream", correlation_id=run_id, s3_client=client)
+        manifests["upstream"] = upstream.model_dump(mode="json")
+    faulted = publish_landing_snapshot(landing, dt=dt, correlation_id=run_id, s3_client=client)
+    manifests["landing"] = faulted.model_dump(mode="json")
+    # Publish snapshots/registry first. The legacy key remains mutable for the
+    # current daily loader, but receives precisely the faulted bytes we pinned.
+    client.put_object(Bucket=config.output.bucket, Key=object_key, Body=landing,
+                      ContentType="application/vnd.apache.parquet")
+    s3_uri = f"s3://{config.output.bucket}/{object_key}"
 
     summary = {
         "dt": dt.isoformat(),
@@ -154,6 +211,7 @@ def upload_orders_partition(
         "bucket": config.output.bucket,
         "key": object_key,
         "s3_uri": s3_uri,
+        "source_manifests": manifests,
     }
 
     logger.info("Orders partition uploaded | summary=%s", summary)

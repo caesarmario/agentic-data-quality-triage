@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from typing import Callable
 
+from agent.context.bundle import MAX_SEGMENTS
 from agent.nodes.base import GraphState, TriageNodeMixin
 from agent.state import EvidenceCategory, EvidenceItem, TriageState
+from agent.tools.clickhouse_sql import run_guarded_sql
+from pipelines.common.clickhouse import format_date_literal, validate_qualified_table_name
 from pipelines.common.logging import logger
 
 
@@ -43,7 +46,44 @@ class EvidenceOrchestrationNodes(TriageNodeMixin):
             except Exception as exc:
                 self.append_error(state, f"{name} failed: {exc}")
 
+        state.refresh_incident_context_bundle()
         return {"state": state}
+
+    def collect_discriminating_evidence(self, state: TriageState) -> EvidenceItem | None:
+        """Collect exact segment sets, never another undifferentiated partition count.
+
+        Source/landing adapters remain caller-injected. Warehouse comparisons use
+        only explicit trusted table mappings; the known country/channel coverage
+        check may inspect its own alert table without inventing an upstream table.
+        Failed queries consume their attempt and are not repeated automatically.
+        """
+        if not state.alert or not state.alert.dt:
+            return None
+        bundle = state.refresh_incident_context_bundle()
+        tables = [s.table_name for s in bundle.snapshots if s.layer in {"raw", "mart"} and s.table_name]
+        if state.alert.metric == "segment_coverage__country_channel":
+            tables.append(state.alert.table_name)
+        for table in dict.fromkeys(tables):
+            table = validate_qualified_table_name(table)
+            sql = (
+                f"SELECT country, channel, count() AS row_count FROM {table} "
+                f"WHERE dt = {format_date_literal(state.alert.dt)} "
+                f"GROUP BY country, channel ORDER BY country, channel LIMIT {MAX_SEGMENTS + 1}"
+            )
+            if sql in state.attempted_context_queries or any(e.query.strip() == sql for e in state.evidence):
+                continue
+            state.attempted_context_queries.append(sql)
+            result = run_guarded_sql(
+                sql=sql, agent_run_id=state.agent_run_id, alert_id=state.alert.alert_id,
+                alert_key=state.alert.alert_key, hard_limit=MAX_SEGMENTS + 1,
+                require_date_filter=True, clickhouse_host=self.config.clickhouse_host,
+                clickhouse_port=self.config.clickhouse_port,
+            )
+            return self.sql_result_to_evidence(
+                result, "Exact bounded country/channel aggregates for source/raw/derived comparison.",
+                "Exact segment aggregate collected; the bundle evaluates completeness and provenance.",
+            )
+        return None
 
     def resolve_evidence_builders(
         self,

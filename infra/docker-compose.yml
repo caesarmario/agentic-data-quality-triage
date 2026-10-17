@@ -96,6 +96,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CELERY__RESULT_BACKEND: ${AIRFLOW__CELERY__RESULT_BACKEND:-db+postgresql://airflow:airflow@airflow-postgres:5432/airflow}
     AIRFLOW__CELERY__WORKER_CONCURRENCY: ${AIRFLOW__CELERY__WORKER_CONCURRENCY:-4}
     AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: ${AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL:-30}
+    DQ_ACCEPTANCE_MANUAL_ONLY: ${DQ_ACCEPTANCE_MANUAL_ONLY:-false}
     _PIP_ADDITIONAL_REQUIREMENTS: ${AIRFLOW_PIP_ADDITIONAL_REQUIREMENTS:-}
     <<: *app-env
   volumes:
@@ -125,8 +126,8 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: ${CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT:-1}
     ports:
-      - "${CH_HTTP_PORT:-8123}:8123"
-      - "${CH_NATIVE_PORT:-9000}:9000"
+      - "127.0.0.1:${CH_HTTP_PORT:-8123}:8123"
+      - "127.0.0.1:${CH_NATIVE_PORT:-9000}:9000"
     ulimits:
       nofile:
         soft: 262144
@@ -174,7 +175,7 @@ services:
       VITE_CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
       VITE_CLICKHOUSE_PASS: ${CLICKHOUSE_PASSWORD:-}
     ports:
-      - "${CH_UI_PORT:-3488}:3488"
+      - "127.0.0.1:${CH_UI_PORT:-3488}:3488"
     volumes:
       - ch_ui_data:/app/data
     depends_on:
@@ -193,7 +194,7 @@ services:
     container_name: dq_seaweed_master
     command: ["master", "-ip=seaweed-master", "-ip.bind=0.0.0.0", "-port=9333", "-mdir=/data"]
     ports:
-      - "${SEAWEED_MASTER_PORT:-9333}:9333"
+      - "127.0.0.1:${SEAWEED_MASTER_PORT:-9333}:9333"
     volumes:
       - sw_master:/data
     healthcheck:
@@ -207,9 +208,10 @@ services:
   seaweed-volume:
     image: chrislusf/seaweedfs:4.13
     container_name: dq_seaweed_volume
-    command: ["volume", "-ip=seaweed-volume", "-ip.bind=0.0.0.0", "-port=8080", "-dir=/data", "-max=20", "-mserver=seaweed-master:9333"]
+    # Five bucket collections can each grow seven physical volumes by default.
+    command: ["volume", "-ip=seaweed-volume", "-ip.bind=0.0.0.0", "-port=8080", "-dir=/data", "-max=64", "-mserver=seaweed-master:9333"]
     ports:
-      - "${SEAWEED_VOLUME_PORT:-18080}:8080"
+      - "127.0.0.1:${SEAWEED_VOLUME_PORT:-18080}:8080"
     volumes:
       - sw_volume:/data
     depends_on:
@@ -228,7 +230,7 @@ services:
     container_name: dq_seaweed_filer
     command: ["filer", "-ip=seaweed-filer", "-ip.bind=0.0.0.0", "-port=8888", "-master=seaweed-master:9333", "-defaultStoreDir=/data"]
     ports:
-      - "${SEAWEED_FILER_PORT:-8888}:8888"
+      - "127.0.0.1:${SEAWEED_FILER_PORT:-8888}:8888"
     volumes:
       - sw_filer:/data
     depends_on:
@@ -253,7 +255,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-admin}
     command: ["s3", "-filer=seaweed-filer:8888", "-ip.bind=0.0.0.0", "-port=8333"]
     ports:
-      - "${SEAWEED_S3_PORT:-8333}:8333"
+      - "127.0.0.1:${SEAWEED_S3_PORT:-8333}:8333"
     depends_on:
       seaweed-filer:
         condition: service_healthy
@@ -291,7 +293,7 @@ services:
       POSTGRES_PASSWORD: ${AIRFLOW_POSTGRES_PASSWORD:-airflow}
       POSTGRES_DB: postgres
     ports:
-      - "${AIRFLOW_POSTGRES_HOST_PORT:-5433}:5432"
+      - "127.0.0.1:${AIRFLOW_POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - airflow_pgdata:/var/lib/postgresql/data
       - ./airflow/postgres-init:/docker-entrypoint-initdb.d:ro
@@ -307,7 +309,7 @@ services:
     image: redis:7.2-alpine
     container_name: dq_airflow_redis
     ports:
-      - "${REDIS_HOST_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -335,8 +337,14 @@ services:
         password = os.environ.get("AIRFLOW_WWW_USER_PASSWORD", "admin")
         path = pathlib.Path(os.environ["AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE"])
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({user: password}))
-        print(f"[airflow-init] wrote simple auth password file for user={user}")
+        if path.exists():
+            existing = json.loads(path.read_text())
+            if user not in existing:
+                raise SystemExit("Existing Airflow auth file needs operator review; refusing overwrite")
+            print("[airflow-init] preserved existing simple auth password file")
+        else:
+            path.write_text(json.dumps({user: password}))
+            print(f"[airflow-init] wrote simple auth password file for user={user}")
         PY
         airflow db migrate
 
@@ -344,7 +352,7 @@ services:
     <<: *airflow-common
     container_name: dq_airflow_api_server
     ports:
-      - "${AIRFLOW_PORT:-8080}:8080"
+      - "127.0.0.1:${AIRFLOW_PORT:-8080}:8080"
     command: ["airflow", "api-server"]
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/v2/monitor/health >/dev/null || exit 1"]
@@ -400,7 +408,7 @@ services:
     container_name: dq_airflow_flower
     command: ["airflow", "celery", "flower"]
     ports:
-      - "${FLOWER_PORT:-5555}:5555"
+      - "127.0.0.1:${FLOWER_PORT:-5555}:5555"
     depends_on:
       airflow-init:
         condition: service_completed_successfully
@@ -413,7 +421,7 @@ services:
     <<: *python-runner
     container_name: dq_streamlit
     ports:
-      - "${STREAMLIT_PORT:-8501}:8501"
+      - "127.0.0.1:${STREAMLIT_PORT:-8501}:8501"
     environment:
       <<: *app-env
       CONTROL_PLANE_API_URL: ${CONTROL_PLANE_API_URL:-http://api:8000}
@@ -439,13 +447,13 @@ services:
       <<: *app-env
       EXTERNAL_LLM_ENABLED: ${COPILOT_EXTERNAL_LLM_ENABLED:-false}
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     command:
       - /bin/sh
       - -lc
       - |
         set -eu
-        python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000
+        exec python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/health >/dev/null || exit 1"]
       interval: 10s

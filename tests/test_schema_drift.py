@@ -8,6 +8,7 @@
 # --- Importing Libraries
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -214,6 +215,45 @@ def clean_schema_rows(contract: SchemaContractConfig) -> dict[str, list[tuple[An
     return schemas
 
 
+def bootstrap_orders_schema_rows() -> dict[str, list[tuple[Any, ...]]]:
+    """
+    Read ordered column metadata independently from the checked-in bootstrap DDL.
+
+    Returns:
+        Table-name mapping of position/name/type/default rows without warehouse access.
+    """
+    ddl_path = Path(__file__).resolve().parents[1] / "infra/init/clickhouse/01_orders_tables.sql"
+    ddl = ddl_path.read_text(encoding="utf-8")
+    schemas: dict[str, list[tuple[Any, ...]]] = {}
+
+    for table in re.finditer(
+        r"CREATE TABLE IF NOT EXISTS dq\.([a-z_]+)\s*\(\n(.*?)\n\)\s*ENGINE\s*=",
+        ddl,
+        flags=re.DOTALL,
+    ):
+        table_name = table.group(1)
+        assert table_name not in schemas, f"Duplicate bootstrap table: {table_name}"
+        rows = []
+
+        # Bootstrap declares one column per line; full matching rejects unparsed syntax.
+        for position, definition in enumerate(table.group(2).splitlines(), start=1):
+            column = re.fullmatch(
+                r"([a-z_]+)\s+([A-Za-z][A-Za-z0-9]*(?:\([^()]*\))?)"
+                r"(?:\s+(DEFAULT|MATERIALIZED|ALIAS|EPHEMERAL)\s+(.+))?",
+                definition.strip().removesuffix(","),
+            )
+            assert column is not None, f"Unparsed bootstrap column: {definition}"
+            name, data_type, default_kind, default_expression = column.groups()
+            rows.append((position, name, data_type, default_kind or "", default_expression or ""))
+
+        schemas[table_name] = rows
+
+    assert set(schemas) == {"raw_orders", "stg_orders", "fct_orders_daily"}
+    assert sum(len(rows) for rows in schemas.values()) == 63
+
+    return schemas
+
+
 def evaluate_clean_contract() -> tuple[SchemaContractConfig, Any]:
     """
     Evaluate a contract against exact fake system metadata.
@@ -246,9 +286,113 @@ def test_orders_schema_contract_is_complete_and_strict() -> None:
     assert set(tables) == {"dq.raw_orders", "dq.stg_orders", "dq.fct_orders_daily"}
     assert sum(len(table.columns) for table in contract.tables) == 63
     assert contract.policy.missing_column == "critical"
+    assert contract.policy.type_mismatch == "critical"
     assert contract.policy.unexpected_columns == "warning"
+    assert contract.policy.default_mismatch == "warning"
     assert contract.policy.fail_on_severity == "critical"
+    assert all(table.check_column_order and table.check_defaults for table in contract.tables)
     assert tables["dq.raw_orders"].columns[-1].default_expression == "generateUUIDv4()"
+
+
+@pytest.mark.parametrize("table_name", ["raw_orders", "stg_orders", "fct_orders_daily"])
+def test_orders_bootstrap_columns_match_schema_contract(table_name: str) -> None:
+    """
+    Compare every bootstrap column's order, type, default kind, and expression.
+
+    Args:
+        table_name: Owned orders table whose full schema must match the contract.
+
+    Returns:
+        None.
+    """
+    expected = clean_schema_rows(load_orders_contract())
+    observed = bootstrap_orders_schema_rows()
+
+    assert observed[table_name] == expected[table_name]
+
+
+def test_orders_bootstrap_schema_evaluation_has_no_findings() -> None:
+    """Ensure bootstrap-derived observations pass every existing detector check."""
+    evaluation = evaluate_schema_contract(
+        client=FakeSchemaClient(bootstrap_orders_schema_rows()),
+        contract=load_orders_contract(),
+        run_id="manual__orders_bootstrap_contract_test",
+    )
+
+    assert evaluation.status == "pass"
+    assert evaluation.should_fail is False
+    assert evaluation.highest_severity == "info"
+    assert len(evaluation.snapshots) == 3
+    assert len(evaluation.results) == 258
+    assert evaluation.findings == ()
+    assert all(result.status == "pass" for result in evaluation.results)
+
+
+@pytest.mark.parametrize(
+    ("table_name", "column_name"),
+    [("stg_orders", "transformed_at"), ("fct_orders_daily", "updated_at")],
+)
+def test_orders_bootstrap_timestamp_without_utc_remains_critical(
+    table_name: str, column_name: str,
+) -> None:
+    """Ensure dropping the intended UTC timestamp type still crosses the gate."""
+    schemas = bootstrap_orders_schema_rows()
+    for index, row in enumerate(schemas[table_name]):
+        if row[1] == column_name:
+            schemas[table_name][index] = (*row[:2], "DateTime64(3)", *row[3:])
+            break
+    else:
+        pytest.fail(f"Missing bootstrap column: {table_name}.{column_name}")
+
+    evaluation = evaluate_schema_contract(
+        client=FakeSchemaClient(schemas),
+        contract=load_orders_contract(),
+        run_id="manual__orders_bootstrap_utc_drift_test",
+    )
+
+    assert evaluation.status == "fail"
+    assert evaluation.should_fail is True
+    assert len(evaluation.findings) == 1
+    finding = evaluation.findings[0]
+    assert (finding.qualified_name, finding.column_name, finding.check_type, finding.severity) == (
+        f"dq.{table_name}", column_name, "column_type", "critical",
+    )
+
+
+@pytest.mark.parametrize(
+    ("table_name", "column_name"),
+    [
+        ("stg_orders", "transformed_at"),
+        ("fct_orders_daily", "duplicate_order_count"),
+        ("fct_orders_daily", "late_arriving_count"),
+        ("fct_orders_daily", "updated_at"),
+    ],
+)
+def test_orders_bootstrap_missing_default_remains_warning(
+    table_name: str, column_name: str,
+) -> None:
+    """Ensure the corrected defaults remain enforced rather than silently ignored."""
+    schemas = bootstrap_orders_schema_rows()
+    for index, row in enumerate(schemas[table_name]):
+        if row[1] == column_name:
+            schemas[table_name][index] = (*row[:3], "", "")
+            break
+    else:
+        pytest.fail(f"Missing bootstrap column: {table_name}.{column_name}")
+
+    evaluation = evaluate_schema_contract(
+        client=FakeSchemaClient(schemas),
+        contract=load_orders_contract(),
+        run_id="manual__orders_bootstrap_default_drift_test",
+    )
+
+    assert evaluation.status == "warn"
+    assert evaluation.should_fail is False
+    assert len(evaluation.findings) == 1
+    finding = evaluation.findings[0]
+    assert (finding.qualified_name, finding.column_name, finding.check_type, finding.severity) == (
+        f"dq.{table_name}", column_name, "column_default", "warning",
+    )
 
 
 def test_schema_contract_rejects_duplicate_columns_and_unknown_fields() -> None:

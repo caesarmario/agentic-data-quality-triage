@@ -145,6 +145,23 @@ def test_embeds_fixed_copy_and_bounds_in_both_languages(language, renderer, engl
 
 
 @pytest.mark.parametrize("language", ["en", "id"])
+@pytest.mark.parametrize("dt", [None, "2026-10-16"])
+def test_daily_empty_copy_is_localized_without_healthy_or_null_date(language, dt):
+    with language_context(language):
+        text = f.format_daily_summary(dt, [], [])
+        render = f.render_daily_summary_embed(dt, [], [])
+
+    expected = translate("No quality data yet", language)
+    assert expected in text
+    assert expected in serialized(render)
+    assert "None" not in text
+    assert "None" not in serialized(render)
+    assert translate("Healthy", language) not in text
+    assert render.payload["embeds"][0]["color"] != f.DISCORD_COLORS["success"]
+    assert_limits(render)
+
+
+@pytest.mark.parametrize("language", ["en", "id"])
 def test_reports_answers_reasons_and_evidence_are_not_translated(language):
     stored = report()
     original = copy.deepcopy(stored)
@@ -214,7 +231,7 @@ def test_incident_action_grouping_and_readonly_resolution(language, workspace, h
         payload = f.serialize_action_rows(rows)
     first = [item.action_id for item in rows[0].actions]
     assert first == (["evidence"] + (["report"] if has_report else []) if resolved else ["investigate", "evidence", "ask"])
-    second = (["workspace"] if workspace else []) + ([] if resolved else ["resolve"])
+    second = (["workspace"] if workspace else []) + ([] if resolved else ["recovery", "resolve"])
     assert [item.action_id for row in rows[1:] for item in row.actions] == second
     assert all(item.style != "success" for row in rows for item in row.actions)
     assert all(item.custom_id.endswith(REF) for row in rows for item in row.actions if item.custom_id)
@@ -232,7 +249,7 @@ def test_triage_has_explicit_reinvestigation_and_grouped_followups(language, wor
         rows = f.triage_action_rows(REF, has_report, operator_ui_url=workspace)
     assert [item.action_id for item in rows[0].actions] == ["reinvestigate", "evidence", "ask"] + (["report"] if has_report else [])
     assert rows[0].actions[0].custom_id == f"dq:v1:reinvestigate:{REF}"
-    assert [item.action_id for item in rows[1].actions] == (["workspace"] if workspace else []) + ["resolve", "draft"]
+    assert [item.action_id for item in rows[1].actions] == (["workspace"] if workspace else []) + ["recovery", "resolve", "draft"]
     assert all(len(row.actions) <= 5 for row in rows)
     assert all(item.style != "success" for row in rows for item in row.actions)
 
@@ -255,7 +272,7 @@ def test_configured_workspace_and_persisted_report_metadata_are_rendered(monkeyp
     render = f.render_incident_embed(f.build_discord_incident_payload(stored))
     assert [item.action_id for row in render.action_rows for item in row.actions] == ["evidence", "report", "workspace"]
     render = f.render_triage_embed(report())
-    assert [item.action_id for row in render.action_rows for item in row.actions][-3:] == ["workspace", "resolve", "draft"]
+    assert [item.action_id for row in render.action_rows for item in row.actions][-4:] == ["workspace", "recovery", "resolve", "draft"]
 
 
 @pytest.mark.parametrize("language", ["en", "id"])

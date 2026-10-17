@@ -102,6 +102,8 @@ def triage_dag_params() -> dict[str, Param]:
     params = common_dag_params()
     params.update(
         {
+            "allow_external_llm": Param(False, type="boolean",
+                description="Manual opt-in for process-scoped, budgeted provider calls; runner default is unchanged."),
             "run_triage": Param(
                 True,
                 type="boolean",
@@ -280,6 +282,7 @@ with DAG(
     t10_run_agentic_triage = runner_bash_task(
         task_id="t10_run_agentic_triage",
         project_command=(
+            "env EXTERNAL_LLM_ENABLED={{ 'true' if params.allow_external_llm else 'false' }} "
             "python scripts/run_triage_alerts.py $DATE_ARGS "
             "--enabled "
             "'{{ (dag_run.conf.get(\"checkpoint_action\", \"triage\") == \"triage\") "
@@ -311,6 +314,8 @@ with DAG(
         execution_timeout=timedelta(minutes=30),
     )
 
+    # A failed provider attempt must never be repeated by an Airflow task retry.
+    t10_run_agentic_triage.retries = 0
     t20_sync_discord_incidents = runner_bash_task(
         task_id="t20_sync_discord_incidents",
         project_command=(

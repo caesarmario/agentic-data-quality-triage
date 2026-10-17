@@ -160,8 +160,9 @@ def test_missing_segment_without_raw_loss_has_no_approval_action(keep_downstream
     report = build_report_from_state(state)
 
     assert report.approval_gated_actions == []
-    assert report.hypotheses[0].recommended_action == recommendation
-    assert "Compare segment counts" in recommendation
+    assert report.hypotheses[0].recommended_action == report.incident_context_bundle.recovery_recommendation
+    assert report.hypotheses[0].recommended_action.startswith("Collect the missing exact evidence")
+    assert "expected and observed segment sets" in recommendation
 
 
 def raw_partition_evidence(query: str, rows: list[dict]) -> EvidenceItem:
@@ -176,8 +177,8 @@ def raw_partition_evidence(query: str, rows: list[dict]) -> EvidenceItem:
 
 
 @pytest.mark.parametrize("date_filter", ["'2026-09-22'", "toDate('2026-09-22')"])
-def test_missing_segment_with_corroborated_raw_loss_is_approval_gated(date_filter: str) -> None:
-    """Only a same-date empty raw partition corroborates partition regeneration."""
+def test_raw_loss_without_pinned_source_never_authorizes_regeneration(date_filter: str) -> None:
+    """Empty raw is evidence of loss, not permission to generate replacement data."""
     state = build_segment_state()
     state.evidence.append(
         raw_partition_evidence(
@@ -188,10 +189,7 @@ def test_missing_segment_with_corroborated_raw_loss_is_approval_gated(date_filte
     state.hypotheses = build_hypotheses_for_state(state)
     report = build_report_from_state(state)
 
-    assert len(report.approval_gated_actions) == 1
-    assert report.approval_gated_actions[0].action_type.value == "backfill"
-    assert report.approval_gated_actions[0].requires_approval is True
-    assert "raw partition" in report.approval_gated_actions[0].reason
+    assert report.approval_gated_actions == []
     assert action_safety_check(report.model_dump(mode="json")).status == "pass"
 
 
@@ -233,17 +231,14 @@ def test_missing_segment_rejects_conflicting_raw_counts() -> None:
 
 
 @pytest.mark.parametrize("category", ["missing_partition", "freshness_gap", "late_arriving"])
-def test_existing_partition_backfill_categories_remain_unchanged(category: str) -> None:
-    """The new corroboration gate applies only to missing-segment actions."""
+def test_partition_categories_require_separate_pinned_recovery_plan(category: str) -> None:
+    """A hypothesis category alone cannot grant generator-backed recovery."""
     state = build_segment_state()
     state.evidence = []
     hypothesis = build_hypotheses_for_state(state)[0].model_copy(update={"root_cause_category": category})
     actions = build_approval_actions(state, hypothesis)
 
-    assert len(actions) == 1
-    assert actions[0].action_type.value == "backfill"
-    assert actions[0].requires_approval is True
-    assert actions[0].parameters["run_seed"] is True
+    assert actions == []
 
 
 # --- Defining Contract Tests

@@ -1,5 +1,6 @@
 """Public documentation must be navigable without local acceptance files."""
 from pathlib import Path
+import hashlib
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -22,6 +23,25 @@ def test_catalog_matches_all_repository_owned_ddl_and_migrations():
                 path.read_text(encoding="utf-8"), re.I,
             ))
     assert names == declared
+    recovery_objects = {
+        "dq_control.source_snapshots",
+        "dq_control.recovery_plans",
+        "dq_control.recovery_executions",
+        "dq_control.recovery_outbox",
+        "dq_control.partition_revisions",
+        "dq_control.partition_publications",
+        "dq_control.approval_legacy_imports",
+        "dq_control.approval_projection_outbox",
+    }
+    assert recovery_objects <= names
+    source_hashes = {item["path"]: item["sha256"] for item in catalog["inputs"]}
+    for source in (
+        "infra/init/postgres/09_evidence_driven_recovery.sql",
+        "infra/init/postgres/10_partition_publication.sql",
+        "infra/init/postgres/11_legacy_approval_control.sql",
+    ):
+        assert len(source_hashes[source]) == 64
+        assert source_hashes[source] == hashlib.sha256((root / source).read_bytes()).hexdigest()
     for obj in catalog["objects"]:
         assert obj["columns"] and obj["sources"]
     assert all(r["from"].startswith("dq_control.") and r["to"].startswith("dq_control.")

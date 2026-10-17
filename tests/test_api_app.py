@@ -29,6 +29,14 @@ from agent.tools.approval_queue import ApprovalRequest, normalize_backfill_param
 client = TestClient(api_main.app)
 
 
+@pytest.fixture(autouse=True)
+def configured_local_adapter(monkeypatch):
+    monkeypatch.setenv("CONTROL_PLANE_APPROVAL_TOKEN", "test-service-token")
+    client.headers["X-Control-Plane-Token"] = "test-service-token"
+    yield
+    client.headers.pop("X-Control-Plane-Token", None)
+
+
 # --- Defining Test Fakes
 class DummyAlert:
     """
@@ -108,6 +116,7 @@ def test_daily_summary_endpoint_is_typed_and_filters_internal_sql(monkeypatch) -
             "total_open_alerts": 1,
             "duration_ms": 7,
             "summary": "Daily quality summary for 2026-06-10.",
+            "availability": "available",
             "sql": "SELECT internal_query_metadata",
         }
 
@@ -146,6 +155,7 @@ def test_daily_summary_endpoint_can_resolve_latest_available_date(monkeypatch) -
             "total_open_alerts": 0,
             "duration_ms": 1,
             "summary": "Latest available daily summary.",
+            "availability": "empty",
         }
 
     monkeypatch.setattr(api_main, "fetch_daily_quality_summary", fake_fetch_daily_quality_summary)
@@ -179,6 +189,7 @@ def test_daily_summary_endpoint_rejects_inconsistent_tool_totals(monkeypatch) ->
             "total_open_alerts": 0,
             "duration_ms": 1,
             "summary": "Invalid aggregate.",
+            "availability": "available",
         },
     )
 

@@ -34,7 +34,7 @@ def translate(text: str, language: str | None = None, **values: object) -> str:
     """Translate catalog entries only; unknown text and artifacts remain original."""
     locale = normalize_language(language) if language is not None else current_language()
     translated = text
-    for name in ("discord", "streamlit", "common", "help"):
+    for name in ("discord", "streamlit", "common", "help", "recovery"):
         module_name = f"apps.common.locales.{name}"
         try:
             catalog = import_module(module_name).MESSAGES

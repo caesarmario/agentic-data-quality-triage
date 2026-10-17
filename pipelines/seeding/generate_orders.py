@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import random
 from datetime import date
 from pathlib import Path
@@ -25,6 +27,11 @@ from pipelines.seeding.helpers import (
 )
 from pipelines.seeding.incident_policy import resolve_incident_scenario_for_date
 from pipelines.seeding.incidents import apply_incidents, resolve_incident_names
+from pipelines.seeding.snapshots import (
+    SOURCE_FRAME_ATTR,
+    serialize_snapshot_frame,
+    write_capture_receipt,
+)
 
 
 # --- Defining Constants
@@ -74,7 +81,8 @@ def generate_orders_for_date(
     resolved_incident_scenario  = resolution.resolved_scenario
     total_days                  = config.generation.default_total_days_for_trend
     day_index                   = stable_day_index(dt, total_days)
-    seed_value                  = config.seed_for_date(dt, namespace=f"orders.generate.{resolved_incident_scenario}")
+    # Fault selection must not change business values in the captured upstream source.
+    seed_value                  = config.seed_for_date(dt, namespace="orders.generate.base.v1")
 
     logger.info(
         "Generating orders partition | dt=%s seed=%s requested_scenario=%s resolved_scenario=%s day_index=%d total_days=%d",
@@ -113,10 +121,16 @@ def generate_orders_for_date(
                         day_index=day_index,
                         total_days=total_days,
                         config=config,
-                        incident_scenario=resolved_incident_scenario,
+                        incident_scenario="baseline",
                     )
                 )
                 sequence += 1
+
+    # Copy before handlers mutate dictionaries or remove/duplicate rows. This private
+    # frame is never logged or serialized as pandas attrs in a Parquet footer.
+    source_frame = pd.DataFrame.from_records(rows, columns=ORDER_COLUMNS).drop(columns=["incident_scenario"])
+    for row in rows:
+        row["incident_scenario"] = resolved_incident_scenario
 
     incident_names     = resolve_incident_names(resolved_incident_scenario)
     incident_results   = []
@@ -145,6 +159,7 @@ def generate_orders_for_date(
         )
 
     frame = pd.DataFrame.from_records(rows, columns=ORDER_COLUMNS)
+    frame.attrs[SOURCE_FRAME_ATTR]              = source_frame
     frame.attrs["incident_results"]             = incident_results
     frame.attrs["incident_resolution"]          = resolution.model_dump(mode="json")
     frame.attrs["requested_incident_scenario"]  = incident_scenario
@@ -195,7 +210,11 @@ def write_orders_parquet(
     )
 
     # Index is not part of the landing contract; keep the file schema explicit.
-    frame.to_parquet(parquet_path, index=False, engine="pyarrow", compression=compression)
+    # Explicit Arrow schema also preserves the empty missing_latest_day contract;
+    # strip attrs so pre-fault data and evaluator labels cannot enter the footer.
+    payload = serialize_snapshot_frame(frame, "landing", compression=compression)
+    frame.attrs["landing_sha256"] = hashlib.sha256(payload).hexdigest()
+    parquet_path.write_bytes(payload)
 
     logger.info("Orders Parquet written | dt=%s path=%s bytes=%d", dt, parquet_path, parquet_path.stat().st_size)
 
@@ -207,6 +226,8 @@ def generate_and_write_orders(
     config: OrdersSeedConfig,
     output_path: str | Path | None = None,
     incident_scenario: str = "baseline",
+    *,
+    correlation_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Generate one orders partition and persist it as Parquet.
@@ -217,12 +238,19 @@ def generate_and_write_orders(
         output_path: Optional explicit local Parquet file path.
         incident_scenario: Baseline or incident scenario label stored with each row
             for later evaluation.
+        correlation_id: Optional opaque pipeline ID; defaults to Airflow context
+            or a deterministic developer partition ID.
 
     Returns:
         Summary dictionary with partition metadata and local file path.
     """
     frame        = generate_orders_for_date(dt=dt, config=config, incident_scenario=incident_scenario)
     parquet_path = write_orders_parquet(frame=frame, dt=dt, config=config, output_path=output_path)
+    capture = write_capture_receipt(
+        frame.attrs[SOURCE_FRAME_ATTR], parquet_path, dt=dt,
+        correlation_id=correlation_id or os.getenv("AIRFLOW_CTX_DAG_RUN_ID") or f"orders-{dt.isoformat()}-v1",
+        landing_sha256=frame.attrs["landing_sha256"],
+    )
 
     summary = {
         "dt": dt.isoformat(),
@@ -235,6 +263,7 @@ def generate_and_write_orders(
         "incident_results": frame.attrs.get("incident_results", []),
         "s3_bucket": config.output.bucket,
         "s3_key": config.output.object_key(dt),
+        **capture,
     }
 
     logger.info("Generate-and-write completed | summary=%s", summary)

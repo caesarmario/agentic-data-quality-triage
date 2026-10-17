@@ -8,10 +8,17 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import re
+import shlex
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from jinja2 import StrictUndefined
+from jinja2.nativetypes import NativeEnvironment
 
 
 # --- Getting Logger
@@ -36,6 +43,8 @@ TRIGGERED_DAG_FILES = [
     "90_02_dag_dq_platform_approved_actions.py",
     "90_03_dag_dq_incident_revalidation.py",
     "90_04_dag_dq_resolution_outbox_acceptance.py",
+    "90_05_dag_dq_incident_recovery.py",
+    "90_07_dag_dq_recovery_acceptance.py",
     "91_dag_dq_platform_validation.py",
     "92_dag_dq_llm_provider_smoke.py",
     "93_dag_dq_agent_checkpoint_smoke.py",
@@ -46,6 +55,8 @@ TRIGGERED_DAG_FILES = [
     "98_dag_dq_control_plane_supervisor_smoke.py",
     "99_dag_dq_control_plane_resilience_smoke.py",
 ]
+
+SCHEDULED_ADMIN_DAG_FILES = ["90_06_dag_dq_recovery_reconciliation.py"]
 
 ORCHESTRATOR_DAG_FILES = [
     "00_dag_dq_platform_daily_orchestrator.py",
@@ -71,10 +82,150 @@ def read_dag_file(file_name: str) -> str:
 
     logger.info("Reading DAG file for design test | path=%s", path)
 
-    return path.read_text(encoding="utf-8")
+    return path.read_text(encoding="utf-8-sig")
+
+
+def acceptance_helpers() -> dict[str, Any]:
+    """Execute only pure acceptance helpers, without importing Airflow internals."""
+    tree = ast.parse(HELPERS_PATH.read_text(encoding="utf-8"))
+    names = {"parse_stage_flag", "acceptance_manual_only", "safe_empty_demo_audit_since",
+             "empty_demo_readiness_args"}
+    nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names
+             or isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
+                 and target.id == "EMPTY_DEMO_AUDIT_SINCE_PATTERN" for target in node.targets)]
+    namespace = dict(os=os, re=re, datetime=datetime, timezone=timezone, Any=Any)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(HELPERS_PATH), "exec"), namespace)
+    return namespace
+
+
+def validation_readiness_command() -> str:
+    """Read the actual command template, not a test-owned approximation."""
+    tree = ast.parse(read_dag_file("91_dag_dq_platform_validation.py"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "runner_plain_bash_task":
+            options = {item.arg: item.value for item in node.keywords}
+            if ast.literal_eval(options["task_id"]) == "t20_run_platform_readiness":
+                return ast.literal_eval(options["project_command"])
+    raise AssertionError("Readiness task missing")
 
 
 # --- Defining Tests
+@pytest.mark.parametrize("raw,expected", [(None, False), ("false", False), ("FALSE", False),
+                                        ("true", True), ("TrUe", True)])
+def test_manual_only_flag_changes_only_the_two_schedules(monkeypatch, raw, expected) -> None:
+    if raw is None:
+        monkeypatch.delenv("DQ_ACCEPTANCE_MANUAL_ONLY", raising=False)
+    else:
+        monkeypatch.setenv("DQ_ACCEPTANCE_MANUAL_ONLY", raw)
+    namespace = acceptance_helpers()
+    assert namespace["acceptance_manual_only"]() is expected
+    namespace.update(DAILY_PLATFORM_SCHEDULE="5 0 * * *", timedelta=timedelta)
+    expected_defaults = {SCHEDULED_DAG_FILE: "5 0 * * *",
+                         "90_06_dag_dq_recovery_reconciliation.py": timedelta(minutes=1)}
+    consumers = set()
+    for path in DAGS_ROOT.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+        if any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+               and node.func.id == "acceptance_manual_only" for node in ast.walk(tree)):
+            consumers.add(path.name)
+            dag_call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Name) and node.func.id == "DAG")
+            schedule = next(item.value for item in dag_call.keywords if item.arg == "schedule")
+            result = eval(compile(ast.Expression(schedule), str(path), "eval"), namespace)
+            assert result == (None if expected else expected_defaults[path.name])
+    assert consumers == set(expected_defaults)
+
+
+@pytest.mark.parametrize("raw", ["", "0", "1", "yes", "no", "on", "off", " true", "false\n", "null"])
+def test_manual_only_flag_rejects_non_boolean_env_without_echo(monkeypatch, raw) -> None:
+    monkeypatch.setenv("DQ_ACCEPTANCE_MANUAL_ONLY", raw)
+    with pytest.raises(ValueError, match="DQ_ACCEPTANCE_MANUAL_ONLY"):
+        acceptance_helpers()["acceptance_manual_only"]()
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (None, "2026-10-16T03:00:00+00:00"),
+    ("2026-10-16T10:00:00+07:00", "2026-10-16T03:00:00+00:00"),
+    ("2026-10-16T03:00:00.123456Z", "2026-10-16T03:00:00.123456+00:00"),
+    ("2026-10-15T22:00:00-05:00", "2026-10-16T03:00:00+00:00"),
+])
+def test_empty_demo_boundary_is_aware_utc_and_one_shell_argument(raw, expected) -> None:
+    from scripts.trigger_airflow_validation import validate_empty_demo_audit_since
+
+    helpers = acceptance_helpers()
+    logical_date = datetime(2026, 10, 16, 3, tzinfo=timezone.utc)
+    assert helpers["safe_empty_demo_audit_since"](raw, logical_date) == expected
+    if raw is not None:
+        assert validate_empty_demo_audit_since(raw) == expected
+    args = helpers["empty_demo_readiness_args"](True, raw, logical_date)
+    assert shlex.split(args) == ["--expect-empty-demo", "--empty-demo-audit-since", expected]
+
+
+@pytest.mark.parametrize("raw", [
+    "", "2026-10-16", "2026-10-16T03:00:00", "2026-10-16 03:00:00Z",
+    "2026-02-30T03:00:00Z", "2026-10-16T25:00:00Z", "2026-10-16T03:00:00+07:60",
+    "2026-10-16T03:00:00+24:00", "2026-10-16T03:00:00Z\n",
+    "0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00",
+    "2026-10-16T03:00:00.1234567Z", "2026-10-16T03:00:00Z' ; echo unsafe",
+    '2026-10-16T03:00:00Z$(echo unsafe)', True, 123,
+])
+def test_empty_demo_boundary_rejects_invalid_ambiguous_and_injected_values(raw) -> None:
+    from scripts.trigger_airflow_validation import validate_empty_demo_audit_since
+
+    with pytest.raises(ValueError, match="aware ISO timestamp"):
+        acceptance_helpers()["safe_empty_demo_audit_since"](raw, None)
+    with pytest.raises(ValueError, match="aware ISO timestamp"):
+        validate_empty_demo_audit_since(raw)
+
+
+@pytest.mark.parametrize("logical_date", [None, datetime(2026, 10, 16)])
+def test_default_audit_boundary_never_guesses_a_timezone(logical_date) -> None:
+    with pytest.raises(ValueError, match="aware ISO timestamp"):
+        acceptance_helpers()["safe_empty_demo_audit_since"](None, logical_date)
+
+
+def test_dag91_renders_optional_empty_demo_boundary_and_checks_dependency() -> None:
+    helpers = acceptance_helpers()
+    env = NativeEnvironment(undefined=StrictUndefined)
+    env.globals["empty_demo_readiness_args"] = helpers["empty_demo_readiness_args"]
+    template = env.from_string(validation_readiness_command())
+    run = SimpleNamespace(conf={}, logical_date=datetime(2026, 10, 16, 3, tzinfo=timezone.utc))
+    context = dict(dag_run=run, params=SimpleNamespace(web_operator_request_id=""))
+    assert shlex.split(template.render(**context)) == ["python", "scripts/smoke_readiness.py"]
+    run.conf = {"expect_empty_demo": True}
+    assert shlex.split(template.render(**context))[-3:] == [
+        "--expect-empty-demo", "--empty-demo-audit-since", "2026-10-16T03:00:00+00:00"]
+    run.conf["empty_demo_audit_since"] = "2026-10-16T11:00:00+07:00"
+    assert shlex.split(template.render(**context))[-1] == "2026-10-16T04:00:00+00:00"
+    run.conf["expect_empty_demo"] = False
+    with pytest.raises(ValueError, match="requires expect_empty_demo"):
+        template.render(**context)
+    run.conf = {"expect_empty_demo": "false"}
+    assert "--expect-empty-demo" not in template.render(**context)
+    run.conf = {"expect_empty_demo": 1}
+    with pytest.raises(ValueError, match="expect_empty_demo"):
+        template.render(**context)
+
+
+def test_dag91_boundary_schema_and_cli_grammar_stay_aligned() -> None:
+    from jsonschema import ValidationError, validate
+    from scripts.trigger_airflow_validation import EMPTY_DEMO_AUDIT_SINCE_PATTERN
+
+    helpers = acceptance_helpers()
+    assert helpers["EMPTY_DEMO_AUDIT_SINCE_PATTERN"] == EMPTY_DEMO_AUDIT_SINCE_PATTERN
+    tree = ast.parse(read_dag_file("91_dag_dq_platform_validation.py"))
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                    and node.name == "validation_dag_params")
+    namespace = dict(helpers, Param=lambda default, **schema: schema, VALIDATION_SUITE_NAMES=("all",))
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "<dag91-params>", "exec"), namespace)
+    schema = namespace["validation_dag_params"]()["empty_demo_audit_since"]
+    for value in (None, "2026-10-16T03:00:00Z", "2026-10-16T10:00:00.123456+07:00"):
+        validate(value, schema)
+    for value in ("", "2026-10-16T03:00:00Z\n", "2026-10-16T03:00:00+07:60"):
+        with pytest.raises(ValidationError):
+            validate(value, schema)
+
+
 def test_only_platform_daily_orchestrator_has_cron_schedule() -> None:
     """
     Ensure only the platform entrypoint DAG owns the daily cron schedule.
@@ -85,7 +236,7 @@ def test_only_platform_daily_orchestrator_has_cron_schedule() -> None:
     daily_content = read_dag_file(SCHEDULED_DAG_FILE)
 
     # Only the platform-level orchestrator should be scheduled directly.
-    assert "schedule=DAILY_PLATFORM_SCHEDULE" in daily_content
+    assert "schedule=None if acceptance_manual_only() else DAILY_PLATFORM_SCHEDULE" in daily_content
 
     for dag_file in TRIGGERED_DAG_FILES:
         child_content = read_dag_file(dag_file)
@@ -93,6 +244,11 @@ def test_only_platform_daily_orchestrator_has_cron_schedule() -> None:
         assert "schedule=None" in child_content
         assert "schedule=DAILY_PLATFORM_SCHEDULE" not in child_content
         assert "5 0 * * *" not in child_content
+
+    for dag_file in SCHEDULED_ADMIN_DAG_FILES:
+        content = read_dag_file(dag_file)
+        assert "schedule=None if acceptance_manual_only() else timedelta(minutes=1)" in content
+        assert "schedule=DAILY_PLATFORM_SCHEDULE" not in content
 
 
 def test_orchestrator_triggers_reset_existing_child_runs() -> None:
@@ -129,6 +285,9 @@ def test_platform_dag_numbering_matches_operational_flow() -> None:
         "90_02_dag_dq_platform_approved_actions",
         "90_03_dag_dq_incident_revalidation",
         "90_04_dag_dq_resolution_outbox_acceptance",
+        "90_05_dag_dq_incident_recovery",
+        "90_06_dag_dq_recovery_reconciliation",
+        "90_07_dag_dq_recovery_acceptance",
         "91_dag_dq_platform_validation",
         "92_dag_dq_llm_provider_smoke",
         "93_dag_dq_agent_checkpoint_smoke",
@@ -155,6 +314,23 @@ def test_platform_dag_numbering_matches_operational_flow() -> None:
 
     assert discovered_dag_ids == expected_dag_ids
 
+
+def test_recovery_dags_keep_execution_manual_and_reconciliation_readonly() -> None:
+    """Recovery execution/acceptance are manual; only read-only reconciliation is scheduled."""
+    recovery = read_dag_file("90_05_dag_dq_incident_recovery.py")
+    reconciliation = read_dag_file("90_06_dag_dq_recovery_reconciliation.py")
+    acceptance = read_dag_file("90_07_dag_dq_recovery_acceptance.py")
+
+    assert 'DAG_ID = "90_05_dag_dq_incident_recovery"' in recovery
+    assert "schedule=None" in recovery
+    assert 'DAG_ID = "90_06_dag_dq_recovery_reconciliation"' in reconciliation
+    assert "schedule=None if acceptance_manual_only() else timedelta(minutes=1)" in reconciliation
+    assert "is_paused_upon_creation=True" in reconciliation
+    assert "reconcile_existing_runs" in reconciliation
+    assert "runtime" not in reconciliation.lower()
+    assert 'DAG_ID = "90_07_dag_dq_recovery_acceptance"' in acceptance
+    assert "schedule=None" in acceptance
+
 def test_validation_dag_is_manual_bounded_and_auditable() -> None:
     """
     Ensure the validation DAG uses named suites and explicit Airflow task anchors.
@@ -176,6 +352,10 @@ def test_validation_dag_is_manual_bounded_and_auditable() -> None:
     assert "python scripts/smoke_readiness.py" in content
     assert '"require_api": Param(' in content
     assert "--require-api" in content
+    assert '"expect_empty_demo": Param(' in content
+    assert '"expect_empty_demo": Param(\n            False,\n            type="boolean"' in content
+    assert 'dag_run.conf.get(\\"expect_empty_demo\\", false)' in content
+    assert "empty_demo_readiness_args" in content
     assert '"require_web": Param(' in content
     assert "--require-web" in content
     assert "arbitrary" not in content.lower()
@@ -717,6 +897,22 @@ def test_makefile_build_runner_is_windows_compatible() -> None:
 
     assert "COMPOSE_ANSI=never COMPOSE_PROGRESS=plain" not in content
     assert "$(DC) --ansi never --progress plain build $(RUNNER_SERVICE)" in content
+
+
+def test_runner_helpers_forward_airflow_task_identity_to_dq_runner() -> None:
+    """The inner runner must receive task identity for per-task artifact namespaces."""
+    source = (DAGS_ROOT / "dq_platform" / "helpers.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    functions = {node.name: ast.get_source_segment(source, node) for node in tree.body
+                 if isinstance(node, ast.FunctionDef)}
+
+    for name in ("build_runner_bash_command", "build_runner_plain_bash_command"):
+        command_builder = functions[name]
+        assert "exec --env AIRFLOW_CTX_DAG_RUN_ID=\"${{AIRFLOW_CTX_DAG_RUN_ID:-}}\"" in command_builder
+        assert "--env AIRFLOW_CTX_DAG_ID=\"${{AIRFLOW_CTX_DAG_ID:-}}\"" in command_builder
+        assert "--env AIRFLOW_CTX_TASK_ID=\"${{AIRFLOW_CTX_TASK_ID:-}}\"" in command_builder
+        assert "{container} /bin/sh -lc \"cd /app && {project_command}\"" in command_builder
+        assert "exec {container} /bin/sh" not in command_builder
 
 
 def test_makefile_generic_service_recreate_is_windows_compatible() -> None:

@@ -11,6 +11,7 @@ import json
 import os
 import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -46,6 +47,11 @@ DEFAULT_CLICKHOUSE_TABLES = [
     "dq.agent_run_context_events",
     "dq.incident_memory",
 ]
+EMPTY_DEMO_CLICKHOUSE_TABLES = [
+    *DEFAULT_CLICKHOUSE_TABLES,
+    "dq.data_profile_results",
+    "dq.discord_incident_messages",
+]
 
 DEFAULT_S3_BUCKETS = [
     "dq-landing",
@@ -66,6 +72,10 @@ DEFAULT_STREAMLIT_HEALTH_URL = os.getenv(
 DEFAULT_API_HEALTH_URL = os.getenv(
     "CONTROL_PLANE_API_HEALTH_URL",
     "http://api:8000/health",
+)
+DEFAULT_API_EMPTY_ALERTS_URL = os.getenv(
+    "CONTROL_PLANE_API_EMPTY_ALERTS_URL",
+    "http://api:8000/api/v1/alerts?status=active&limit=5",
 )
 DEFAULT_API_DAILY_SUMMARY_URL = os.getenv(
     "CONTROL_PLANE_API_DAILY_SUMMARY_URL",
@@ -174,13 +184,45 @@ def query_single_value(client: Any, query: str, default: Any = None) -> Any:
     return first_row[0] if first_row else default
 
 
-def check_clickhouse_tables(client: Any, table_names: list[str]) -> list[ReadinessCheck]:
+def audit_boundary(value: str) -> str:
+    """Require an explicit timezone; never infer a reset boundary from row age."""
+    stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if stamp.tzinfo is None:
+        raise ValueError('The empty-demo audit boundary needs a timezone.')
+    return stamp.astimezone(timezone.utc).isoformat()
+
+
+def check_empty_demo_audit(client: Any, since: str) -> ReadinessCheck:
+    """Keep new read-only inspection evidence, rejecting old or unexpected events."""
+    since = audit_boundary(since)
+    rows = client.query(
+        "SELECT count(), countIf(ts < parseDateTime64BestEffort({since:String}) OR NOT ("
+        "actor = 'agent' AND ((action = 'list_alerts' AND tool_name = 'alerts' AND status = 'success') "
+        "OR (action = 'fetch_daily_quality_summary' AND tool_name = 'daily_summary' "
+        "AND status IN ('success', 'failed'))))) FROM dq.agent_audit_log",
+        parameters={'since': since},
+    ).result_rows
+    total, unexpected = map(int, rows[0])
+    return ReadinessCheck('clickhouse_table:dq.agent_audit_log', 'fail' if unexpected else 'pass', {
+        'exists': True, 'row_count': total, 'unexpected_rows': unexpected, 'audit_since': since,
+        'state': 'unexpected_audit' if unexpected else ('fresh_readonly_audit' if total else 'empty'),
+    })
+
+
+def check_clickhouse_tables(
+    client: Any,
+    table_names: list[str],
+    require_empty: bool = False,
+    empty_audit_since: str | None = None,
+) -> list[ReadinessCheck]:
     """
     Verify expected ClickHouse tables exist and collect row counts.
 
     Args:
         client: clickhouse-connect compatible client.
         table_names: Fully qualified table names to verify.
+        require_empty: Require each existing table to contain zero business rows.
+        empty_audit_since: Optional explicit lower bound for new read-only inspection audits.
 
     Returns:
         List of readiness checks, one per table.
@@ -200,18 +242,31 @@ def check_clickhouse_tables(client: Any, table_names: list[str]) -> list[Readine
                     ReadinessCheck(
                         name=f"clickhouse_table:{table_name}",
                         status="fail",
-                        details={"exists": False, "row_count": None},
+                        details={
+                            "exists": False,
+                            "row_count": None,
+                            **({"state": "missing"} if require_empty else {}),
+                        },
                     )
                 )
                 continue
 
-            # Count is useful for testing context, but this check only requires the table to exist.
+            if require_empty and table_name == 'dq.agent_audit_log' and empty_audit_since:
+                checks.append(check_empty_demo_audit(client, empty_audit_since))
+                continue
+
+            # In normal readiness mode the count is diagnostic; empty-demo mode enforces zero.
             row_count = int(query_single_value(client, build_table_count_query(table_name), default=0) or 0)
+            is_empty = row_count == 0
             checks.append(
                 ReadinessCheck(
                     name=f"clickhouse_table:{table_name}",
-                    status="pass",
-                    details={"exists": True, "row_count": row_count},
+                    status="pass" if not require_empty or is_empty else "fail",
+                    details={
+                        "exists": True,
+                        "row_count": row_count,
+                        **({"state": "empty" if is_empty else "populated"} if require_empty else {}),
+                    },
                 )
             )
         except Exception as exc:  # pragma: no cover - exercised by runtime smoke checks.
@@ -220,7 +275,7 @@ def check_clickhouse_tables(client: Any, table_names: list[str]) -> list[Readine
                 ReadinessCheck(
                     name=f"clickhouse_table:{table_name}",
                     status="fail",
-                    details={"error": str(exc)},
+                    details={"error": str(exc), **({"state": "error"} if require_empty else {})},
                 )
             )
 
@@ -243,13 +298,18 @@ def list_available_buckets(client: Any) -> set[str]:
     return {bucket["Name"] for bucket in response.get("Buckets", [])}
 
 
-def check_s3_buckets(client: Any, bucket_names: list[str]) -> list[ReadinessCheck]:
+def check_s3_buckets(
+    client: Any,
+    bucket_names: list[str],
+    require_empty: bool = False,
+) -> list[ReadinessCheck]:
     """
     Verify expected SeaweedFS S3 buckets are available.
 
     Args:
         client: boto3 S3 client.
         bucket_names: Bucket names to verify.
+        require_empty: Require each existing bucket to contain no objects.
 
     Returns:
         List of readiness checks, one per bucket.
@@ -264,20 +324,58 @@ def check_s3_buckets(client: Any, bucket_names: list[str]) -> list[ReadinessChec
             ReadinessCheck(
                 name="s3_bucket_listing",
                 status="fail",
-                details={"error": str(exc)},
+                details={"error": str(exc), **({"state": "error"} if require_empty else {})},
             )
         ]
 
     checks = []
 
     for bucket_name in bucket_names:
-        checks.append(
-            ReadinessCheck(
-                name=f"s3_bucket:{bucket_name}",
-                status="pass" if bucket_name in available_buckets else "fail",
-                details={"exists": bucket_name in available_buckets},
+        if bucket_name not in available_buckets:
+            checks.append(
+                ReadinessCheck(
+                    name=f"s3_bucket:{bucket_name}",
+                    status="fail",
+                    details={"exists": False, **({"state": "missing"} if require_empty else {})},
+                )
             )
-        )
+            continue
+
+        if not require_empty:
+            checks.append(
+                ReadinessCheck(
+                    name=f"s3_bucket:{bucket_name}",
+                    status="pass",
+                    details={"exists": True},
+                )
+            )
+            continue
+
+        try:
+            response = client.list_objects_v2(Bucket=bucket_name, MaxKeys=1)
+            object_count = len(response.get("Contents", []))
+            is_empty = object_count == 0
+            checks.append(
+                ReadinessCheck(
+                    name=f"s3_bucket:{bucket_name}",
+                    status="pass" if is_empty else "fail",
+                    details={
+                        "exists": True,
+                        "object_count_sampled": object_count,
+                        "max_keys": 1,
+                        "state": "empty" if is_empty else "populated",
+                    },
+                )
+            )
+        except Exception as exc:  # pragma: no cover - exercised by runtime smoke checks.
+            logger.exception("S3 readiness object check failed | bucket=%s", bucket_name)
+            checks.append(
+                ReadinessCheck(
+                    name=f"s3_bucket:{bucket_name}",
+                    status="fail",
+                    details={"exists": True, "error": str(exc), "state": "error"},
+                )
+            )
 
     return checks
 
@@ -340,9 +438,49 @@ def check_http_service(
     )
 
 
+def check_api_empty_alerts(
+    timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
+    opener: Any = urlopen,
+) -> ReadinessCheck:
+    """Verify the bounded active-alert route returns an empty alerts list."""
+    try:
+        with opener(DEFAULT_API_EMPTY_ALERTS_URL, timeout=timeout_seconds) as response:
+            status_code = int(getattr(response, "status", 0) or 0)
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError, UnicodeDecodeError) as exc:
+        logger.warning("Empty-demo API alert check failed | error_type=%s", type(exc).__name__)
+        return ReadinessCheck(
+            name="http_service:control-plane-empty-alerts",
+            status="fail",
+            details={"url": DEFAULT_API_EMPTY_ALERTS_URL, "error_type": type(exc).__name__},
+        )
+    except Exception as exc:  # pragma: no cover - defensive boundary for response doubles/transports.
+        logger.exception("Empty-demo API alert check failed")
+        return ReadinessCheck(
+            name="http_service:control-plane-empty-alerts",
+            status="fail",
+            details={"url": DEFAULT_API_EMPTY_ALERTS_URL, "error_type": type(exc).__name__},
+        )
+
+    alerts = payload.get("alerts") if isinstance(payload, dict) else None
+    valid_response = 200 <= status_code < 300 and isinstance(alerts, list)
+    is_empty = valid_response and not alerts
+    return ReadinessCheck(
+        name="http_service:control-plane-empty-alerts",
+        status="pass" if is_empty else "fail",
+        details={
+            "url": DEFAULT_API_EMPTY_ALERTS_URL,
+            "status_code": status_code,
+            "alert_count": len(alerts) if isinstance(alerts, list) else None,
+            "state": "empty" if is_empty else "populated" if valid_response else "invalid_response",
+        },
+    )
+
+
 def check_control_plane_api(
     timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
     opener: Any = urlopen,
+    expect_empty_demo: bool = False,
 ) -> list[ReadinessCheck]:
     """
     Verify the control-plane health and representative read-only routes.
@@ -352,20 +490,22 @@ def check_control_plane_api(
         opener: urllib-compatible opener injected by tests.
 
     Returns:
-        Health, daily and database summaries, LIFE history, incident history,
-        metadata, and blast-radius checks.
+        Health and either the bounded empty-alert check or the normal API data routes.
     """
-    logger.info(
-        "Checking control-plane API health, daily summary, LIFE history, incident history, metadata, and dbt blast-radius routes"
+    logger.info("Checking control-plane API readiness | expect_empty_demo=%s", expect_empty_demo)
+
+    health_check = check_http_service(
+        service_name="control-plane-api",
+        url=DEFAULT_API_HEALTH_URL,
+        timeout_seconds=timeout_seconds,
+        opener=opener,
     )
 
+    if expect_empty_demo:
+        return [health_check, check_api_empty_alerts(timeout_seconds=timeout_seconds, opener=opener)]
+
     return [
-        check_http_service(
-            service_name="control-plane-api",
-            url=DEFAULT_API_HEALTH_URL,
-            timeout_seconds=timeout_seconds,
-            opener=opener,
-        ),
+        health_check,
         check_http_service(
             service_name="control-plane-daily-summary",
             url=DEFAULT_API_DAILY_SUMMARY_URL,
@@ -478,6 +618,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Require the optional control-plane API profile to pass its health check.",
     )
     parser.add_argument(
+        "--expect-empty-demo",
+        action="store_true",
+        help="Require the application platform to be present but contain no demo data or S3 objects.",
+    )
+    parser.add_argument('--empty-demo-audit-since', type=audit_boundary, default=None,
+                        help='Keep only new allowlisted read-only audit evidence after this ISO timestamp.')
+    parser.add_argument(
         "--require-web",
         action="store_true",
         help="Require the optional web profile and its HTTP/proxy policy acceptance checks.",
@@ -504,18 +651,32 @@ def main() -> None:
     args   = parser.parse_args()
     checks = []
 
-    table_names  = args.table or DEFAULT_CLICKHOUSE_TABLES
+    empty_demo = args.expect_empty_demo
+    if args.empty_demo_audit_since and not empty_demo:
+        parser.error('--empty-demo-audit-since requires --expect-empty-demo')
+    table_names = args.table or DEFAULT_CLICKHOUSE_TABLES
     bucket_names = args.bucket or DEFAULT_S3_BUCKETS
 
-    if not args.skip_clickhouse:
+    if empty_demo:
+        table_names = list(dict.fromkeys([*EMPTY_DEMO_CLICKHOUSE_TABLES, *(args.table or [])]))
+        bucket_names = list(dict.fromkeys([*DEFAULT_S3_BUCKETS, *(args.bucket or [])]))
+
+    if empty_demo or not args.skip_clickhouse:
         clickhouse_client = build_clickhouse_client()
-        checks.extend(check_clickhouse_tables(client=clickhouse_client, table_names=table_names))
+        checks.extend(
+            check_clickhouse_tables(
+                client=clickhouse_client,
+                table_names=table_names,
+                require_empty=empty_demo,
+                **({'empty_audit_since': args.empty_demo_audit_since} if args.empty_demo_audit_since else {}),
+            )
+        )
 
-    if not args.skip_s3:
+    if empty_demo or not args.skip_s3:
         s3_client = build_s3_client()
-        checks.extend(check_s3_buckets(client=s3_client, bucket_names=bucket_names))
+        checks.extend(check_s3_buckets(client=s3_client, bucket_names=bucket_names, require_empty=empty_demo))
 
-    if not args.skip_ch_ui:
+    if empty_demo or not args.skip_ch_ui:
         checks.append(
             check_http_service(
                 service_name="ch-ui",
@@ -523,7 +684,7 @@ def main() -> None:
             )
         )
 
-    if not args.skip_streamlit:
+    if empty_demo or not args.skip_streamlit:
         checks.append(
             check_http_service(
                 service_name="streamlit",
@@ -532,7 +693,7 @@ def main() -> None:
         )
 
     if args.require_api:
-        checks.extend(check_control_plane_api())
+        checks.extend(check_control_plane_api(expect_empty_demo=empty_demo))
 
     if args.require_web or args.require_web_report or args.web_operator_request_id:
         checks.extend(run_web_acceptance())

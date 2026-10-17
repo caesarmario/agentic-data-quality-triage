@@ -534,18 +534,18 @@ def render_architecture(spec: dict, tokens: dict) -> str:
 
 def render_overview(catalog: dict, tokens: dict) -> str:
     """Render a legible inventory map with no invented cross-store foreign keys."""
-    svg = Svg("data-model-overview", "The application data model", "Warehouse and analytical evidence in ClickHouse; transactional action, incident and Discord state in PostgreSQL. Only the incident subsystem declares foreign keys.", 1280, 840, tokens)
+    svg = Svg("data-model-overview", "The application data model", "Warehouse and analytical evidence in ClickHouse; transactional approval, recovery, incident and Discord state in PostgreSQL. Foreign keys are PostgreSQL constraints only.", 1280, 840, tokens)
     counts = catalog["counts"]
     svg.text(40, 116, f"{counts['objects']} relations / {counts['columns']} catalog fields / {counts['foreign_keys']} PostgreSQL FKs / no ClickHouse uniqueness claims", "body")
     svg.text(40, 164, "CLICKHOUSE / dq / 15 TABLES + 1 VIEW", "eyebrow")
-    svg.text(824, 164, "POSTGRESQL / dq_control / 12 TABLES", "eyebrow")
+    svg.text(824, 164, f"POSTGRESQL / dq_control / {counts['postgresql_tables']} TABLES", "eyebrow")
     svg.path([(384, 300), (432, 300)], "logical_correlation")
     svg.path([(608, 392), (608, 464)], "logical_correlation")
     svg.node(40, 192, 344, 200, "WAREHOUSE / 3 TABLES", "Orders and daily metrics", ["raw_orders -> stg_orders", "-> fct_orders_daily", "dbt derivation, not FK", "Grain expectations are tested."])
     svg.node(432, 192, 344, 200, "OBSERVABILITY / 4 TABLES + VIEW", "Quality evidence and alerts", ["profiles / checks / pipeline_runs", "alerts / open_alerts", "source_check_run_id: logical", "open_alerts is not FINAL."], focal=True)
     svg.node(40, 464, 344, 228, "METADATA + SCHEMA / 3 TABLES", "Assets and schema history", ["metadata_assets", "schema_snapshots", "schema_drift_results", "qualified_name / snapshot_id", "Correlations, not constraints."])
     svg.node(432, 464, 344, 228, "TRIAGE + LEGACY / 5 TABLES", "Context, audit and delivery", ["agent_audit_log / incident_memory", "agent_run_context_events (TTL)", "approval_requests (legacy)", "discord_incident_messages", "alert_key: no enforced FK."])
-    svg.node(824, 192, 416, 200, "ACTION + RESOLUTION / 6 TABLES", "Transactional control", ["approval_requests + 5 incident tables", f"{counts['foreign_keys']} FKs within incident subsystem", "Approval != execution != Resolve", "Outbox tracks independent sinks."])
+    svg.node(824, 192, 416, 200, "ACTION + INCIDENT + RECOVERY / 14 TABLES", "Transactional control", ["Approval + incident + recovery plans", "Sources / executions / publication", f"{counts['foreign_keys']} declared PostgreSQL FKs", "Approval != execution != Resolve", "Outboxes track independent sinks."])
     svg.node(824, 464, 416, 228, "DISCORD / 6 TABLES", "Workspace and request identity", ["copilot_requests / workspaces", "workspace_events / investigation_claims", "user_preferences / service_messages", "Composite PKs + partial UQ indexes", "No Discord-table FKs declared."])
     svg.text(40, 740, "Complete fields and types: docs/data-model.md. Small subsystem diagrams expose selected keys and explicit omissions.", "body")
     return svg.finish(["Dashed: logical correlation only; no cardinality guarantee. dbt derivation is expanded in the warehouse diagram.", "No cross-store FK. PostgreSQL incident FKs use NO ACTION. Optional SQLite checkpoints and Airflow internals omitted."])

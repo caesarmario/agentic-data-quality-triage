@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from unittest.mock import Mock
 
 from apps.common.control_plane import ControlPlaneResponseError, ControlPlaneTransportError
 
@@ -58,6 +59,39 @@ from apps.streamlit.app import (
 # --- Defining Test Constants
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 THEME_CONFIG = PROJECT_ROOT / ".streamlit" / "config.toml"
+
+
+@pytest.mark.parametrize('opened,truncated,has_uri', [(False, False, True), (True, False, True), (True, True, True), (True, False, False)])
+def test_saved_triage_read_is_explicit_bounded_and_never_runs_a_model(monkeypatch, opened, truncated, has_uri):
+    state = {}
+    fake_ui = SimpleNamespace(session_state=state, caption=Mock(), button=Mock(return_value=opened), warning=Mock(), code=Mock())
+    api = Mock()
+    api.read_report_artifact.return_value = {'text': '# Recorded investigation', 'truncated': truncated}
+    run = Mock(side_effect=AssertionError('Reading a saved report must not run triage'))
+    document, access = Mock(), Mock()
+    monkeypatch.setattr(streamlit_app, 'st', fake_ui)
+    monkeypatch.setattr(streamlit_app, 'tr', lambda text, **kwargs: text)
+    monkeypatch.setattr(streamlit_app, 'build_streamlit_control_plane_client', lambda: api)
+    monkeypatch.setattr(streamlit_app, 'run_selected_alert_triage', run)
+    monkeypatch.setattr(streamlit_app, 'render_report_document', document)
+    monkeypatch.setattr(streamlit_app, 'render_report_access', access)
+    uri = 's3://dq-artifacts/agent-reports/dt=2026-10-16/report.md'
+    assert streamlit_app.render_saved_triage_panel({'report_s3_uri': uri if has_uri else ''}) is has_uri
+    run.assert_not_called()
+    if not has_uri or not opened:
+        api.read_report_artifact.assert_not_called()
+    else:
+        api.read_report_artifact.assert_called_once_with(s3_uri=uri, max_bytes=streamlit_app.MAX_REPORT_BYTES)
+    if opened and has_uri and not truncated:
+        document.assert_called_once()
+        access.assert_called_once()
+        fake_ui.button.return_value = False
+        streamlit_app.render_saved_triage_panel({'report_s3_uri': uri})
+        api.read_report_artifact.assert_called_once()
+    else:
+        document.assert_not_called()
+        access.assert_not_called()
+        assert 'saved_triage_read' not in state
 
 
 # --- Defining Accessibility Helpers
@@ -590,6 +624,27 @@ def test_fetch_streamlit_daily_summary_requests_latest_when_date_is_omitted(monk
     )
 
     payload, transport = fetch_streamlit_daily_summary(dt=None)
+
+    assert payload == expected
+    assert transport == "api"
+
+
+@pytest.mark.parametrize("dt", [None, "2026-10-16"])
+def test_fetch_streamlit_daily_summary_accepts_empty_api_success_without_fallback(monkeypatch, dt) -> None:
+    expected = {
+        "status": "success", "availability": "empty", "dt": dt,
+        "check_counts": [], "alert_counts": [], "total_checks": 0, "total_open_alerts": 0,
+    }
+    monkeypatch.setattr(
+        streamlit_app, "build_streamlit_control_plane_client",
+        lambda **kwargs: SimpleNamespace(get_daily_summary=lambda **kwargs: expected),
+    )
+    monkeypatch.setattr(
+        streamlit_app, "fetch_daily_quality_summary",
+        lambda **kwargs: pytest.fail("Empty API success must not trigger local data access."),
+    )
+
+    payload, transport = fetch_streamlit_daily_summary(dt=dt)
 
     assert payload == expected
     assert transport == "api"
@@ -1552,7 +1607,7 @@ def test_classify_reliability_state_does_not_treat_missing_checks_as_stable() ->
         },
     )
 
-    assert state["label"] == "Daily checks have not run"
+    assert state["label"] == "No quality data yet"
     assert state["css_class"] == "dq-health-warning"
 
 
@@ -1564,10 +1619,56 @@ def test_classify_reliability_state_marks_stable_filters() -> None:
         None.
     """
     summary = summarize_alert_rows([])
-    state   = classify_reliability_state(summary)
+    state   = classify_reliability_state(summary, daily_summary={
+        "availability": "available",
+        "dt": "2026-10-16",
+        "check_counts": [{"status": "pass", "count": 1}],
+        "alert_counts": [],
+        "total_checks": 1,
+        "total_open_alerts": 0,
+    })
 
     assert state["label"] == "Stable for selected date and filters"
     assert state["css_class"] == "dq-health-stable"
+
+
+@pytest.mark.parametrize("dt", [None, "2026-10-16"])
+def test_daily_empty_summary_has_zero_kpis_but_never_stable(dt) -> None:
+    payload = {
+        "status": "success", "availability": "empty", "dt": dt,
+        "check_counts": [], "alert_counts": [], "total_checks": 0, "total_open_alerts": 0,
+    }
+    state = classify_reliability_state(summarize_alert_rows([]), daily_summary=payload)
+    metrics = build_reliability_kpis([], payload)
+
+    assert state["label"] == "No quality data yet"
+    assert state["css_class"] != "dq-health-stable"
+    assert [item["value"] for item in metrics] == [0, 0, 0, 0]
+
+
+def test_no_daily_snapshot_cannot_be_classified_stable() -> None:
+    state = classify_reliability_state(summarize_alert_rows([]))
+
+    assert state["label"] == "No quality data yet"
+    assert state["css_class"] != "dq-health-stable"
+
+
+@pytest.mark.parametrize("severity,label", [
+    ("critical", "Critical attention required"), ("warning", "Warning watchlist"),
+])
+@pytest.mark.parametrize("incident_source", ["loaded", "daily"])
+def test_active_incident_severity_outranks_zero_daily_checks(severity, label, incident_source) -> None:
+    payload = {
+        "availability": "empty" if incident_source == "loaded" else "available",
+        "dt": "2026-10-16", "check_counts": [],
+        "alert_counts": [] if incident_source == "loaded" else [{"severity": severity, "count": 1}],
+        "total_checks": 0, "total_open_alerts": 0 if incident_source == "loaded" else 1,
+    }
+    alerts = [{"severity": severity, "status": "triaged"}] if incident_source == "loaded" else []
+    state = classify_reliability_state(summarize_alert_rows(alerts), daily_summary=payload)
+
+    assert state["label"] == label
+
 
 def sample_copilot_triage_result(alert_key: str) -> dict[str, object]:
     """

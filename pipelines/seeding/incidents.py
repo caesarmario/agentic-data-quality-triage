@@ -152,7 +152,7 @@ def apply_missing_segment(
         return {"incident": "missing_segment", "applied": False}
 
     available_segments               = {(row["country"], row["channel"]) for row in target_rows}
-    missing_country, missing_channel = rng.choice(list(available_segments))
+    missing_country, missing_channel = rng.choice(sorted(available_segments))
 
     removed_rows = [
         row
@@ -403,7 +403,7 @@ def apply_late_arriving_batch(
         return {"incident": "late_arriving_batch", "applied": False}
 
     available_segments = {(row["country"], row["channel"]) for row in target_rows}
-    country, channel   = rng.choice(list(available_segments))
+    country, channel   = rng.choice(sorted(available_segments))
 
     segment_rows = [
         row

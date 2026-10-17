@@ -20,6 +20,11 @@ from apps.common.control_plane import (
 )
 
 
+@pytest.fixture(autouse=True)
+def configured_local_adapter(monkeypatch):
+    monkeypatch.setenv("CONTROL_PLANE_APPROVAL_TOKEN", "test-service-token")
+
+
 # --- Defining Test Fixtures
 def sample_report_payload(
     alert_key: str = "orders|dq_failure|2026-06-10|dq.raw_orders|row_count_positive|table",

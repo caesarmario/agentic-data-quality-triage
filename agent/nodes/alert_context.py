@@ -36,6 +36,14 @@ class AlertContextNodes(TriageNodeMixin):
             clickhouse_host=self.config.clickhouse_host,
             clickhouse_port=self.config.clickhouse_port,
         )
+        try:
+            from agent.context.live import load_trusted_context
+            state.trusted_source_metadata = load_trusted_context(state.alert)
+            state.incident_id = state.trusted_source_metadata.incident_id
+            state.incident_revision = state.trusted_source_metadata.revision
+        except Exception as exc:
+            # Missing context is disclosed; it must never become guessed evidence.
+            self.append_error(state, f"trusted_context unavailable: {type(exc).__name__}")
 
         logger.info("Graph loaded alert | agent_run_id=%s alert_key=%s", state.agent_run_id, state.alert.alert_key)
 

@@ -21,6 +21,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from agent.resolution_contracts import IncidentResolve, RevalidationCreate, RevalidationRequest, ResolutionPreview, ResolutionDecision
 from agent.tools.incident_resolution import resolution_preview, create_revalidation, get_revalidation, confirm_resolution
 from agent.tools.incident_resolution_store import ResolutionConflict, ResolutionUnavailable
+from agent.recovery.contracts import RecoveryPreview, RecoveryProposal, RecoveryExecutionCreate, RecoveryExecution, RecoveryPlanResponse
+from agent.recovery import service as recovery_service
 
 
 # --- Configuring Project Path
@@ -290,6 +292,16 @@ def copilot_incident_history_context(
     return bounded_rows
 
 
+def _require_control_plane_token(supplied: str | None, missing_detail: str, denied_detail: str) -> None:
+    expected = os.getenv(APPROVAL_TOKEN_ENV_NAME, "").strip()
+    candidate = (supplied or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail=missing_detail)
+    # Compare bytes so malformed non-ASCII headers are denied rather than raising TypeError.
+    if not candidate or not hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8")):
+        raise HTTPException(status_code=401, detail=denied_detail)
+
+
 def require_approval_authorization(
     x_control_plane_token: str | None = Header(default=None),
 ) -> None:
@@ -305,16 +317,16 @@ def require_approval_authorization(
     Raises:
         HTTPException: If the server token is missing or caller is unauthorized.
     """
-    expected_token = os.getenv(APPROVAL_TOKEN_ENV_NAME, "").strip()
-    supplied_token = (x_control_plane_token or "").strip()
+    _require_control_plane_token(x_control_plane_token,
+                                "Approval mutations are not configured.", "Approval authorization failed.")
 
-    if not expected_token:
-        logger.error("Approval API is disabled because %s is not configured", APPROVAL_TOKEN_ENV_NAME)
-        raise HTTPException(status_code=503, detail="Approval mutations are not configured.")
 
-    if not supplied_token or not hmac.compare_digest(supplied_token, expected_token):
-        logger.warning("Rejected unauthorized approval mutation request")
-        raise HTTPException(status_code=401, detail="Approval authorization failed.")
+def require_model_authorization(
+    x_control_plane_token: str | None = Header(default=None),
+) -> None:
+    """Authorize billable work before tools, reports, or providers are accessed."""
+    _require_control_plane_token(x_control_plane_token,
+                                "Model-invoking operations are not configured.", "Control-plane authorization failed.")
 
 
 # --- Defining Helper Functions
@@ -741,6 +753,9 @@ def raise_api_error(exc: Exception) -> None:
     Raises:
         HTTPException: Always raised with an appropriate HTTP status code.
     """
+    from agent.tools.approval_control_store import ApprovalControlConflict
+    if isinstance(exc, ApprovalControlConflict):
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     if isinstance(exc, LookupError):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1446,7 +1461,8 @@ def copilot_revalidation_context(alert_key: str) -> dict[str, Any]:
         return {"available": False, "evidence_state": "unverified", "current_condition": "unverified"}
 
 
-@app.post("/api/v1/copilot/answer", response_model=CopilotAnswerResponse)
+@app.post("/api/v1/copilot/answer", response_model=CopilotAnswerResponse,
+          dependencies=[Depends(require_model_authorization)])
 def api_answer_copilot(request: CopilotAnswerRequest) -> CopilotAnswerResponse:
     """
     Answer one bounded operator question using source-of-truth platform context.
@@ -1524,6 +1540,13 @@ def api_answer_copilot(request: CopilotAnswerRequest) -> CopilotAnswerResponse:
 
         llm_responses: list[LlmResponse] = []
         revalidation_context = copilot_revalidation_context(alert.alert_key) if alert is not None else {}
+        trusted_context = None
+        if alert is not None:
+            try:
+                from agent.context.live import load_trusted_context
+                trusted_context = load_trusted_context(alert)
+            except Exception as exc:
+                logger.warning("Copilot trusted context incomplete | error_type=%s", type(exc).__name__)
         answer = build_operator_answer(
             question=request.question,
             language=request.language,
@@ -1537,6 +1560,9 @@ def api_answer_copilot(request: CopilotAnswerRequest) -> CopilotAnswerResponse:
             incident_history_rows=history_rows,
             agent_run_id=agent_run_id,
             response_sink=llm_responses,
+            trusted_source_metadata=trusted_context,
+            incident_id=trusted_context.incident_id if trusted_context else None,
+            incident_revision=trusted_context.revision if trusted_context else None,
         )
         llm_response = llm_responses[-1] if llm_responses else None
 
@@ -1604,7 +1630,8 @@ def api_answer_copilot(request: CopilotAnswerRequest) -> CopilotAnswerResponse:
         raise_api_error(exc)
 
 
-@app.post("/api/v1/triage/run", response_model=TriageRunResponse)
+@app.post("/api/v1/triage/run", response_model=TriageRunResponse,
+          dependencies=[Depends(require_model_authorization)])
 def api_run_triage(request: TriageRunRequest) -> TriageRunResponse:
     """
     Run one agentic triage workflow for a selected alert.
@@ -1733,11 +1760,13 @@ def api_decide_approval_request(
         Latest durable approval state and whether state changed.
     """
     try:
+        version_args = {"expected_version": request.expected_version} if request.expected_version is not None else {}
         approval, state_changed = decide_approval_request(
             request_id=request_id,
             decision=request.decision,
             decided_by=request.decided_by,
             comment=request.comment,
+            **version_args,
         )
 
         return approval_response(approval, state_changed=state_changed)
@@ -1769,10 +1798,12 @@ def api_cancel_approval_request(
         Latest durable approval state and whether state changed.
     """
     try:
+        version_args = {"expected_version": request.expected_version} if request.expected_version is not None else {}
         approval, state_changed = cancel_approval_request(
             request_id=request_id,
             cancelled_by=request.cancelled_by,
             comment=request.comment,
+            **version_args,
         )
 
         return approval_response(approval, state_changed=state_changed)
@@ -1821,6 +1852,49 @@ def api_incident_revalidation_status(request_id: UUID):
 def api_resolve_incident(alert_ref: str, request: IncidentResolve):
     try:
         return confirm_resolution(alert_ref, request)
+    except Exception as exc:
+        resolution_api_error(exc)
+
+
+# --- Defining Recovery Routes
+@app.get("/api/v1/alerts/{alert_ref}/recovery-preview", response_model=RecoveryPreview)
+def api_recovery_preview(alert_ref: str):
+    try:
+        return recovery_service.recovery_preview(alert_ref)
+    except Exception as exc:
+        resolution_api_error(exc)
+
+
+@app.post("/api/v1/alerts/{alert_ref}/recovery-plans", response_model=RecoveryPlanResponse,
+          dependencies=[Depends(require_approval_authorization)])
+def api_recovery_plan_create(alert_ref: str, request: RecoveryProposal):
+    try:
+        return recovery_service.create_plan(alert_ref, request)
+    except Exception as exc:
+        resolution_api_error(exc)
+
+
+@app.get("/api/v1/recovery-plans/{plan_id}", response_model=RecoveryPlanResponse)
+def api_recovery_plan(plan_id: UUID):
+    try:
+        return recovery_service.get_plan(str(plan_id))
+    except Exception as exc:
+        resolution_api_error(exc)
+
+
+@app.post("/api/v1/recovery-plans/{plan_id}/executions", status_code=202, response_model=RecoveryExecution,
+          dependencies=[Depends(require_approval_authorization)])
+def api_recovery_execute(plan_id: UUID, request: RecoveryExecutionCreate):
+    try:
+        return recovery_service.create_execution(str(plan_id), request)
+    except Exception as exc:
+        resolution_api_error(exc)
+
+
+@app.get("/api/v1/recovery-executions/{execution_id}", response_model=RecoveryExecution)
+def api_recovery_execution(execution_id: UUID):
+    try:
+        return recovery_service.get_execution(str(execution_id))
     except Exception as exc:
         resolution_api_error(exc)
 

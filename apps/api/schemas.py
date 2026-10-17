@@ -169,7 +169,8 @@ class DailySummaryResponse(BaseModel):
 
     Attributes:
         status: Request result status.
-        dt: Exact business date summarized by the tool.
+        availability: Whether any checks or open alerts exist for this summary.
+        dt: Exact business date, or None when no latest DQ date exists.
         check_counts: Bounded check counts grouped by status.
         alert_counts: Bounded open-alert counts grouped by severity.
         total_checks: Sum of all check counts.
@@ -180,8 +181,9 @@ class DailySummaryResponse(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    status: str                                  = "success"
-    dt: date
+    status: Literal["success"]                    = "success"
+    availability: Literal["available", "empty"]
+    dt: date | None
     check_counts: list[DailyCheckCountResponse]   = Field(default_factory=list, max_length=100)
     alert_counts: list[DailyAlertCountResponse]   = Field(default_factory=list, max_length=100)
     total_checks: int                             = Field(ge=0)
@@ -214,6 +216,12 @@ class DailySummaryResponse(BaseModel):
 
         if self.total_open_alerts != sum(item.count for item in self.alert_counts):
             raise ValueError("Daily summary total_open_alerts does not equal the alert aggregates.")
+
+        if self.availability == "empty":
+            if self.check_counts or self.alert_counts or self.total_checks or self.total_open_alerts:
+                raise ValueError("Empty daily summary must contain no aggregates and zero totals.")
+        elif self.dt is None or not (self.total_checks or self.total_open_alerts):
+            raise ValueError("Available daily summary requires a business date and nonzero totals.")
 
         return self
 
@@ -1255,6 +1263,7 @@ class ApprovalDecisionBody(BaseModel):
     decision: str                     = Field(pattern="^(approve|reject)$")
     decided_by: str                   = Field(min_length=1, max_length=200)
     comment: str                      = Field(default="", max_length=2000)
+    expected_version: int | None      = Field(default=None, ge=1)
 
 
 class ApprovalCancellationBody(BaseModel):
@@ -1268,6 +1277,7 @@ class ApprovalCancellationBody(BaseModel):
 
     cancelled_by: str                 = Field(min_length=1, max_length=200)
     comment: str                      = Field(default="", max_length=2000)
+    expected_version: int | None      = Field(default=None, ge=1)
 
 
 class ApprovalRequestResponse(BaseModel):
@@ -1329,6 +1339,8 @@ class ApprovalRequestResponse(BaseModel):
     execution_error: str              = ""
     created_new: bool | None          = None
     state_changed: bool | None        = None
+    version: int | None              = Field(default=None, ge=1)
+    execution_eligibility: str        = "eligible"
 
 
 class ApprovalRequestListResponse(BaseModel):

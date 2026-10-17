@@ -441,6 +441,10 @@ def validate_execution_approval(
         logger.info("Approval gate bypassed for non-mutating dry-run preview")
         return None
 
+    recovery_keys = {"plan_id", "plan_hash", "runbook", "source_constraints", "source_policy", "recovery_plan_id"}
+    if recovery_keys.intersection(parent_conf) or parent_conf.get("action_type", "backfill") != "backfill":
+        raise ValueError("Recovery/source-pinned plans must use the fixed 90_05 executor, not baseline regeneration")
+
     approval_request_id = str(conf_value(parent_conf, "approval_request_id", "")).strip()
     execution_parameters = backfill_parameters_from_conf(parent_conf)
 
@@ -553,12 +557,16 @@ def run_backfill_dispatcher(**context: Any) -> dict[str, Any]:
 
     try:
         if approval is not None:
-            transition_approval_execution(
+            claim_kwargs = {"expected_version": approval.version} if approval.version is not None else {}
+            claimed, claimed_new = transition_approval_execution(
                 request_id=approval.request_id,
                 execution_status=ApprovalExecutionStatus.DISPATCHING,
                 execution_dag_run_id=parent_id,
                 actor=f"airflow:{requested_by}",
+                **claim_kwargs,
             )
+            if not claimed_new:
+                raise ValueError("Approval was already claimed; reconcile existing children instead of rerunning")
             approval_claimed = True
 
             logger.info(

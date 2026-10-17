@@ -50,6 +50,7 @@ from apps.streamlit.resolution import (
     render_resolution_panel,
     render_resolution_technical_details,
 )
+from apps.streamlit.recovery import render_recovery_panel
 from apps.common.i18n import language_context, normalize_language
 from apps.streamlit.localization import (
     localized_choice,
@@ -920,13 +921,6 @@ def classify_reliability_state(
             "message": tr('The daily DQ snapshot could not be loaded. Alert workflows remain available, but this state must not be treated as healthy.'),
         }
 
-    if daily_summary and daily_counts.get("total_checks", 0) == 0:
-        return {
-            "label": tr('Daily checks have not run'),
-            "css_class": "dq-health-warning",
-            "message": tr('No DQ check result exists for the selected date. Wait for the scheduled pipeline or investigate the missing run before trusting the data.'),
-        }
-
     if (
         summary["warning_count"] > 0
         or summary["total_alerts"] > 0
@@ -938,6 +932,13 @@ def classify_reliability_state(
             "label": tr('Warning watchlist'),
             "css_class": "dq-health-warning",
             "message": tr('The platform found non-critical alerts. Review evidence and decide whether triage or monitoring is enough.'),
+        }
+
+    if not daily_summary or daily_counts.get("total_checks", 0) == 0:
+        return {
+            "label": tr('No quality data yet'),
+            "css_class": "dq-health-warning",
+            "message": tr('No DQ check result exists for the selected date. Wait for the scheduled pipeline or investigate the missing run before trusting the data.'),
         }
 
     return {
@@ -3259,6 +3260,36 @@ def render_lineage_impact_panel(alert: dict[str, Any]) -> None:
         )
 
 
+def render_saved_triage_panel(alert: dict[str, Any]) -> bool:
+    """Open an existing bounded artifact explicitly; never run an investigation."""
+    uri = find_report_uri(alert, [])
+    if not uri:
+        return False
+    st.caption(tr('A saved investigation is available. Opening it does not call AI or refresh closure evidence.'))
+    if st.button(tr('Open saved investigation report'), key='open_saved_triage_report'):
+        try:
+            report_storage_reference(uri)
+            client = build_streamlit_control_plane_client()
+            if client is None:
+                raise ControlPlaneResponseError('Report API unavailable')
+            artifact = client.read_report_artifact(s3_uri=uri, max_bytes=MAX_REPORT_BYTES)
+            if artifact.get('truncated'):
+                raise ControlPlaneResponseError('Report exceeds bounded reader')
+            st.session_state['saved_triage_read'] = {'uri': uri, 'text': artifact['text']}
+        except Exception as exc:
+            logger.warning('Saved report read unavailable | error_type=%s', type(exc).__name__)
+            st.warning(tr('The saved report could not be opened within the safe read limit. No new investigation was run.'))
+    saved = st.session_state.get('saved_triage_read') or {}
+    if saved.get('uri') == uri:
+        if uri.endswith('.json'):
+            st.code(saved['text'], language='json')
+        else:
+            render_report_document(markdown_text=saved['text'], container_key='saved_triage_document',
+                                   source_label='Recorded investigation report; not a fresh closure check')
+        render_report_access(uri, saved['text'], key='saved_triage_download')
+    return True
+
+
 def render_triage_panel(alert: dict[str, Any], settings: dict[str, Any]) -> None:
     """
     Render triage execution controls and the operator-facing report.
@@ -3307,7 +3338,8 @@ def render_triage_panel(alert: dict[str, Any], settings: dict[str, Any]) -> None
     )
 
     if not latest:
-        st.info(tr(EMPTY_STATE_MESSAGES["no_triage_report"]))
+        if not render_saved_triage_panel(alert):
+            st.info(tr(EMPTY_STATE_MESSAGES["no_triage_report"]))
         return
 
     report = latest["report"]
@@ -3849,6 +3881,7 @@ def render_incident_workspace(
         with overview_tab:
             render_selected_alert(selected_alert)
             st.divider()
+            render_recovery_panel(selected_alert, build_streamlit_control_plane_client())
             render_resolution_panel(
                 selected_alert,
                 build_streamlit_control_plane_client(),

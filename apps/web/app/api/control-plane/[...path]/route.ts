@@ -9,6 +9,7 @@ import {
   browserCapability,
   browserRequestError,
   readBoundedBody,
+  requiresControlPlaneToken,
 } from "@/lib/proxy-policy";
 
 type RouteContext = { params: Promise<{ path: string[] }> };
@@ -67,17 +68,17 @@ async function forward(request: NextRequest, context: RouteContext) {
     }
   }
 
-  if (capability === "approval" && !approvalToken) {
+  if (requiresControlPlaneToken(capability) && !approvalToken) {
     return jsonError(
       503,
-      "Approval mutations are not configured on this web server.",
+      "Privileged operations are not configured on this web server.",
     );
   }
 
   // Never forward caller authentication or routing headers to the private API.
   const headers = new Headers({ accept: "application/json" });
   if (body !== undefined) headers.set("content-type", "application/json");
-  if (capability === "approval")
+  if (requiresControlPlaneToken(capability))
     headers.set("X-Control-Plane-Token", approvalToken!);
   try {
     const upstream = await fetch(

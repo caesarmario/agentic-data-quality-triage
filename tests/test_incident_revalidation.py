@@ -132,7 +132,7 @@ def test_fresh_coverage_pass_has_exact_persisted_evidence_and_counts() -> None:
     assert result["status"] == "pass"
     assert result["expected"] == result["observed"] == 25
     assert result["blockers"] == []
-    assert "Pemeriksaan lolos" in result["summary"]
+    assert "Check passed" in result["summary"]
     assert len(result["checks"]) == 2
     assert len(result["contract_hash"]) == len(result["data_watermark"]) == len(result["schema_hash"]) == 64
     assert result["contract_hash"] == adapter.current_contract_hash(dq_scope())
@@ -166,6 +166,51 @@ def test_unknown_segment_cannot_replace_missing_expected_segment() -> None:
     assert len(client.segments) == 25
     assert result["observed"] == 24
     assert result["status"] == "blocked"
+
+
+def test_unexpected_segment_blocks_closure_even_when_all_expected_pairs_exist() -> None:
+    client = FakeWarehouse()
+    client.segments.append(("ZZ", "other"))
+    result = adapter.capture_revalidation(client, dq_scope())
+    assert result["status"] == "blocked"
+    assert result["observed"] == 25
+    assert result["checks"][0]["details"]["unexpected_segments"] == [["ZZ", "other"]]
+    assert result["checks"][0]["status"] == "warn"
+    assert len([sql for sql in client.queries if "GROUP BY country, channel" in sql]) == 1
+
+
+def test_empty_segment_evidence_never_passes_despite_positive_row_prerequisite() -> None:
+    client = FakeWarehouse()
+    client.segments = []
+    result = adapter.capture_revalidation(client, dq_scope())
+    assert result["status"] == "blocked"
+    assert result["observed"] == 0
+    assert result["checks"][0]["status"] == "warn"
+
+
+def test_segment_evidence_overflow_produces_no_pass_or_persisted_checks() -> None:
+    from pipelines.dq.segments import MAX_COVERAGE_SEGMENTS
+
+    client = FakeWarehouse()
+    client.segments = [(str(index), "direct") for index in range(MAX_COVERAGE_SEGMENTS + 1)]
+    with pytest.raises(ValueError, match="evidence exceeded"):
+        adapter.capture_revalidation(client, dq_scope())
+    assert client.inserts == []
+
+
+@pytest.mark.parametrize("scope_factory", [dq_scope, schema_scope])
+def test_contract_hash_invalidates_legacy_and_changed_semantic_pass(monkeypatch, scope_factory) -> None:
+    scope = scope_factory()
+    _, dq_contract, schema_contract, _ = adapter._resolve(scope)
+    schema_hash = adapter.schema_contract_sha256(schema_contract)
+    legacy = schema_hash if dq_contract is None else adapter._hash({
+        "dq": dq_contract.model_dump(mode="json"), "schema": schema_hash,
+    })
+    current = adapter.current_contract_hash(scope)
+    assert current != legacy
+    monkeypatch.setattr(adapter, "REVALIDATION_SEMANTIC_VERSION", "next-test-only-version")
+    assert adapter.current_contract_hash(scope) != current
+    assert adapter.capture_revalidation(FakeWarehouse(), scope)["contract_hash"] == adapter.current_contract_hash(scope)
 
 
 @pytest.mark.parametrize("metric", ["duplicate_rate__daily_total", "late_arriving_rate__daily_total"])

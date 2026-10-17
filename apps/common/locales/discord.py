@@ -1,5 +1,7 @@
 """Fixed Discord presentation copy. Stored reports, reasons and IDs are not copy."""
 
+from apps.common.locales.recovery import MESSAGES as RECOVERY_MESSAGES
+
 # English keys also provide exact reverse lookup for legacy Indonesian backend copy.
 MESSAGES = {
     "Investigate": "Investigasi",
@@ -94,6 +96,11 @@ MESSAGES = {
     "No matching incidents are active.": "Tidak ada incident aktif yang cocok.",
     "No alerts matched the selected filter.": "Tidak ada alert yang cocok dengan filter.",
     "No daily quality results are available for this date.": "Hasil kualitas data harian belum tersedia untuk tanggal ini.",
+    "No quality data yet": "Belum ada data kualitas",
+    "## No quality data yet": "## Belum ada data kualitas",
+    "No DQ check result exists for this date. Wait for the scheduled pipeline before trusting the data.": "Belum ada hasil pemeriksaan DQ untuk tanggal ini. Tunggu pipeline terjadwal sebelum mempercayai data.",
+    "Day Status": "Kondisi Harian",
+    "Daily Data Quality": "Kualitas Data Harian",
     "No affected table was identified in this bounded summary.": "Tidak ada tabel terdampak yang teridentifikasi dalam ringkasan terbatas ini.",
     "No bounded evidence summary is available.": "Ringkasan bukti terbatas belum tersedia.",
     "Available": "Tersedia",
@@ -512,3 +519,5 @@ MESSAGES.update({
     "The authoritative report belongs to a different incident.": "Laporan dari sumber resmi merujuk ke incident lain.",
     "Triage returned a report for a different incident.": "Investigasi menghasilkan laporan untuk incident lain.",
 })
+
+MESSAGES.update(RECOVERY_MESSAGES)

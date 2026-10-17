@@ -139,6 +139,7 @@ MESSAGES = {
     "Daily quality status unavailable": "Status kualitas harian belum tersedia",
     "The daily DQ snapshot could not be loaded. Alert workflows remain available, but this state must not be treated as healthy.": "Snapshot DQ harian tidak dapat dimuat. Alur alert tetap tersedia, tetapi kondisi ini tidak boleh dianggap sehat.",
     "Daily checks have not run": "Pemeriksaan harian belum berjalan",
+    "No quality data yet": "Belum ada data kualitas",
     "No DQ check result exists for the selected date. Wait for the scheduled pipeline or investigate the missing run before trusting the data.": "Belum ada hasil pemeriksaan DQ untuk tanggal yang dipilih. Tunggu pipeline terjadwal atau selidiki run yang belum tersedia sebelum mempercayai data.",
     "Warning watchlist": "Daftar pemantauan peringatan",
     "The platform found non-critical alerts. Review evidence and decide whether triage or monitoring is enough.": "Platform menemukan alert nonkritis. Tinjau bukti dan tentukan apakah perlu triage atau cukup dipantau.",
@@ -448,4 +449,9 @@ MESSAGES = {
     "View closure": "Lihat penutupan",
     "Resolve": "Resolve",
     "Incident closure - technical references": "Penutupan incident - referensi teknis",
+    "A saved investigation is available. Opening it does not call AI or refresh closure evidence.": "Investigasi tersimpan tersedia. Membukanya tidak memanggil AI atau memperbarui bukti penutupan.",
+    "Open saved investigation report": "Buka laporan investigasi tersimpan",
+    "Recorded investigation report; not a fresh closure check": "Laporan investigasi tersimpan; bukan pemeriksaan penutupan baru",
+    "The saved report could not be opened within the safe read limit. No new investigation was run.": "Laporan tersimpan tidak dapat dibuka dalam batas baca yang aman. Tidak ada investigasi baru yang dijalankan.",
+    "Incident updates are waiting to synchronize. No closure decision has been saved.": "Pembaruan incident sedang menunggu sinkronisasi. Belum ada keputusan penutupan yang tersimpan.",
 }

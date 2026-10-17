@@ -204,29 +204,25 @@ def remediation_blockers(cursor, client, incident: dict, finished_at: datetime |
     """Lock authoritative controls and inspect legacy backfill approvals too."""
     scope = scope_for(incident["snapshot"])
     cursor.execute("SELECT request_id,action_type,scope_json,status,execution_status,updated_at "
-                   "FROM dq_control.approval_requests WHERE action_type IN ('backfill','rerun_dbt') FOR UPDATE")
+                   "FROM dq_control.approval_requests WHERE action_type IN ('backfill','rerun_dbt','recover_partition') FOR UPDATE")
     records = cursor.fetchall()
     blockers = []
     for rid, kind, payload, status, execution, updated in records:
         payload = decoded(payload)
+        payload = {**payload.get("_approval_request", {}), **payload}
         linked = payload.get("alert_ref") == incident["alert_ref"] or payload.get("alert_key") == incident["alert_key"]
         affected_date = payload.get("dt")
         linked = linked or (affected_date and str(affected_date) == scope["dt"])
+        start, end = payload.get("start_date"), payload.get("end_date")
+        linked = linked or (start and end and scope["dt"] and str(start) <= scope["dt"] <= str(end))
         if not linked:
             continue
         if execution in {"dispatching", "dispatched", "unknown"} or status in {"pending", "approved"} and execution == "not_started":
             blockers.append(f"Remediation {rid} belum selesai atau belum dibatalkan.")
         elif finished_at and timestamp(updated) > finished_at and execution in {"succeeded", "failed"}:
             blockers.append("Periksa lagi setelah pekerjaan remediation selesai.")
-    rows = client.query("SELECT request_id,status,execution_status,updated_at,start_date,end_date FROM dq.approval_requests FINAL "
-                        "WHERE action_type='backfill' AND (alert_key=" + quote_sql_literal(incident["alert_key"]) +
-                        " OR (start_date <= toDate(" + quote_sql_literal(scope["dt"]) + ") AND end_date >= toDate(" +
-                        quote_sql_literal(scope["dt"]) + "))) LIMIT 1000").result_rows if scope["dt"] else []
-    for rid, status, execution, updated, *_ in rows:
-        if execution in {"dispatching", "dispatched", "unknown"} or status in {"pending", "approved"} and execution == "not_started":
-            blockers.append(f"Remediation {rid} belum selesai atau belum dibatalkan.")
-        elif finished_at and timestamp(updated) > finished_at and execution in {"succeeded", "failed"}:
-            blockers.append("Periksa lagi setelah pekerjaan remediation selesai.")
+    # Legacy history is imported transactionally; a stale CH projection cannot
+    # override a committed cancellation or terminal execution in PostgreSQL.
     return sorted(set(blockers))
 
 

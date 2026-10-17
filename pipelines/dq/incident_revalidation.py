@@ -38,7 +38,7 @@ from pipelines.schema_drift.storage import persist_schema_evaluation
 
 # --- Defining Constants
 MAX_WATERMARK_PARTS = 10000
-MAX_COVERAGE_SEGMENTS = 1000
+REVALIDATION_SEMANTIC_VERSION = "2-exact-country-channel"
 SCOPE_FIELDS = frozenset({"kind", "table_name", "dt", "metric", "dimension"})
 SCHEMA_REVALIDATION_ALIASES = {
     "dq_resolution_acceptance.schema_fixture": "resolution_acceptance",
@@ -179,9 +179,13 @@ def _json_safe(payload: Any) -> Any:
 
 
 def _contract_hash(dq_contract: OrdersDqContract | None, schema_contract: SchemaContractConfig) -> str:
-    """Include schema prerequisite definitions in the DQ contract fingerprint."""
+    """Invalidate saved PASS when contracts or revalidation semantics change."""
     schema_hash = schema_contract_sha256(schema_contract)
-    return schema_hash if dq_contract is None else _hash({"dq": dq_contract.model_dump(mode="json"), "schema": schema_hash})
+    return _hash({
+        "revalidation_semantic_version": REVALIDATION_SEMANTIC_VERSION,
+        "dq": dq_contract.model_dump(mode="json") if dq_contract is not None else None,
+        "schema": schema_hash,
+    })
 
 
 def current_contract_hash(scope: dict[str, Any]) -> str:
@@ -297,26 +301,6 @@ def _run_rule(client: Any, scope: _Scope, contract: OrdersDqContract, key: str, 
     return result
 
 
-def _verify_coverage(client: Any, scope: _Scope, contract: OrdersDqContract, result: run_checks.DqCheckResult) -> run_checks.DqCheckResult:
-    """Count expected pairs, not arbitrary pairs that can mask missing segments."""
-    expected = {(country, channel) for country in contract.expected_segments.countries for channel in contract.expected_segments.channels}
-    if not expected or len(expected) > MAX_COVERAGE_SEGMENTS:
-        raise ValueError("Expected segment contract is empty or exceeds the bounded limit.")
-    rows = client.query(
-        f"SELECT country, channel FROM {scope.table_name} WHERE dt = {format_date_literal(scope.dt)} "
-        f"GROUP BY country, channel ORDER BY country, channel LIMIT {MAX_COVERAGE_SEGMENTS + 1}"
-    ).result_rows
-    if len(rows) > MAX_COVERAGE_SEGMENTS:
-        raise ValueError("Segment evidence exceeded the bounded limit.")
-    actual = {(str(country), str(channel)) for country, channel in rows}
-    ratio = len(actual & expected) / len(expected)
-    details = dict(result.details, observed_segment_count=len(actual & expected), expected_segment_count=len(expected),
-                   missing_segments=[list(pair) for pair in sorted(expected - actual)],
-                   unexpected_segments=[list(pair) for pair in sorted(actual - expected)])
-    return replace(result, observed_value=ratio, details=details,
-                   status="pass" if ratio >= contract.quality.segment_coverage.min_coverage_ratio else run_checks.failure_status(result.severity))
-
-
 def _serialize_dq(result: run_checks.DqCheckResult, dimension: str) -> dict[str, Any]:
     """Expose exact persisted evidence IDs and scope, without raw records."""
     return {
@@ -359,8 +343,6 @@ def _capture_dq(client: Any, scope: _Scope, contract: OrdersDqContract, columns:
         )
     else:
         target = _run_rule(client, scope, scoped, key, timestamp)
-        if key == "segment_coverage":
-            target = _verify_coverage(client, scope, contract, target)
         if key in {"duplicate_rate", "late_arriving_rate"}:
             denominator = target.details.get("denominator")
             numerator = target.details.get("numerator")
@@ -447,8 +429,8 @@ def capture_revalidation(client: Any, scope: dict[str, Any]) -> dict[str, Any]:
         references = [f"clickhouse://dq.schema_snapshots/{snapshot.snapshot_id}"]
         references.extend(f"clickhouse://dq.schema_drift_results/{result.result_id}" for result in comparisons)
     summary = (
-        "Pemeriksaan lolos. Masalah pada incident ini tidak ditemukan dalam pemeriksaan terbaru."
-        if status == "pass" else "Belum bisa ditutup. Masih ada masalah atau bukti pemeriksaan belum lengkap."
+        "Check passed. The issue was not found in the latest check for this incident."
+        if status == "pass" else "Cannot close yet. A problem remains or verification evidence is incomplete."
     )
     logger.info("Scoped incident revalidation completed | table=%s kind=%s status=%s checks=%d",
                 parsed.table_name, parsed.kind, status, len(checks))

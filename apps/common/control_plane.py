@@ -207,7 +207,7 @@ class ControlPlaneClient:
     Attributes:
         base_url: Control-plane API base URL.
         timeout_seconds: Bounded request timeout.
-        approval_token: Optional secret used only for approval mutation endpoints.
+        approval_token: Shared secret for privileged mutations and model-invoking requests.
     """
 
     def __init__(
@@ -222,7 +222,7 @@ class ControlPlaneClient:
         Args:
             base_url: API base URL such as http://api:8000.
             timeout_seconds: Per-request timeout in seconds.
-            approval_token: Optional approval mutation token. None reads the environment.
+            approval_token: Optional shared control-plane token. None reads the environment.
 
         Returns:
             None.
@@ -282,6 +282,8 @@ class ControlPlaneClient:
         )
         started_at = time.monotonic()
         url        = f"{self.base_url}{path}"
+        if method.upper() == "POST" and path in {"/api/v1/copilot/answer", "/api/v1/triage/run"}:
+            headers = {**(headers or {}), **self.approval_headers()}
 
         logger.info(
             "Calling control-plane API | method=%s path=%s timeout=%.1f",
@@ -298,8 +300,11 @@ class ControlPlaneClient:
                 json=json_body,
                 headers=headers,
                 timeout=timeout,
+                allow_redirects=False,
             )
             response.raise_for_status()
+            if 300 <= response.status_code < 400:
+                raise ControlPlaneResponseError("Control-plane redirects are not permitted.")
 
         except (requests.ConnectionError, requests.Timeout) as exc:
             detail = str(exc)[:MAX_ERROR_DETAIL_CHARS]
@@ -358,17 +363,17 @@ class ControlPlaneClient:
 
     def approval_headers(self) -> dict[str, str]:
         """
-        Build the authorization header for approval mutation endpoints.
+        Build the authorization header for privileged control-plane requests.
 
         Returns:
             Header dictionary containing the configured token.
 
         Raises:
-            ControlPlaneResponseError: If approval mutation is not configured locally.
+            ControlPlaneResponseError: If privileged access is not configured locally.
         """
         if not self.approval_token:
             raise ControlPlaneResponseError(
-                f"Approval mutations require {APPROVAL_TOKEN_ENV_NAME}."
+                f"Privileged control-plane requests require {APPROVAL_TOKEN_ENV_NAME}."
             )
 
         return {APPROVAL_TOKEN_HEADER: self.approval_token}
@@ -723,14 +728,20 @@ class ControlPlaneClient:
 
         if FORBIDDEN_READ_API_FIELDS.intersection(payload):
             raise ControlPlaneResponseError("Daily summary API exposed internal query metadata.")
+        if payload.get("status") != "success":
+            raise ControlPlaneResponseError("Daily summary API did not return a successful request result.")
 
         response_dt = str(payload.get("dt") or "")
 
-        try:
-            normalized_response_dt = date.fromisoformat(response_dt).isoformat()
-
-        except ValueError as exc:
-            raise ControlPlaneResponseError("Daily summary API returned an invalid target date.") from exc
+        normalized_response_dt = None
+        if response_dt:
+            try:
+                normalized_response_dt = date.fromisoformat(response_dt).isoformat()
+            except ValueError as exc:
+                raise ControlPlaneResponseError("Daily summary API returned an invalid target date.") from exc
+        elif ("dt" not in payload or payload.get("dt") is not None
+              or normalized_dt or payload.get("availability") != "empty"):
+            raise ControlPlaneResponseError("Daily summary API returned an invalid target date.")
 
         if normalized_dt and normalized_response_dt != normalized_dt:
             raise ControlPlaneResponseError("Daily summary API returned a different target date.")
@@ -786,6 +797,9 @@ class ControlPlaneClient:
 
         check_total = validate_counts(check_counts, "status", "check")
         alert_total = validate_counts(alert_counts, "severity", "alert")
+        for field in ("total_checks", "total_open_alerts"):
+            if isinstance(payload.get(field), bool) or not isinstance(payload.get(field), int):
+                raise ControlPlaneResponseError("Daily summary API totals must be integers.")
 
         if payload.get("total_checks") != check_total:
             raise ControlPlaneResponseError("Daily summary API returned an inconsistent check total.")
@@ -793,6 +807,14 @@ class ControlPlaneClient:
         if payload.get("total_open_alerts") != alert_total:
             raise ControlPlaneResponseError("Daily summary API returned an inconsistent alert total.")
 
+        availability = payload.get("availability", "available" if check_total or alert_total else "empty")
+        if availability not in {"available", "empty"}:
+            raise ControlPlaneResponseError("Daily summary API returned invalid availability.")
+        if availability == "empty" and (check_counts or alert_counts or check_total or alert_total):
+            raise ControlPlaneResponseError("Empty daily summary cannot contain aggregates.")
+        if availability == "available" and (normalized_response_dt is None or not (check_total or alert_total)):
+            raise ControlPlaneResponseError("Available daily summary needs dated evidence.")
+        payload["availability"] = availability
         return payload
 
     def validate_quality_summary_payload(

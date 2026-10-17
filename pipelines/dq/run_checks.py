@@ -35,6 +35,7 @@ from pipelines.common.clickhouse import (
 from pipelines.common.logging import logger
 from pipelines.dq.config import OrdersDqContract, load_orders_dq_contract
 from pipelines.dq.evidence import DEFAULT_EVIDENCE_PREFIX, export_failure_evidence_for_results
+from pipelines.dq.segments import compare_country_channel_segments
 from pipelines.seeding.helpers import iter_dates, parse_date
 
 
@@ -415,7 +416,7 @@ def check_accepted_values(client: Any, contract: OrdersDqContract, dt: date, run
 
 def check_segment_coverage(client: Any, contract: OrdersDqContract, dt: date, run_at: datetime) -> DqCheckResult:
     """
-    Check whether all expected country-channel segments exist in the daily mart.
+    Require exact, non-empty expected country-channel coverage in the daily mart.
 
     Args:
         client: clickhouse-connect client instance.
@@ -426,19 +427,15 @@ def check_segment_coverage(client: Any, contract: OrdersDqContract, dt: date, ru
     Returns:
         DqCheckResult for segment coverage.
     """
-    check          = contract.quality.segment_coverage
-    expected_count = contract.expected_segments.expected_segment_count
-    observed_count = scalar(
+    check = contract.quality.segment_coverage
+    comparison = compare_country_channel_segments(
         client=client,
-        query=f"""
-            SELECT uniqExact(concat(toString(country), '|', toString(channel)))
-            FROM {check.table_name}
-            WHERE dt = {format_date_literal(dt)}
-        """,
-        default=0,
+        table_name=check.table_name,
+        dt=dt,
+        countries=contract.expected_segments.countries,
+        channels=contract.expected_segments.channels,
     )
-    coverage_ratio = 0.0 if expected_count == 0 else float(observed_count or 0) / expected_count
-    status         = "pass" if coverage_ratio >= check.min_coverage_ratio else failure_status(check.severity)
+    status = "pass" if comparison.exact_match else failure_status(check.severity)
 
     return build_check_result(
         run_at=run_at,
@@ -448,12 +445,11 @@ def check_segment_coverage(client: Any, contract: OrdersDqContract, dt: date, ru
         check_type="coverage",
         status=status,
         severity=check.severity,
-        observed_value=coverage_ratio,
+        observed_value=comparison.coverage_ratio,
         expected_value=1.0,
         threshold_value=check.min_coverage_ratio,
         details={
-            "observed_segment_count": int(observed_count or 0),
-            "expected_segment_count": expected_count,
+            **comparison.details(),
             "countries": contract.expected_segments.countries,
             "channels": contract.expected_segments.channels,
         },

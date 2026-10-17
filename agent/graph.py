@@ -39,6 +39,7 @@ from agent.state import (
     TriageReport,
     TriageState,
 )
+from agent.context.bundle import TrustedSourceMetadata, public_text, render_incident_context
 from agent.checkpointing import (
     CHECKPOINT_MODE_OFF,
     build_checkpoint_config,
@@ -132,6 +133,9 @@ class TriageRuntimeConfig:
     artifacts_prefix: str          = DEFAULT_REPORT_PREFIX
     clickhouse_host: str | None    = None
     clickhouse_port: int | None    = None
+    incident_id: str | None        = None
+    incident_revision: str | None  = None
+    trusted_source_metadata: TrustedSourceMetadata | None = None
 
 
 # --- Defining Functions
@@ -167,7 +171,7 @@ def build_runtime_contract_payload(config: TriageRuntimeConfig) -> dict[str, Any
         or os.getenv("CLICKHOUSE_HTTP_PORT", str(DEFAULT_CLICKHOUSE_PORT))
     )
 
-    return {
+    payload = {
         "manifest_path": str(config.manifest_path or ""),
         "manifest_s3_uri": str(config.manifest_s3_uri or ""),
         "s3_endpoint_url": resolve_s3_endpoint(config.s3_endpoint_url),
@@ -178,6 +182,14 @@ def build_runtime_contract_payload(config: TriageRuntimeConfig) -> dict[str, Any
         "clickhouse_database": os.getenv("CLICKHOUSE_DB", "dq"),
         "clickhouse_user": os.getenv("CLICKHOUSE_USER", "default"),
     }
+    if config.incident_id is not None or config.incident_revision is not None or config.trusted_source_metadata is not None:
+        payload["incident_id"] = config.incident_id
+        payload["incident_revision"] = config.incident_revision
+        payload["trusted_source_fingerprint"] = (
+            hashlib.sha256(config.trusted_source_metadata.model_dump_json().encode("utf-8")).hexdigest()
+            if config.trusted_source_metadata else None
+        )
+    return payload
 
 
 def build_runtime_contract_hash(config: TriageRuntimeConfig) -> str:
@@ -465,7 +477,7 @@ def build_missing_partition_hypothesis(state: TriageState) -> Hypothesis:
 
     description = (
         f"The alert partition for {alert.table_name if alert else 'the target table'} appears empty or missing. "
-        "This points to a landing/load/backfill gap rather than a downstream-only mart issue."
+        "A count alone cannot distinguish upstream absence, landing/load loss, or a derived-model defect."
     )
 
     return Hypothesis(
@@ -475,7 +487,7 @@ def build_missing_partition_hypothesis(state: TriageState) -> Hypothesis:
         confidence=confidence,
         root_cause_category="missing_partition",
         supporting_evidence_ids=evidence_ids(state),
-        recommended_action="Backfill the affected date through the daily landing, load, dbt, DQ, and alert workflow.",
+        recommended_action="Compare verified upstream, landing, raw and mart facts, then request bounded manual recovery for the affected partition.",
     )
 
 
@@ -502,7 +514,7 @@ def build_freshness_hypothesis(state: TriageState) -> Hypothesis:
         confidence=min(confidence, 0.90),
         root_cause_category="freshness_gap",
         supporting_evidence_ids=evidence_ids(state),
-        recommended_action="Validate landing and raw load for the missing date, then rerun downstream dbt and DQ jobs.",
+        recommended_action="Verify source versions and landing/raw completeness before requesting bounded manual recovery for the affected partition.",
     )
 
 
@@ -518,12 +530,12 @@ def build_segment_hypothesis(state: TriageState) -> Hypothesis:
     """
     return Hypothesis(
         title="Missing segment coverage",
-        description="One or more expected country/channel segments are missing from the generated or loaded orders data.",
+        description="A coverage alert suggests a segment mismatch; exact missing and unexpected pairs require set comparison against the validated contract.",
         likelihood=0.72,
         confidence=0.72,
         root_cause_category="missing_segment",
         supporting_evidence_ids=evidence_ids(state),
-        recommended_action="Compare segment counts against the seeding config and regenerate/backfill the affected partition if needed.",
+        recommended_action="Compare exact expected and observed segment sets across source, landing, raw and mart, then request bounded manual recovery only after prerequisites are verified.",
     )
 
 
@@ -750,52 +762,9 @@ def build_approval_actions(state: TriageState, top_hypothesis: Hypothesis | None
     Returns:
         List of approval-gated actions.
     """
-    if not state.alert or not state.alert.dt or not top_hypothesis:
-        return []
-
-    approval_backfill_categories = {
-        "missing_partition",
-        "freshness_gap",
-        "late_arriving",
-        "missing_segment",
-    }
-
-    if top_hypothesis.root_cause_category not in approval_backfill_categories:
-        return []
-
-    if (
-        top_hypothesis.root_cause_category == "missing_segment"
-        and not has_corroborated_raw_partition_loss(state)
-    ):
-        return []
-
-    reason = (
-        "Backfill is recommended because guarded SQL evidence confirms that the raw "
-        "partition for the affected date is empty."
-        if top_hypothesis.root_cause_category == "missing_segment"
-        else "Backfill is recommended because the evidence points to an incomplete or missing date partition."
-    )
-
-    return [
-        ApprovalGatedAction(
-            action_type=ApprovalActionType.BACKFILL,
-            reason=reason,
-            target_dag_id="90_dag_dq_platform_backfill_dispatcher",
-            start_date=state.alert.dt,
-            end_date=state.alert.dt,
-            parameters={
-                "target_dag_id": "00_dag_dq_platform_daily_orchestrator",
-                "run_mode": "backfill",
-                "run_seed": True,
-                "run_load": True,
-                "run_dbt": True,
-                "run_dq": True,
-                "run_triage": False,
-                "requested_by": "agentic_triage",
-                "reason": top_hypothesis.title,
-            },
-        )
-    ]
+    # Keep the public function and legacy action model, but do not synthesize an
+    # executable daily backfill. The API owns version-bound recovery approvals.
+    return []
 
 
 def build_report_narrative_context(state: TriageState) -> dict[str, Any]:
@@ -808,26 +777,28 @@ def build_report_narrative_context(state: TriageState) -> dict[str, Any]:
     Returns:
         Dictionary with alert, top hypothesis, compact evidence summaries, and errors.
     """
-    alert                  = state.alert
-    top_hypothesis         = state.top_hypothesis
+    bundle = state.refresh_incident_context_bundle()
     complexity_assessment = assess_incident_complexity(state)
     evidence_rows          = [
         {
-            "evidence_reference": f"E{index}",
+            "evidence_reference": item.reference,
             "tool_name": item.tool_name,
-            "summary": item.summary,
-            "row_count": item.row_count,
+            "summary": item.observation,
+            "observed_at": item.observed_at.isoformat() if item.observed_at else None,
+            "current": item.current,
         }
-        for index, item in enumerate(state.evidence[:8], start=1)
+        for item in bundle.evidence if item.reference in {f"E{i}" for i in range(1, 9)}
     ]
 
     return {
-        "alert": alert.model_dump(mode="json") if alert else {},
-        "top_hypothesis": top_hypothesis.model_dump(mode="json") if top_hypothesis else {},
+        "incident_context_bundle": bundle.model_dump(mode="json"),
+        "alert": {"table_name": bundle.table_name, "metric": bundle.metric, "dt": str(bundle.partition_dt)},
+        "top_hypothesis": {"title": bundle.likely_explanation, "heuristic_score": bundle.heuristic_score},
         "evidence": evidence_rows,
-        "confidence": top_hypothesis.confidence if top_hypothesis else 0.0,
+        "confidence": bundle.heuristic_score,
+        "heuristic_score": bundle.heuristic_score,
         "complexity_assessment": complexity_assessment.model_dump(mode="json"),
-        "errors": state.errors,
+        "errors": [public_text(error) for error in state.errors[:10]],
     }
 
 
@@ -850,6 +821,12 @@ def build_report_narrative_prompt(state: TriageState) -> str:
         "Use only the provided evidence. Explain what likely happened, cite supporting evidence "
         "using the supplied E1-E8 references, state likely downstream impact, disclose uncertainty, "
         "recommend one safe next step, and explain why mutation remains approval-gated. "
+        "Separate Confirmed observations / Likely explanation / Missing evidence. "
+        "The numeric heuristic_score is not statistical probability. Missing critical facts prohibit an executable plan. "
+        "Use the deterministic runbook eligibility, not source existence alone. When eligibility is not_indicated, "
+        "describe the earlier detection as historical, do not propose another replay or rebuild, and recommend "
+        "fresh scoped read-only revalidation. Current consistency does not mean every quality rule passes. "
+        "Otherwise recommend only the eligible bounded runbook for human review, never baseline regeneration or a full daily backfill. "
         "Do not repeat technical keys, invent business impact, or claim that remediation executed. "
         f"Alert table={alert.table_name if alert else 'unknown'}, "
         f"metric={alert.metric if alert else 'unknown'}, "
@@ -916,18 +893,16 @@ def build_ai_investigation_narrative(
         AiInvestigationNarrative safe for reports, API, UI, and Discord.
     """
     top_hypothesis = state.top_hypothesis
-    evidence_lines = [
-        f"[E{index}] {item.summary}"
-        for index, item in enumerate(state.evidence[:4], start=1)
-        if item.tool_name != "llm_router" and item.summary.strip()
-    ]
+    bundle = state.refresh_incident_context_bundle()
+    evidence_lines = [f"[{item.reference}] {item.observation}" for item in bundle.evidence[:4]]
+    repair_not_indicated = bundle.context_complete and bundle.runbook.eligibility == "not_indicated"
     deterministic_evidence = evidence_lines or [
         "[E1] No complete evidence row was available; treat the diagnosis as provisional."
     ]
     confidence = top_hypothesis.confidence if top_hypothesis else 0.0
     fallback = AiInvestigationNarrative(
         what_happened=(
-            top_hypothesis.description
+            bundle.likely_explanation if repair_not_indicated else top_hypothesis.description
             if top_hypothesis
             else "The investigation did not produce a supported root-cause hypothesis."
         ),
@@ -937,18 +912,14 @@ def build_ai_investigation_narrative(
             "until the source condition is verified and the partition is revalidated."
         ),
         uncertainty=(
-            f"The current diagnosis has confidence {confidence:.2f}; "
+            f"The current diagnosis has heuristic_score {confidence:.2f}, not statistical probability; "
             + (
                 "one or more evidence dependencies were incomplete."
                 if state.errors
                 else "the evidence supports a leading hypothesis but does not prove the source-side cause."
             )
         ),
-        recommended_next_step=(
-            top_hypothesis.recommended_action
-            if top_hypothesis and top_hypothesis.recommended_action
-            else "Review the retained evidence and confirm the upstream condition before proposing remediation."
-        ),
+        recommended_next_step=bundle.recovery_recommendation,
         approval_rationale=(
             "Any rerun, backfill, quarantine, or data-changing action can affect downstream consumers, "
             "so the system requires explicit human approval before execution."
@@ -958,6 +929,12 @@ def build_ai_investigation_narrative(
         model=response.model if response else "heuristic-v1",
         route=response.route_name if response else REPORT_NARRATIVE_ROUTE,
     )
+    if repair_not_indicated:
+        fallback.recommended_next_step = bundle.recovery_recommendation
+        fallback.likely_impact = (
+            "Historical detection risk remains in the incident history. Current business-value agreement "
+            "does not certify every quality rule or close the incident; a fresh scoped check is required."
+        )
 
     if not response or response.used_heuristic or not response.structured_output:
         return fallback
@@ -985,16 +962,24 @@ def build_ai_investigation_narrative(
         )
         return fallback
 
+    # Recovery scope is a policy fact. Free-form wording cannot choose a wider runbook.
+    next_step = bundle.recovery_recommendation
     return AiInvestigationNarrative(
-        what_happened=proposal.what_happened,
+        what_happened=(
+            "System verification: " + bundle.likely_explanation
+            + "\nHistorical AI explanation: " + proposal.what_happened[:1400]
+            if repair_not_indicated else proposal.what_happened
+        ),
         evidence_reasoning=[
             f"[{item.evidence_reference}] {item.finding}"
             for item in proposal.evidence_reasoning
         ],
-        likely_impact=proposal.likely_impact,
+        likely_impact=(fallback.likely_impact if repair_not_indicated else proposal.likely_impact),
         uncertainty=proposal.uncertainty,
-        recommended_next_step=proposal.recommended_next_step,
-        approval_rationale=proposal.approval_rationale,
+        recommended_next_step=next_step,
+        # Approval is a deterministic policy fact, not a model assertion about
+        # whether evidence happens to be complete.
+        approval_rationale=fallback.approval_rationale,
         source="external_model",
         provider=response.provider,
         model=response.model,
@@ -1075,6 +1060,8 @@ def render_markdown_report(report: TriageReport) -> str:
         "",
         "## AI Investigation",
     ]
+    if report.incident_context_bundle:
+        lines[-1:-1] = [render_incident_context(report.incident_context_bundle), ""]
 
     if report.ai_investigation:
         narrative = report.ai_investigation
@@ -1398,6 +1385,12 @@ def build_report_from_state(state: TriageState, llm_narrative: LlmResponse | Non
     report_id              = build_report_id(state.agent_run_id, state.alert.alert_key)
     issue_title            = build_alert_title(state.alert)
     ai_investigation       = build_ai_investigation_narrative(state=state, response=llm_narrative)
+    bundle = state.refresh_incident_context_bundle()
+    repair_not_indicated = bundle.context_complete and bundle.runbook.eligibility == "not_indicated"
+    for hypothesis in state.hypotheses:
+        hypothesis.recommended_action = bundle.recovery_recommendation
+    if repair_not_indicated:
+        issue_title = "Historical detection: " + issue_title
 
     summary = f"{issue_title}. {ai_investigation.what_happened}"
     impact  = ai_investigation.likely_impact
@@ -1429,11 +1422,13 @@ def build_report_from_state(state: TriageState, llm_narrative: LlmResponse | Non
         complexity_assessment=complexity_assessment,
         investigation_errors=investigation_errors,
         confidence=confidence,
+        incident_context_bundle=bundle,
         recommended_actions=recommended_actions,
-        approval_gated_actions=build_approval_actions(state=state, top_hypothesis=top_hypothesis),
+        approval_gated_actions=([] if repair_not_indicated else build_approval_actions(state=state, top_hypothesis=top_hypothesis)),
         residual_risks=[
             "The agent did not mutate production data; remediation still requires human approval.",
-            "If source data is genuinely absent, backfill will not repair the issue without regenerating or restoring landing data.",
+            "If verified source data is absent, recovery is blocked until the owner supplies a trusted source version; do not recreate a baseline.",
+            *( ["Context is incomplete; no executable recovery plan can be issued."] if not bundle.context_complete else [] ),
             *(
                 ["One or more investigation dependencies failed; treat the diagnosis as partial until those evidence gaps are resolved."]
                 if investigation_errors
@@ -1597,6 +1592,9 @@ def run_triage(
         runtime_contract_hash=runtime_contract_hash,
         confidence_threshold=confidence_threshold,
         max_evidence_iterations=max_evidence_iterations,
+        incident_id=runtime_config.incident_id,
+        incident_revision=runtime_config.incident_revision,
+        trusted_source_metadata=runtime_config.trusted_source_metadata,
     )
     replay_checkpoint_id = (checkpoint_replay_id or "").strip()
     replay_request_id    = (checkpoint_replay_request_id or "").strip()

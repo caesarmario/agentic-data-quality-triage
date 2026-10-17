@@ -1296,7 +1296,8 @@ def test_report_uses_validated_external_investigation_narrative() -> None:
     assert report.ai_investigation.evidence_reasoning[0].startswith("[E1]")
     assert "The affected partition is empty" in report.summary
     assert "## AI Investigation" in report.markdown_report
-    assert "Confirm the landing object" in report.markdown_report
+    assert report.ai_investigation.recommended_next_step == report.incident_context_bundle.recovery_recommendation
+    assert report.incident_context_bundle.recovery_recommendation in report.markdown_report
     assert not any("LLM-assisted narrative" in action for action in report.recommended_actions)
 
 

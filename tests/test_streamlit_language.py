@@ -281,6 +281,29 @@ render_selected_alert({"status": "resolved", "table_name": "<script>alert(1)</sc
     assert "raw_metric" in card and "&lt;b&gt;raw&lt;/b&gt;" in card
 
 
+@pytest.mark.parametrize("language", ["en", "id"])
+@pytest.mark.parametrize("dt", [None, "2026-10-16"])
+def test_daily_empty_overview_is_localized_without_none_date(language, dt):
+    at = AppTest.from_string(f'''
+import streamlit as st
+from apps.streamlit.app import render_reliability_overview
+st.session_state["streamlit_language"] = {language!r}
+render_reliability_overview([], daily_summary={{
+    "status": "success", "availability": "empty", "dt": {dt!r},
+    "check_counts": [], "alert_counts": [], "total_checks": 0, "total_open_alerts": 0,
+}}, daily_summary_transport="synthetic")
+''').run()
+
+    assert not at.exception
+    card = "\n".join(item.value for item in at.markdown)
+    assert translate("No quality data yet", language) in card
+    assert "None" not in card
+    assert "dq-health-stable" not in card
+    assert not at.error
+    assert [item.value for item in at.metric] == ["0", "0", "0", "0"]
+    assert (dt or translate("not available", language)) in card
+
+
 def test_production_code_never_monkeypatches_global_streamlit_or_uses_browser_storage():
     for module in (app, localization, resolution):
         source = Path(module.__file__).read_text(encoding="utf-8")

@@ -3,7 +3,6 @@
 ## Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
 ####
 
-# --- Importing Libraries
 from __future__ import annotations
 
 import argparse
@@ -12,7 +11,6 @@ from pathlib import Path
 from typing import Sequence
 
 
-# --- Defining Constants
 VALIDATION_DAG_ID = "91_dag_dq_platform_validation"
 TRIAGE_DAG_ID     = "40_dag_dq_orders_triage_agent"
 APPROVED_ACTION_DAG_ID = "90_02_dag_dq_platform_approved_actions"
@@ -31,6 +29,9 @@ SAFE_RUN_ID       = SAFE_IDENTIFIER
 ADMINISTRATIVE_DAG_IDS = (
     "90_03_dag_dq_incident_revalidation",
     "90_04_dag_dq_resolution_outbox_acceptance",
+    "90_05_dag_dq_incident_recovery",
+    "90_06_dag_dq_recovery_reconciliation",
+    "90_07_dag_dq_recovery_acceptance",
     TRIAGE_DAG_ID,
     APPROVED_ACTION_DAG_ID,
     VALIDATION_DAG_ID,
@@ -45,7 +46,6 @@ ADMINISTRATIVE_DAG_IDS = (
 )
 
 
-# --- Defining Functions
 def validation_log_directory(run_id: str, log_root: Path = AIRFLOW_LOG_ROOT) -> Path:
     """
     Resolve the bounded Airflow log directory for one validation run.
@@ -150,7 +150,6 @@ def print_airflow_logs(
     return 0
 
 
-# --- Defining CLI Helpers
 def build_parser() -> argparse.ArgumentParser:
     """
     Build the Airflow validation log parser.
@@ -183,6 +182,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
 
-# --- Running CLI Entrypoint
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -12,6 +12,8 @@
 data
 logs
 todo
+output
+.pytest_cache
 
 # --- Ignoring Python Cache And Logs
 **/__pycache__

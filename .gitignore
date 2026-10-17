@@ -13,6 +13,8 @@ infra/.env
 
 # --- Ignoring Generated Local Data
 data/
+output/
+.pytest_cache/
 
 # --- Ignoring dbt Artifacts
 warehouse/dbt/target/

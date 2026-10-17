@@ -69,6 +69,13 @@ BUTTONS = (
         ("Confirm Close", "Save the closure only if every safety check still passes."),
         ("Cancel", "Close the panel or cancel the available step. This is not a data rollback."),
     )),
+    ("Recovery buttons", (
+        ("Review Fix", "Review a saved-source recovery plan for one incident and date. No data changes yet."),
+        ("Approve Plan", "Accept the exact source, scope, checks and rollback. Nothing runs yet."),
+        ("Run Approved Fix", "After separate confirmation, run the approved recovery through Airflow. This changes only the approved partition."),
+        ("Track Execution", "Read the existing execution and data-check result. It does not start another fix."),
+        ("Resolve", "After recovery, run a fresh passing check and confirm closure. Recovery never closes the incident automatically."),
+    )),
 )
 
 
@@ -110,7 +117,7 @@ def help_rows(topic: str, page: int, *, welcome: bool = False) -> tuple[DiscordA
         _action("commands", "Commands"), _action("buttons", "Button Guide"), _action("safety", "Safety & AI"),
     ]
     rows = [DiscordActionRow(tuple(actions))]
-    pages = 3 if topic == "commands" else 2 if topic == "buttons" else 1
+    pages = 3 if topic in {"commands", "buttons"} else 1
     extras = []
     if page > 0:
         extras.append(_action(topic, "Back", page - 1, nav="back"))
@@ -127,7 +134,7 @@ def help_rows(topic: str, page: int, *, welcome: bool = False) -> tuple[DiscordA
 
 def render_help(topic: str = "start", page: int = 0, *, catalog: dict[str, HelpCommand] | None = None,
                 welcome: bool = False) -> DiscordRenderResult:
-    if topic not in TOPICS or page < 0 or page >= (3 if topic == "commands" else 2 if topic == "buttons" else 1):
+    if topic not in TOPICS or page < 0 or page >= (3 if topic in {"commands", "buttons"} else 1):
         raise ValueError("Unknown help topic/page")
     fields = []
     if welcome:
@@ -303,7 +310,7 @@ async def show_help(interaction: Any, topic: str = "start", page: int = 0,
 class HelpActionButton(discord.ui.DynamicItem[discord.ui.Button], template=PATTERN.pattern):
     """Navigation only; no incident/action target and no mutation permission."""
     def __init__(self, topic: str, page: int = 0, nav: str = ""):
-        pages = 3 if topic == "commands" else 2 if topic == "buttons" else 1
+        pages = 3 if topic in {"commands", "buttons"} else 1
         custom_id = f"dqhelp:v1:{topic}:{page}" + (f":{nav}" if nav else "")
         if not PATTERN.fullmatch(custom_id) or not 0 <= page < pages:
             raise ValueError("Unknown help action")

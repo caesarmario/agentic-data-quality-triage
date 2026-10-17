@@ -27,6 +27,11 @@ NOW = datetime(2026, 10, 11, 10, 0, tzinfo=timezone.utc)
 APP_PATH = Path(__file__).resolve().parents[1] / "apps" / "streamlit" / "app.py"
 
 
+def test_sync_notice_does_not_invent_a_closure_decision():
+    assert 'No closure decision has been saved' in ui.synchronization_notice(False)
+    assert 'The decision is saved' in ui.synchronization_notice(True)
+
+
 def request_payload(status="pass", request_id="REV-test-1", revision=4):
     """Build one synthetic response without reading warehouse or runtime state."""
     return {

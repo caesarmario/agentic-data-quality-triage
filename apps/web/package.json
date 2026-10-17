@@ -7,11 +7,11 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test components/__tests__/approval-action-policy.test.ts components/__tests__/persisted-report-contract.test.ts components/__tests__/shadcn-ui-contract.test.ts tests/proxy-policy.test.mjs"
+    "test": "tsx --test components/__tests__/approval-action-policy.test.ts components/__tests__/persisted-report-contract.test.ts components/__tests__/shadcn-ui-contract.test.ts components/__tests__/daily-summary-gate.test.tsx tests/proxy-policy.test.mjs"
   },
   "dependencies": {
-    "@tailwindcss/postcss": "4.3.3",
     "@base-ui/react": "1.8.0",
+    "@tailwindcss/postcss": "4.3.3",
     "@types/node": "26.5.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.7",

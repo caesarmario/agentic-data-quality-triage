@@ -12,6 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 PAGES = (
     "README.md", "docs/local-operations.md", "docs/architecture.md",
     "docs/data-model.md", "docs/demo-video.md", "docs/repository-refresh-acceptance.md",
+    "docs/recovery-workflow.md", "docs/evidence-driven-recovery-acceptance.md",
+    "docs/demo-reset.md",
+    "docs/discord_output_templates.md",
+    "docs/datasentry-v1-acceptance.md",
 )
 
 

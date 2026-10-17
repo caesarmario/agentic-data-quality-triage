@@ -74,7 +74,7 @@ tables:
       - {name: is_test, data_type: UInt8}
       - {name: business_date_version, data_type: UInt32}
       - {name: incident_scenario, data_type: String}
-      - {name: transformed_at, data_type: "DateTime64(3)"}
+      - {name: transformed_at, data_type: "DateTime64(3, 'UTC')", default_kind: DEFAULT, default_expression: now64(3)}
 
   - qualified_name: dq.fct_orders_daily
     check_column_order: true
@@ -95,6 +95,6 @@ tables:
       - {name: refund_amount_usd, data_type: "Decimal(18, 2)"}
       - {name: recognized_revenue_usd, data_type: "Decimal(18, 2)"}
       - {name: aov_usd, data_type: "Decimal(18, 2)"}
-      - {name: duplicate_order_count, data_type: UInt64}
-      - {name: late_arriving_count, data_type: UInt64}
-      - {name: updated_at, data_type: "DateTime64(3)"}
+      - {name: duplicate_order_count, data_type: UInt64, default_kind: DEFAULT, default_expression: "0"}
+      - {name: late_arriving_count, data_type: UInt64, default_kind: DEFAULT, default_expression: "0"}
+      - {name: updated_at, data_type: "DateTime64(3, 'UTC')", default_kind: DEFAULT, default_expression: now64(3)}

@@ -13,7 +13,7 @@ import subprocess
 from collections.abc import Callable, Mapping
 from datetime import date
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import requests
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -41,6 +41,24 @@ class ApprovedActionType(str, Enum):
     RERUN_DBT = "rerun_dbt"
     CREATE_TICKET = "create_ticket"
     POST_NOTIFICATION = "post_notification"
+    RECOVER_PARTITION = "recover_partition"
+
+
+class RecoverPartitionScope(BaseModel):
+    """Exact reference to a server-created recovery plan, not executable backfill flags.
+
+    Source selection, revision checks and execution belong to the plan store and
+    fixed 90_05 executor. Unknown fields fail closed rather than being dropped.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9_.:+-]+$")
+    plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    alert_ref: str = Field(min_length=1, max_length=80)
+    alert_key: str = Field(min_length=1, max_length=1000)
+    dt: date
+    runbook: Literal["replay_raw_partition", "rebuild_derived_partition", "replay_and_rebuild_partition"]
 
 
 class RerunDbtScope(BaseModel):
@@ -143,6 +161,7 @@ def normalize_action_scope(action_type: ApprovedActionType | str, scope: Mapping
         ApprovedActionType.RERUN_DBT: RerunDbtScope,
         ApprovedActionType.CREATE_TICKET: CreateTicketScope,
         ApprovedActionType.POST_NOTIFICATION: PostNotificationScope,
+        ApprovedActionType.RECOVER_PARTITION: RecoverPartitionScope,
     }
     validated = model_by_type[normalized_type].model_validate(dict(scope))
     return validated.model_dump(mode="json")
@@ -196,7 +215,11 @@ def action_readiness(record: ApprovalControlRecord, env: Mapping[str, str] | Non
     action_type = ApprovedActionType(record.action_type)
     scope = normalize_action_scope(action_type, record.scope)
 
-    if action_type == ApprovedActionType.RERUN_DBT:
+    if action_type == ApprovedActionType.RECOVER_PARTITION:
+        provider = "airflow"
+        ready = False
+        reason = "Recovery requires the plan-aware fixed 90_05 executor; this dispatcher cannot execute it."
+    elif action_type == ApprovedActionType.RERUN_DBT:
         provider = "airflow"
         ready = True
         reason = "Airflow DAG 20 is the fixed dbt target."
@@ -392,6 +415,8 @@ def execute_approved_action(
         raise LookupError(f"Approval request was not found: {request_id}")
     if current.status != "approved":
         raise ValueError(f"Approval request {request_id} is {current.status}; approved status is required.")
+    if current.action_type == ApprovedActionType.RECOVER_PARTITION.value:
+        raise ValueError("recover_partition must use the separate plan-aware fixed 90_05 executor")
     readiness = action_readiness(current, runtime_env)
     if not readiness["provider_ready"]:
         raise RuntimeError(str(readiness["reason"]))

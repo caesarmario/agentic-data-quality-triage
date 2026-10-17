@@ -30,6 +30,11 @@ const ASSET_DETAIL =
 export const MAX_REQUEST_BYTES = 65_536;
 export type BrowserCapability = "read" | "triage" | "approval";
 
+/** Only the server supplies credentials for billable or approval operations. */
+export function requiresControlPlaneToken(capability: BrowserCapability): boolean {
+  return capability === "triage" || capability === "approval";
+}
+
 // --- Resolving Routes Without Prefix Expansion
 /** Return a capability for an exact method/path, or null for unsafe/unknown paths. */
 export function browserCapability(

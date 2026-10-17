@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, Thread
@@ -27,6 +28,10 @@ class FakeDatabase:
         self.lock = Lock()
         self.fail_commit = False
         self.connections = 0
+        self.outbox: dict[tuple, dict] = {}
+        self.imports: dict[str, tuple] = {}
+        self.statements: list[str] = []
+        self.fail_outbox = False
 
     def connect(self) -> "FakeConnection":
         self.lock.acquire()
@@ -38,6 +43,8 @@ class FakeConnection:
     def __init__(self, database: FakeDatabase) -> None:
         self.database = database
         self.snapshot = deepcopy(database.rows)
+        self.outbox_snapshot = deepcopy(database.outbox)
+        self.import_snapshot = deepcopy(database.imports)
         self.closed = False
 
     def cursor(self) -> "FakeCursor":
@@ -49,6 +56,8 @@ class FakeConnection:
 
     def rollback(self) -> None:
         self.database.rows = self.snapshot
+        self.database.outbox = self.outbox_snapshot
+        self.database.imports = self.import_snapshot
 
     def close(self) -> None:
         if not self.closed:
@@ -60,14 +69,46 @@ class FakeCursor:
     def __init__(self, database: FakeDatabase) -> None:
         self.database = database
         self.result: tuple | None = None
+        self.results: list[tuple] = []
 
     def execute(self, statement: str, parameters: tuple) -> None:
         self.result = None
+        self.results = []
         sql = " ".join(statement.split())
+        self.database.statements.append(sql)
         assert "%s" in sql
 
+        if "pg_advisory_xact_lock" in sql or "FROM dq_control.incident_controls" in sql:
+            return
+        if "approval_projection_outbox" in sql:
+            if sql.startswith("INSERT"):
+                if self.database.fail_outbox:
+                    raise RuntimeError("outbox unavailable")
+                request_id, version, payload = parameters
+                self.database.outbox.setdefault((request_id, version), {
+                    "payload": payload, "audit_done": False, "projection_done": False,
+                })
+            elif sql.startswith("SELECT"):
+                self.results = [(key[0], key[1], value["payload"], value["audit_done"], value["projection_done"])
+                                for key, value in sorted(self.database.outbox.items())
+                                if not (value["audit_done"] and value["projection_done"])][:parameters[0]]
+            else:
+                phase = "audit_done" if "SET audit_done" in sql else "projection_done"
+                self.database.outbox[tuple(parameters)][phase] = True
+            return
+        if "approval_legacy_imports" in sql:
+            if sql.startswith("INSERT"):
+                request_id, source_hash, history = parameters
+                self.database.imports[request_id] = (source_hash, history)
+            else:
+                self.result = self.database.imports.get(parameters[0])
+            return
+
         if sql.startswith("INSERT"):
-            assert "ON CONFLICT (idempotency_hash) DO NOTHING" in sql
+            if len(parameters) == len(COLUMNS):
+                row = dict(zip(COLUMNS, parameters, strict=True))
+                self.database.rows[row["request_id"]] = row
+                return
             request_id, full_hash, generation, action, scope_json, actor, reason = parameters
             if not any(row["idempotency_hash"] == full_hash for row in self.database.rows.values()):
                 assert request_id not in self.database.rows
@@ -97,6 +138,14 @@ class FakeCursor:
             return
 
         if sql.startswith("SELECT"):
+            if "OR idempotency_hash" in sql:
+                self.results = [self._row(item) for item in self.database.rows.values()
+                                if item["request_id"] == parameters[0] or item["idempotency_hash"] == parameters[1]]
+                return
+            if "ORDER BY updated_at" in sql:
+                self.results = [self._row(item) for item in sorted(self.database.rows.values(), key=lambda item: item["updated_at"], reverse=True)
+                                if parameters[0] is None or item["status"] == parameters[0]][:parameters[2]]
+                return
             key = parameters[0]
             row = next(
                 (item for item in self.database.rows.values() if item["idempotency_hash"] == key),
@@ -114,10 +163,10 @@ class FakeCursor:
                 row.update(status=status, decided_by=actor, decided_at=datetime.now(timezone.utc), decision_comment=comment)
                 changed = True
         elif "SET status = 'cancelled'" in sql:
-            actor, request_id, version = parameters
+            actor, comment, request_id, version = parameters
             row = self.database.rows.get(request_id)
             if row and row["status"] in ("pending", "approved") and row["execution_status"] == "not_started" and row["version"] == version:
-                row.update(status="cancelled", cancelled_by=actor, cancelled_at=datetime.now(timezone.utc))
+                row.update(status="cancelled", cancelled_by=actor, cancelled_at=datetime.now(timezone.utc), decision_comment=comment)
                 changed = True
         elif "SET execution_run_id = %s" in sql:
             run_id, request_id, version = parameters
@@ -144,6 +193,9 @@ class FakeCursor:
 
     def fetchone(self) -> tuple | None:
         return self.result
+
+    def fetchall(self) -> list[tuple]:
+        return self.results
 
     def close(self) -> None:
         pass

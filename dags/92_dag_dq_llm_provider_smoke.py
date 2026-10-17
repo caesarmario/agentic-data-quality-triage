@@ -127,6 +127,7 @@ with DAG(
     t20_smoke_selected_route = runner_plain_bash_task(
         task_id="t20_smoke_selected_route",
         project_command=(
+            "{% if params.run_external_provider %}env EXTERNAL_LLM_ENABLED=true {% endif %}"
             "{% if dag_run.conf.get('run_external_provider', false) and dag_run.conf.get('acceptance_case', 'provider') == 'operator_language' %}"
             "python scripts/smoke_operator_language.py --language '{{ params.language }}' --alert-ref '{{ params.alert_ref }}'"
             "{% else %}"

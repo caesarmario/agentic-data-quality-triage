@@ -16,7 +16,7 @@ export async function controlPlane<T>(path: string, init?: RequestInit): Promise
   const baseUrl = apiBaseUrl();
   if (!baseUrl) return { data: null, error: "Control-plane API is not configured on this web server." };
   try {
-    const response = await fetch(`${baseUrl}${path}`, { ...init, cache: "no-store", signal: AbortSignal.timeout(15_000) });
+    const response = await fetch(`${baseUrl}${path}`, { ...init, redirect: "error", cache: "no-store", signal: AbortSignal.timeout(15_000) });
     if (!response.ok) return { data: null, error: `Control-plane request failed (${response.status}).` };
     return { data: (await response.json()) as T, error: null };
   } catch {

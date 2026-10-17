@@ -26,6 +26,7 @@ from pipelines.common.logging import logger
 # --- Defining Constants
 APPROVAL_REQUESTS_TABLE    = "dq.approval_requests"
 BACKFILL_DISPATCHER_DAG_ID = "90_dag_dq_platform_backfill_dispatcher"
+RECOVERY_DISPATCHER_DAG_ID = "90_05_dag_dq_incident_recovery"
 MAX_BACKFILL_DAYS          = 31
 MAX_PARAMETERS_JSON_BYTES  = 10_000
 
@@ -138,6 +139,7 @@ class ApprovalExecutionStatus(str, Enum):
     DISPATCHED  = "dispatched"
     SUCCEEDED   = "succeeded"
     FAILED      = "failed"
+    UNKNOWN     = "unknown"
 
 
 ALLOWED_EXECUTION_TRANSITIONS = {
@@ -155,6 +157,7 @@ ALLOWED_EXECUTION_TRANSITIONS = {
     },
     ApprovalExecutionStatus.SUCCEEDED.value: set(),
     ApprovalExecutionStatus.FAILED.value: set(),
+    ApprovalExecutionStatus.UNKNOWN.value: set(),
 }
 
 
@@ -348,6 +351,8 @@ class ApprovalRequest(BaseModel):
     execution_dag_run_id: str          = ""
     execution_status: ApprovalExecutionStatus | str = ApprovalExecutionStatus.NOT_STARTED
     execution_error: str               = ""
+    version: int | None                = None
+    execution_eligibility: str          = "eligible"
 
 
 # --- Defining Serialization Helpers
@@ -578,7 +583,7 @@ def approval_select_sql(where_sql: str, limit: int = 1) -> str:
     """
 
 
-def get_approval_request(client: Any, request_id: str) -> ApprovalRequest | None:
+def get_approval_request(client: Any = None, request_id: str = "") -> ApprovalRequest | None:
     """
     Load the latest state for one approval request identifier.
 
@@ -589,6 +594,9 @@ def get_approval_request(client: Any, request_id: str) -> ApprovalRequest | None
     Returns:
         ApprovalRequest when found, otherwise None.
     """
+    if not _injected_legacy_client(client):
+        record = _control_store().read_latest(request_id)
+        return approval_from_control_record(record) if record is not None else None
     rows = client.query(
         approval_select_sql(
             where_sql=f"request_id = {quote_sql_literal(request_id.strip())}",
@@ -610,6 +618,9 @@ def get_approval_request_by_idempotency_key(client: Any, idempotency_key: str) -
     Returns:
         Existing ApprovalRequest when found, otherwise None.
     """
+    if not _injected_legacy_client(client):
+        record = _control_store().read_by_idempotency_hash(idempotency_key)
+        return approval_from_control_record(record) if record is not None else None
     rows = client.query(
         approval_select_sql(
             where_sql=f"idempotency_key = {quote_sql_literal(idempotency_key)}",
@@ -621,7 +632,7 @@ def get_approval_request_by_idempotency_key(client: Any, idempotency_key: str) -
 
 
 def list_approval_requests(
-    client: Any,
+    client: Any = None,
     status: ApprovalRequestStatus | str | None = None,
     limit: int = 50,
 ) -> list[ApprovalRequest]:
@@ -636,6 +647,9 @@ def list_approval_requests(
     Returns:
         Approval requests ordered by latest update time.
     """
+    if not _injected_legacy_client(client):
+        records = _control_store().list_requests(status=enum_value(status) if status is not None else None, limit=limit)
+        return [approval_from_control_record(record) for record in records]
     where_sql = "1 = 1"
 
     if status is not None:
@@ -663,6 +677,136 @@ def insert_approval_request(client: Any, request: ApprovalRequest) -> None:
         data=[approval_to_row(request)],
         column_names=APPROVAL_REQUEST_COLUMNS,
     )
+
+
+# --- Adapting The Public Queue To Authoritative PostgreSQL State
+def _injected_legacy_client(client: Any) -> bool:
+    """Only explicit test doubles retain the historical CH implementation.
+
+    Real clickhouse-connect clients passed by older API callers are NOT a control
+    store override. They are ignored; no feature flag can restore CH authority.
+    """
+    return client is not None and not type(client).__module__.startswith("clickhouse_connect.")
+
+
+def _control_store():
+    from agent.tools.approved_actions import build_approval_control_store
+    return build_approval_control_store()
+
+
+def queue_control_scope(approval: ApprovalRequest, *, legacy: bool = False) -> dict[str, Any]:
+    """Keep original parameters verbatim, never backfill newly introduced defaults."""
+    fields = ("alert_id", "alert_key", "agent_run_id", "risk_level", "dispatcher_dag_id",
+              "target_dag_id", "start_date", "end_date", "parameters", "dry_run")
+    payload = approval.model_dump(mode="json")
+    return {
+        "_approval_request": {key: payload[key] for key in fields},
+        "execution_eligibility": "legacy_review_required" if legacy else "simulation_only",
+    }
+
+
+def approval_from_control_record(record: Any) -> ApprovalRequest:
+    """Expose imported and typed approvals through the unchanged public envelope."""
+    scope = record.scope
+    envelope = dict(scope.get("_approval_request", {}))
+    recovery = record.action_type == "recover_partition"
+    if not envelope:
+        dt = scope.get("dt", scope.get("date"))
+        envelope = {
+            "alert_key": scope.get("alert_key", ""), "risk_level": "high",
+            "dispatcher_dag_id": RECOVERY_DISPATCHER_DAG_ID if recovery else "90_02_dag_dq_platform_approved_actions",
+            "target_dag_id": RECOVERY_DISPATCHER_DAG_ID if recovery else scope.get("target_dag_id", ""),
+            "start_date": dt, "end_date": dt, "parameters": scope, "dry_run": False,
+        }
+    return ApprovalRequest.model_validate({
+        **envelope, "request_id": record.request_id, "created_at": record.created_at,
+        "updated_at": record.updated_at, "action_type": record.action_type,
+        "status": record.status, "requested_by": record.requested_by, "reason": record.reason,
+        "idempotency_key": record.idempotency_hash, "version": record.version,
+        "decided_by": (record.cancelled_by if record.status == "cancelled" else record.decided_by) or "",
+        "decided_at": record.cancelled_at if record.status == "cancelled" else record.decided_at,
+        "decision_comment": record.decision_comment,
+        "execution_dag_run_id": record.execution_run_id or "", "execution_status": record.execution_status,
+        "execution_error": record.execution_error,
+        "execution_eligibility": scope.get("execution_eligibility", "eligible"),
+    })
+
+
+def _runtime_transition(request_id: str, operation: str, *, actor: str, expected_version: int | None = None,
+                        decision: str = "", comment: str = "", run_id: str = "", error: str = ""):
+    """Use PG CAS for all mutations; a concurrent cancel/claim can have only one winner."""
+    from agent.tools.approval_control_store import ApprovalControlConflict, _version
+    if expected_version is not None:
+        _version(expected_version)
+    if not actor.strip():
+        raise ValueError("actor cannot be blank")
+    if len(comment) > 2000:
+        raise ValueError("comment is too long")
+    store = _control_store()
+    current = store.read_latest(request_id)
+    if current is None:
+        raise LookupError(f"Approval request was not found: {request_id}")
+    if expected_version is not None and current.version != expected_version:
+        raise ApprovalControlConflict("Stale approval version")
+    version = current.version
+    if operation == "decision":
+        status = "approved" if decision == "approve" else "rejected"
+        if current.status == status:
+            return approval_from_control_record(current), False
+        updated = store.decide(request_id, decision=decision, decided_by=actor, expected_version=version, comment=comment)
+    elif operation == "cancel":
+        if current.status == "cancelled":
+            return approval_from_control_record(current), False
+        updated = store.cancel(request_id, cancelled_by=actor, expected_version=version, comment=comment)
+    else:
+        # This helper serves the old backfill dispatcher only. Recovery owns a
+        # separate fixed DAG and must not be claimed through the baseline path.
+        if current.action_type != "backfill":
+            raise ApprovalControlConflict("Only backfill approvals may use the legacy dispatcher")
+        if not run_id.strip():
+            raise ValueError("execution_dag_run_id cannot be blank")
+        if current.execution_run_id and current.execution_run_id != run_id:
+            raise ApprovalControlConflict("Approval is already claimed by a different run")
+        if current.execution_status == operation and current.execution_run_id == run_id:
+            return approval_from_control_record(current), False
+        if operation == "dispatching":
+            updated = store.claim(request_id, execution_run_id=run_id, expected_version=version)
+        else:
+            updated = store.record_execution_outcome(request_id, execution_run_id=run_id, outcome=operation,
+                                                       expected_version=version, error=error)
+    return approval_from_control_record(updated), True
+
+
+def flush_approval_projections(*, store: Any = None, client: Any = None, limit: int = 100) -> dict[str, int]:
+    """Deliver durable PG outbox intents; a CH outage never changes approval state."""
+    from agent.tools.audit_log import build_audit_idempotency_key
+    control = store if store is not None else _control_store()
+
+    def deliver(phase: str, payload: dict[str, Any], request_id: str, version: int) -> None:
+        resolved_client = client if client is not None else build_clickhouse_client()
+        if "approval" in payload:
+            approval = ApprovalRequest.model_validate(payload["approval"])
+        else:
+            from agent.tools.approval_control_store import ApprovalControlRecord
+            row = dict(payload["record"])
+            row["scope"] = row.pop("scope_json")
+            for key in ("created_at", "updated_at", "decided_at", "cancelled_at"):
+                if isinstance(row.get(key), str):
+                    row[key] = datetime.fromisoformat(row[key])
+            approval = approval_from_control_record(ApprovalControlRecord(**row))
+        if phase == "projection":
+            insert_approval_request(resolved_client, approval)
+        else:
+            write_agent_audit_event(
+                client=resolved_client, action=payload["event"], status=enum_value(approval.status),
+                agent_run_id=approval.agent_run_id, alert_id=approval.alert_id, alert_key=approval.alert_key,
+                actor=payload["actor"], tool_name="approval_queue",
+                input_payload={"request_id": request_id, "version": version},
+                output_payload=approval.model_dump(mode="json"),
+                idempotency_key=build_audit_idempotency_key("approval_projection", request_id, version),
+            )
+
+    return control.flush_projection_outbox(deliver, limit=limit)
 
 
 # --- Defining Approval Lifecycle
@@ -790,15 +934,16 @@ def _create_approval_request(
 
 def create_approval_request(request: ApprovalRequestCreate, client: Any | None = None) -> tuple[ApprovalRequest, bool]:
     """Serialize new remediation proposals with incident closure in the live runtime."""
-    if client is None and os.getenv("INCIDENT_CONTROL_ENABLED", "false").lower() == "true":
-        from agent.tools.incident_resolution_store import control_transaction, ResolutionConflict
-        with control_transaction() as cursor:
-            if request.alert_key:
-                cursor.execute("SELECT status FROM dq_control.incident_controls WHERE alert_key=%s FOR UPDATE", (request.alert_key,))
-                current = cursor.fetchone()
-                if current and current[0] == "resolved":
-                    raise ResolutionConflict("Incident sudah ditutup; proposal perbaikan baru diblokir.")
-            return _create_approval_request(request, client)
+    if not _injected_legacy_client(client):
+        key = build_idempotency_key(request)
+        now = datetime.now(timezone.utc)
+        approval = ApprovalRequest(
+            **request.model_dump(), request_id=build_request_id(request, key),
+            created_at=now, updated_at=now, risk_level="high", status="pending",
+            idempotency_key=key, dry_run=False,
+        )
+        record, created = _control_store().create_queue_request(approval)
+        return approval_from_control_record(record), created
     return _create_approval_request(request, client)
 
 
@@ -808,6 +953,7 @@ def decide_approval_request(
     decided_by: str,
     comment: str = "",
     client: Any | None = None,
+    expected_version: int | None = None,
 ) -> tuple[ApprovalRequest, bool]:
     """
     Apply an idempotent terminal human decision to one approval request.
@@ -826,7 +972,11 @@ def decide_approval_request(
         LookupError: If the request does not exist.
         ValueError: If identity is blank or a conflicting terminal decision is attempted.
     """
-    resolved_client   = client or build_clickhouse_client()
+    if not _injected_legacy_client(client):
+        return _runtime_transition(request_id.strip(), "decision", actor=decided_by,
+                                   expected_version=expected_version,
+                                   decision=ApprovalDecision(enum_value(decision)).value, comment=comment)
+    resolved_client   = client
     normalized_id     = request_id.strip()
     normalized_actor  = decided_by.strip()
     normalized_comment = comment.strip()[:2000]
@@ -907,6 +1057,7 @@ def cancel_approval_request(
     cancelled_by: str,
     comment: str = "",
     client: Any | None = None,
+    expected_version: int | None = None,
 ) -> tuple[ApprovalRequest, bool]:
     """
     Withdraw one request before a dispatcher DagRun claims its execution.
@@ -928,7 +1079,10 @@ def cancel_approval_request(
         LookupError: If the request does not exist.
         ValueError: If identity is blank or dispatch has already started.
     """
-    resolved_client    = client or build_clickhouse_client()
+    if not _injected_legacy_client(client):
+        return _runtime_transition(request_id.strip(), "cancel", actor=cancelled_by,
+                                   expected_version=expected_version, comment=comment)
+    resolved_client    = client
     normalized_id      = request_id.strip()
     normalized_actor   = cancelled_by.strip()
     normalized_comment = comment.strip()[:2000]
@@ -1023,6 +1177,7 @@ def transition_approval_execution(
     error_message: str = "",
     actor: str = "airflow",
     client: Any | None = None,
+    expected_version: int | None = None,
 ) -> tuple[ApprovalRequest, bool]:
     """
     Append one validated single-use approval execution transition.
@@ -1042,6 +1197,10 @@ def transition_approval_execution(
         LookupError: If the approval request does not exist.
         ValueError: If status, approval, ownership, or transition policy is invalid.
     """
+    if not _injected_legacy_client(client):
+        return _runtime_transition(request_id.strip(), ApprovalExecutionStatus(enum_value(execution_status)).value,
+                                   actor=actor, expected_version=expected_version,
+                                   run_id=execution_dag_run_id.strip(), error=error_message)
     normalized_id     = request_id.strip()
     normalized_run_id = execution_dag_run_id.strip()
     normalized_actor  = actor.strip() or "airflow"
@@ -1168,12 +1327,14 @@ def require_approved_backfill_request(
     if not normalized_id:
         raise ValueError("approval_request_id is required when dry_run=false.")
 
-    resolved_client = client or build_clickhouse_client()
-    approval        = get_approval_request(resolved_client, normalized_id)
+    approval        = get_approval_request(client, normalized_id)
     execution_parameters = normalize_backfill_parameters(parameters)
 
     if approval is None:
         raise ValueError(f"Approval request was not found: {normalized_id}")
+
+    if approval.execution_eligibility != "eligible":
+        raise ValueError("legacy_review_required: create a new pinned recovery plan; old parameters cannot be rewritten")
 
     expected = {
         "status": ApprovalRequestStatus.APPROVED.value,

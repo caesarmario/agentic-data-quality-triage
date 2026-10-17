@@ -13,7 +13,9 @@ from uuid import UUID
 import pytest
 
 from apps.discord_bot.formatters import (
+    DISCORD_COLORS,
     DISCORD_SEPARATOR,
+    daily_health_status,
     format_alert_list,
     format_alert_summary,
     format_approval_recorded,
@@ -24,6 +26,7 @@ from apps.discord_bot.formatters import (
     format_triage_result,
     build_discord_incident_payload,
     render_approval_embed,
+    render_daily_summary_embed,
     render_incident_embed,
     render_operator_answer_embed,
     render_quality_summary_embed,
@@ -132,12 +135,13 @@ def test_incident_embed_has_skimmable_fields_and_interactive_components() -> Non
         "Evidence",
         "Ask AI",
         "Open Workspace",
+        "Review Fix",
         "Resolve",
     ]
-    assert [len(row["components"]) for row in components] == [3, 2]
-    assert [button["style"] for button in buttons] == [1, 2, 2, 5, 2]
+    assert [len(row["components"]) for row in components] == [3, 3]
+    assert [button["style"] for button in buttons] == [1, 2, 2, 5, 2, 2]
     assert [button["emoji"]["name"] for button in buttons[:3]] == ["\U0001F50D", "\U0001F4CE", "\U0001F4AC"]
-    assert buttons[-2]["url"] == "https://example.test/incidents"
+    assert next(button for button in buttons if button.get("url"))["url"] == "https://example.test/incidents"
     assert all(len(button.get("custom_id", "")) <= 100 for button in buttons)
 
 
@@ -531,6 +535,51 @@ def test_format_daily_summary_includes_copilot_readout() -> None:
     assert "needs investigation" in message
     assert "Data Transport `api`" in message
     assert DISCORD_SEPARATOR in message
+
+
+@pytest.mark.parametrize("dt", [None, "2026-10-16"])
+def test_daily_summary_empty_is_not_healthy_or_a_none_date(dt) -> None:
+    message = format_daily_summary(dt, [], [])
+    render = render_daily_summary_embed(dt, [], [])
+    embed = render.payload["embeds"][0]
+
+    assert "No quality data yet" in message
+    assert "Healthy" not in message
+    assert "None" not in message
+    assert "None" not in embed["title"]
+    assert embed["description"] == "No quality data yet"
+    assert embed["color"] == DISCORD_COLORS["neutral"]
+    if dt:
+        assert dt in embed["title"]
+        assert f"dt:{dt}" in message
+    else:
+        assert "dt:" not in message
+
+
+@pytest.mark.parametrize("check_rows,alert_rows,label,color", [
+    ([], [{"severity": "critical", "count": 1}], "Needs Attention", "critical"),
+    ([], [{"severity": "warning", "count": 1}], "Review Recommended", "warning"),
+    ([], [{"severity": "info", "count": 1}], "Review Recommended", "warning"),
+    ([{"status": "fail", "count": 1}], [], "Needs Attention", "critical"),
+    ([{"status": "warn", "count": 1}], [], "Review Recommended", "warning"),
+    ([{"status": "skip", "count": 1}], [], "Review Recommended", "warning"),
+    ([{"status": "pass", "count": 1}], [], "Healthy", "success"),
+])
+def test_daily_summary_embed_matches_deterministic_health_and_precedence(check_rows, alert_rows, label, color) -> None:
+    message = format_daily_summary("2026-10-16", check_rows, alert_rows)
+    render = render_daily_summary_embed("2026-10-16", check_rows, alert_rows)
+    embed = render.payload["embeds"][0]
+
+    assert label in message
+    assert label in embed["fields"][0]["value"]
+    assert embed["color"] == DISCORD_COLORS[color]
+    assert "No quality data yet" not in message
+
+
+def test_zero_count_check_labels_do_not_imply_healthy() -> None:
+    label, _ = daily_health_status({"pass": 0}, {"critical": 0})
+
+    assert label == "No quality data yet"
 
 
 def test_format_quality_summary_is_readable_and_keeps_rerun_advisory() -> None:

@@ -14,7 +14,9 @@ from airflow.sdk import DAG, Param
 
 from dq_platform.helpers import (
     DEFAULT_START_DATE,
+    EMPTY_DEMO_AUDIT_SINCE_PATTERN,
     default_dag_args,
+    default_user_defined_macros,
     finish_task,
     runner_plain_bash_task,
     start_task,
@@ -42,7 +44,7 @@ This DAG does not mutate analytical data, execute remediation, or clean platform
 Manual `dag_run.conf` example:
 
 ```json
-{"validation_suite": "all", "require_api": true, "require_web": true}
+{"validation_suite": "all", "require_api": true, "require_web": true, "expect_empty_demo": false}
 ```
 
 Allowed suites: `all`, `airflow`, `agent`, `api`, `checkpoint`, `discord`, `dq`, `life`, `llm`, `mcp`, `metadata`, `pipelines`, `schema`, and `ui`.
@@ -68,6 +70,19 @@ def validation_dag_params() -> dict[str, Param]:
             False,
             type="boolean",
             description="Require the optional FastAPI control-plane profile during readiness validation.",
+        ),
+        "expect_empty_demo": Param(
+            False,
+            type="boolean",
+            description="Require application tables and S3 buckets to exist but contain no demo data or objects.",
+        ),
+        "empty_demo_audit_since": Param(
+            None,
+            type=["null", "string"],
+            pattern=EMPTY_DEMO_AUDIT_SINCE_PATTERN,
+            minLength=20,
+            maxLength=32,
+            description="Optional aware ISO lower bound for retained read-only audit evidence; defaults to the DagRun logical date.",
         ),
         "require_web": Param(
             False,
@@ -98,6 +113,7 @@ with DAG(
     render_template_as_native_obj=True,
     max_active_runs=1,
     default_args=default_dag_args(retries=0),
+    user_defined_macros=default_user_defined_macros(),
     params=validation_dag_params(),
     tags=["dq-platform", "validation", "testing", "manual", "administrative"],
     doc_md=DOC_MD,
@@ -124,6 +140,8 @@ with DAG(
         project_command=(
             "python scripts/smoke_readiness.py "
             "{% if dag_run.conf.get(\"require_api\", false) %}--require-api {% endif %}"
+            "{{ empty_demo_readiness_args(dag_run.conf.get(\"expect_empty_demo\", false), "
+            "dag_run.conf.get(\"empty_demo_audit_since\"), dag_run.logical_date) }}"
             "{% if dag_run.conf.get(\"require_web\", false) %}--require-web {% endif %}"
             "{% if dag_run.conf.get(\"require_web_report\", false) %}--require-web-report{% endif %}"
             "{% if params.web_operator_request_id %} --web-operator-request-id '{{ params.web_operator_request_id }}'{% endif %}"

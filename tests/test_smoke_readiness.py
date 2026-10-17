@@ -9,15 +9,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from scripts import smoke_readiness
 from scripts.smoke_readiness import (
     DEFAULT_CLICKHOUSE_TABLES,
+    DEFAULT_S3_BUCKETS,
+    EMPTY_DEMO_CLICKHOUSE_TABLES,
     ReadinessCheck,
     build_parser,
     build_table_count_query,
     build_table_exists_query,
+    check_api_empty_alerts,
     check_clickhouse_tables,
     check_control_plane_api,
     check_http_service,
@@ -101,6 +107,7 @@ class FakeS3Client:
             None.
         """
         self.buckets = buckets
+        self.object_calls: list[dict[str, Any]] = []
 
     def list_buckets(self) -> dict[str, list[dict[str, str]]]:
         """
@@ -110,6 +117,11 @@ class FakeS3Client:
             Dictionary matching the boto3 list_buckets response shape used by the script.
         """
         return {"Buckets": [{"Name": bucket} for bucket in self.buckets]}
+
+    def list_objects_v2(self, **kwargs: Any) -> dict[str, list[dict[str, str]]]:
+        """Return an empty bounded object sample while retaining request arguments."""
+        self.object_calls.append(kwargs)
+        return {"Contents": []}
 
 
 # --- Defining Tests
@@ -143,6 +155,15 @@ def test_default_readiness_requires_agent_context_and_incident_memory_tables() -
     """
     assert "dq.agent_run_context_events" in DEFAULT_CLICKHOUSE_TABLES
     assert "dq.incident_memory" in DEFAULT_CLICKHOUSE_TABLES
+
+
+def test_empty_demo_readiness_covers_all_application_tables() -> None:
+    """Empty-demo mode additionally requires profile and durable Discord registry tables."""
+    assert EMPTY_DEMO_CLICKHOUSE_TABLES == [
+        *DEFAULT_CLICKHOUSE_TABLES,
+        "dq.data_profile_results",
+        "dq.discord_incident_messages",
+    ]
 
 
 def test_build_table_exists_query_quotes_database_and_table() -> None:
@@ -188,6 +209,22 @@ def test_check_clickhouse_tables_reports_existing_and_missing_tables() -> None:
     assert checks[1].details["exists"] is False
 
 
+def test_check_clickhouse_empty_demo_requires_zero_rows() -> None:
+    """Empty-demo checks identify empty, populated, and missing table states."""
+    client = FakeClickHouseClient(existing_tables={"dq.raw_orders": 0, "dq.alerts": 2})
+    checks = check_clickhouse_tables(
+        client=client,
+        table_names=["dq.raw_orders", "dq.alerts", "dq.missing"],
+        require_empty=True,
+    )
+
+    assert [(check.status, check.details["state"]) for check in checks] == [
+        ("pass", "empty"),
+        ("fail", "populated"),
+        ("fail", "missing"),
+    ]
+
+
 def test_check_s3_buckets_reports_existing_and_missing_buckets() -> None:
     """
     Ensure S3 readiness checks return pass/fail bucket states.
@@ -203,6 +240,22 @@ def test_check_s3_buckets_reports_existing_and_missing_buckets() -> None:
     assert checks[0].details["exists"] is True
     assert checks[1].status == "fail"
     assert checks[1].details["exists"] is False
+
+
+def test_check_s3_empty_demo_uses_bounded_object_listing() -> None:
+    """Empty-demo S3 checks require bucket existence and sample at most one object."""
+    client = FakeS3Client(buckets=["dq-landing", "dq-artifacts"])
+    checks = check_s3_buckets(client, ["dq-landing", "dq-artifacts", "dq-missing"], require_empty=True)
+
+    assert [(check.status, check.details["state"]) for check in checks] == [
+        ("pass", "empty"),
+        ("pass", "empty"),
+        ("fail", "missing"),
+    ]
+    assert client.object_calls == [
+        {"Bucket": "dq-landing", "MaxKeys": 1},
+        {"Bucket": "dq-artifacts", "MaxKeys": 1},
+    ]
 
 
 def test_summarize_and_render_text_summary() -> None:
@@ -296,6 +349,8 @@ def test_api_readiness_is_explicitly_opt_in() -> None:
 
     assert parser.parse_args([]).require_api is False
     assert parser.parse_args(["--require-api"]).require_api is True
+    assert parser.parse_args([]).expect_empty_demo is False
+    assert parser.parse_args(["--expect-empty-demo"]).expect_empty_demo is True
 
 
 def test_web_readiness_is_explicitly_opt_in() -> None:
@@ -421,6 +476,137 @@ def test_control_plane_readiness_checks_health_metadata_and_evidence_routes() ->
         "manifest_s3_uri=s3%3A%2F%2Fdq-artifacts%2Fdbt-artifacts%2Forders%2Flatest%2Fmanifest.json&"
         "max_depth=5&max_nodes=100",
     ]
+
+
+def test_empty_demo_api_readiness_uses_only_health_and_empty_alert_routes() -> None:
+    """The API empty-demo profile must not depend on generated lineage or report data."""
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, body: bytes = b"") -> None:
+            self.body = body
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def read(self) -> bytes:
+            return self.body
+
+    def fake_opener(url: str, timeout: float) -> FakeResponse:
+        requested_urls.append(url)
+        if url.endswith("/api/v1/alerts?status=active&limit=5"):
+            return FakeResponse(b'{"alerts": []}')
+        return FakeResponse()
+
+    checks = smoke_readiness.check_control_plane_api(expect_empty_demo=True, opener=fake_opener)
+
+    assert [check.status for check in checks] == ["pass", "pass"]
+    assert checks[1].details["state"] == "empty"
+    assert requested_urls == [
+        "http://api:8000/health",
+        "http://api:8000/api/v1/alerts?status=active&limit=5",
+    ]
+
+
+def test_empty_alert_check_fails_when_alerts_are_present() -> None:
+    """A valid response containing alerts is not mislabeled as empty readiness."""
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def read(self) -> bytes:
+            return b'{"alerts": [{"alert_ref": "DQ-1"}]}'
+
+    check = check_api_empty_alerts(opener=lambda url, timeout: FakeResponse())
+
+    assert check.status == "fail"
+    assert check.details["state"] == "populated"
+    assert check.details["alert_count"] == 1
+
+
+@pytest.mark.parametrize('total,unexpected,state', [
+    (0,0,'empty'), (17,0,'fresh_readonly_audit'), (17,1,'unexpected_audit'),
+])
+def test_empty_demo_audit_keeps_only_new_readonly_evidence(total,unexpected,state):
+    class AuditClient:
+        def query(self,sql,parameters):
+            assert "ts < parseDateTime64BestEffort({since:String})" in sql
+            assert "action = 'list_alerts' AND tool_name = 'alerts'" in sql
+            assert "action = 'fetch_daily_quality_summary' AND tool_name = 'daily_summary'" in sql
+            assert "actor = 'agent'" in sql
+            assert parameters == {'since':'2026-10-16T03:00:00+00:00'}
+            return SimpleNamespace(result_rows=[(total,unexpected)])
+    check=smoke_readiness.check_empty_demo_audit(AuditClient(),'2026-10-16T10:00:00+07:00')
+    assert check.status == ('fail' if unexpected else 'pass')
+    assert check.details['state'] == state
+    assert check.details['row_count'] == total
+
+
+@pytest.mark.parametrize('stamp',['not-a-date','2026-10-16T03:00:00',"2026-10-16';DROP TABLE dq.alerts"])
+def test_empty_demo_audit_boundary_rejects_ambiguous_or_injected_input(stamp):
+    with pytest.raises(ValueError):
+        smoke_readiness.audit_boundary(stamp)
+
+
+def test_empty_demo_cli_enforces_checks_despite_skip_flags(monkeypatch, capsys) -> None:
+    """Explicit empty-demo mode cannot silently skip essential platform checks."""
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setattr(smoke_readiness, "build_clickhouse_client", lambda: object())
+    monkeypatch.setattr(smoke_readiness, "build_s3_client", lambda: object())
+
+    def fake_clickhouse(client: Any, table_names: list[str], require_empty: bool) -> list[ReadinessCheck]:
+        calls["tables"] = (table_names, require_empty)
+        return [ReadinessCheck("clickhouse:test", "pass", {"state": "empty"})]
+
+    def fake_s3(client: Any, bucket_names: list[str], require_empty: bool) -> list[ReadinessCheck]:
+        calls["buckets"] = (bucket_names, require_empty)
+        return [ReadinessCheck("s3:test", "pass", {"state": "empty"})]
+
+    def fake_http(service_name: str, url: str, **kwargs: Any) -> ReadinessCheck:
+        calls.setdefault("http", []).append(service_name)
+        return ReadinessCheck(f"http_service:{service_name}", "pass", {})
+
+    def fake_api(expect_empty_demo: bool) -> list[ReadinessCheck]:
+        calls["api_empty_demo"] = expect_empty_demo
+        return [ReadinessCheck("api:test", "pass", {})]
+
+    monkeypatch.setattr(smoke_readiness, "check_clickhouse_tables", fake_clickhouse)
+    monkeypatch.setattr(smoke_readiness, "check_s3_buckets", fake_s3)
+    monkeypatch.setattr(smoke_readiness, "check_http_service", fake_http)
+    monkeypatch.setattr(smoke_readiness, "check_control_plane_api", fake_api)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "smoke_readiness.py",
+            "--expect-empty-demo",
+            "--require-api",
+            "--skip-clickhouse",
+            "--skip-s3",
+            "--skip-ch-ui",
+            "--skip-streamlit",
+            "--format",
+            "json",
+        ],
+    )
+
+    smoke_readiness.main()
+    assert '"status": "pass"' in capsys.readouterr().out
+    assert calls["tables"] == (EMPTY_DEMO_CLICKHOUSE_TABLES, True)
+    assert calls["buckets"] == (DEFAULT_S3_BUCKETS, True)
+    assert calls["http"] == ["ch-ui", "streamlit"]
+    assert calls["api_empty_demo"] is True
 
 
 def test_compose_uses_valid_pinned_ch_ui_release_and_healthcheck() -> None:

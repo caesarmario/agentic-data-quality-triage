@@ -453,10 +453,10 @@ def frame_hypotheses_for_state(
         response = run_llm_task(
             route_name=HYPOTHESIS_FRAMING_ROUTE,
             prompt=prompt,
-            context=build_hypothesis_context(
+            context={**build_hypothesis_context(
                 state=state,
                 baseline_hypotheses=baseline_hypotheses,
-            ),
+            ), "incident_context_bundle": state.refresh_incident_context_bundle().model_dump(mode="json")},
             agent_run_id=state.agent_run_id,
             response_model=HypothesisFramingProposal,
             response_schema_name="hypothesis_framing",

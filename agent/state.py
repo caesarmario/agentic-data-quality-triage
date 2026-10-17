@@ -12,7 +12,14 @@ from enum import Enum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
+
+from agent.context.bundle import (
+    IncidentContextBundle,
+    MAX_EXTRA_EVIDENCE_LOOPS,
+    TrustedSourceMetadata,
+    build_incident_context_bundle,
+)
 
 from pipelines.common.alert_identity import build_alert_ref
 from pipelines.common.logging import logger
@@ -379,7 +386,7 @@ class Hypothesis(BaseModel):
         title: Short hypothesis title.
         description: Detailed explanation of what may have happened.
         likelihood: Relative likelihood from 0.0 to 1.0.
-        confidence: Evidence-backed confidence from 0.0 to 1.0.
+        confidence: Legacy heuristic ranking score, not a statistical probability.
         root_cause_category: Category such as missing_partition or upstream_late_arrival.
         supporting_evidence_ids: Evidence ids that support the hypothesis.
         opposing_evidence_ids: Evidence ids that weaken the hypothesis.
@@ -399,6 +406,12 @@ class Hypothesis(BaseModel):
     recommended_action: str            = ""
     framing_source: Literal["deterministic", "llm"] = "deterministic"
     framing_notes: list[str]                         = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def heuristic_score(self) -> float:
+        """Expose score semantics without removing the legacy confidence field."""
+        return self.confidence
 
 
 class HypothesisFraming(BaseModel):
@@ -679,6 +692,14 @@ class TriageReport(BaseModel):
     markdown_report_s3_uri: str                    = ""
     created_at: datetime                           = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    incident_context_bundle: IncidentContextBundle | None = None
+
+    @computed_field
+    @property
+    def heuristic_score(self) -> float:
+        """Return deterministic ranking, not a calibrated probability."""
+        return self.confidence
+
 
 class TriageState(BaseModel):
     """
@@ -719,6 +740,20 @@ class TriageState(BaseModel):
     confidence_threshold: float                     = Field(default=0.70, ge=0.0, le=1.0)
     evidence_iterations: int                        = Field(default=0, ge=0)
     max_evidence_iterations: int                    = Field(default=2, ge=0, le=10)
+    incident_id: str | None                         = None
+    incident_revision: str | None                   = None
+    trusted_source_metadata: TrustedSourceMetadata | None = None
+    incident_context_bundle: IncidentContextBundle | None = None
+    attempted_context_queries: list[str]            = Field(default_factory=list, max_length=8)
+
+    def refresh_incident_context_bundle(self) -> IncidentContextBundle:
+        """Rebuild the shared public projection after every evidence revision."""
+        self.incident_context_bundle = build_incident_context_bundle(
+            self.alert, self.evidence, incident_id=self.incident_id,
+            revision=self.incident_revision, trusted_source_metadata=self.trusted_source_metadata,
+            top_hypothesis=self.top_hypothesis,
+        )
+        return self.incident_context_bundle
 
     @field_validator("alert_key")
     @classmethod
@@ -756,11 +791,15 @@ class TriageState(BaseModel):
             True when top confidence is below threshold and iteration budget remains.
         """
         top = self.top_hypothesis
+        budget_remains = self.evidence_iterations < min(self.max_evidence_iterations, MAX_EXTRA_EVIDENCE_LOOPS)
+
+        if self.incident_context_bundle and not self.incident_context_bundle.context_complete:
+            return budget_remains
 
         if top is None:
-            return self.evidence_iterations < self.max_evidence_iterations
+            return budget_remains
 
-        return top.confidence < self.confidence_threshold and self.evidence_iterations < self.max_evidence_iterations
+        return top.confidence < self.confidence_threshold and budget_remains
 
     def add_evidence(self, item: EvidenceItem) -> "TriageState":
         """

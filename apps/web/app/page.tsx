@@ -4,6 +4,7 @@
  * Author: Mario Caesar // hello@caesarmar.io // https://caesarmar.io/
  */
 import { PageHeader } from "@/components/page-header";
+import { DailySummaryGate } from "@/components/daily-summary-gate";
 import {
   Badge,
   Card,
@@ -112,7 +113,7 @@ export default async function ReliabilityOverview() {
       />
       <div className="content-stack">
         {summary.data ? (
-          <>
+          <DailySummaryGate summary={summary.data}>
             <div className="metric-grid">
               <Metric
                 label="Total checks"
@@ -164,7 +165,7 @@ export default async function ReliabilityOverview() {
                 />
               )}
             </Card>
-          </>
+          </DailySummaryGate>
         ) : (
           <Unavailable message={summary.error ?? "No summary returned."} />
         )}

@@ -13,7 +13,7 @@ agentic_dq_clickhouse:
       driver: http
       host: "{{ env_var('CLICKHOUSE_HOST', 'localhost') }}"
       port: "{{ env_var('CLICKHOUSE_HTTP_PORT', '8123') | int }}"
-      schema: "{{ env_var('CLICKHOUSE_DB', 'dq') }}"
+      schema: "{{ env_var('DBT_PUBLICATION_SCHEMA', env_var('CLICKHOUSE_DB', 'dq')) }}"
       user: "{{ env_var('CLICKHOUSE_USER', 'default') }}"
       password: "{{ env_var('CLICKHOUSE_PASSWORD', '') }}"
       secure: false

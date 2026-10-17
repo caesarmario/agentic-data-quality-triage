@@ -1018,6 +1018,12 @@ def action_to_item(action: DiscordActionSpec) -> discord.ui.Item[Any]:
             emoji=action.emoji or None,
         )
 
+    if action.custom_id.startswith("dqrec:"):
+        from apps.discord_bot.recovery import RecoveryButton, PATTERN
+        match = PATTERN.fullmatch(action.custom_id)
+        if match is None:
+            raise ValueError("Unknown recovery action")
+        return RecoveryButton(match["action"], match["target"])
     if action.custom_id.startswith("dqhelp:"):
         from apps.discord_bot.help import HelpActionButton, PATTERN
         match = PATTERN.fullmatch(action.custom_id)
@@ -1070,4 +1076,5 @@ def build_discord_view(result: DiscordRenderResult) -> discord.ui.View | None:
 def register_persistent_interactions(client: discord.Client) -> None:
     """Register dynamic handlers before the gateway starts receiving interactions."""
     from apps.discord_bot.help import HelpActionButton
-    client.add_dynamic_items(IncidentActionButton, ApprovalActionButton, HelpActionButton)
+    from apps.discord_bot.recovery import RecoveryButton
+    client.add_dynamic_items(IncidentActionButton, ApprovalActionButton, HelpActionButton, RecoveryButton)

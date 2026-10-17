@@ -111,7 +111,7 @@ def query_daily_summary_rows(
     return sql, rows
 
 
-def resolve_daily_summary_date(client: Any, dt: str | None = None) -> str:
+def resolve_daily_summary_date(client: Any, dt: str | None = None) -> str | None:
     """
     Resolve an explicit business date or the latest available DQ date.
 
@@ -120,10 +120,10 @@ def resolve_daily_summary_date(client: Any, dt: str | None = None) -> str:
         dt: Optional explicit business date in YYYY-MM-DD format.
 
     Returns:
-        Normalized business date.
+        Normalized business date, or None when no latest DQ date exists.
 
     Raises:
-        ValueError: If an explicit date is invalid or no DQ date is available.
+        ValueError: If an explicit date is invalid.
     """
     if dt and dt.strip():
         return parse_date(dt).isoformat()
@@ -131,13 +131,13 @@ def resolve_daily_summary_date(client: Any, dt: str | None = None) -> str:
     latest_dt = scalar(client, LATEST_SUMMARY_DATE_SQL, default=None)
 
     if latest_dt is None:
-        raise ValueError("No daily DQ data is available yet.")
+        return None
 
     return parse_date(str(latest_dt)).isoformat()
 
 
 def build_daily_summary_payload(
-    dt: str,
+    dt: str | None,
     rows: list[dict[str, Any]],
     duration_ms: int = 0,
 ) -> dict[str, Any]:
@@ -145,7 +145,7 @@ def build_daily_summary_payload(
     Convert generic aggregation rows into the public summary shape.
 
     Args:
-        dt: Business date in YYYY-MM-DD format.
+        dt: Business date in YYYY-MM-DD format, or None without a latest date.
         rows: Aggregation rows with category, label, and count fields.
         duration_ms: Query duration measured by the caller.
 
@@ -155,7 +155,7 @@ def build_daily_summary_payload(
     Raises:
         ValueError: If a row contains an unknown category, blank label, or invalid count.
     """
-    normalized_dt = parse_date(dt).isoformat()
+    normalized_dt = parse_date(dt).isoformat() if dt is not None else None
     check_counts  = []
     alert_counts  = []
 
@@ -171,19 +171,26 @@ def build_daily_summary_payload(
             raise ValueError("Daily summary aggregation returned an invalid count.")
 
         if category == "check":
-            check_counts.append({"status": label, "count": count})
+            if count:
+                check_counts.append({"status": label, "count": count})
 
         elif category == "alert":
-            alert_counts.append({"severity": label, "count": count})
+            if count:
+                alert_counts.append({"severity": label, "count": count})
 
         else:
             raise ValueError(f"Daily summary aggregation returned an unknown category: {category}")
 
     total_checks      = sum(item["count"] for item in check_counts)
     total_open_alerts = sum(item["count"] for item in alert_counts)
+    availability      = "available" if total_checks or total_open_alerts else "empty"
+
+    if normalized_dt is None and availability != "empty":
+        raise ValueError("Daily summary aggregates require a business date.")
 
     return {
         "status": "success",
+        "availability": availability,
         "dt": normalized_dt,
         "check_counts": check_counts,
         "alert_counts": alert_counts,
@@ -191,7 +198,9 @@ def build_daily_summary_payload(
         "total_open_alerts": total_open_alerts,
         "duration_ms": max(0, int(duration_ms)),
         "summary": (
-            f"Daily quality summary for {normalized_dt}: "
+            "No quality data yet"
+            if availability == "empty"
+            else f"Daily quality summary for {normalized_dt}: "
             f"{total_checks} check result(s) and {total_open_alerts} open alert(s)."
         ),
     }
@@ -230,7 +239,12 @@ def fetch_daily_quality_summary(
 
     try:
         normalized_dt = resolve_daily_summary_date(client=resolved_client, dt=dt)
-        sql, rows  = query_daily_summary_rows(client=resolved_client, dt=normalized_dt)
+
+        if normalized_dt is None:
+            sql, rows = LATEST_SUMMARY_DATE_SQL, []
+        else:
+            sql, rows = query_daily_summary_rows(client=resolved_client, dt=normalized_dt)
+
         duration_ms = int((time.monotonic() - started_monotonic) * 1000)
         payload     = build_daily_summary_payload(
             dt=normalized_dt,
@@ -252,6 +266,7 @@ def fetch_daily_quality_summary(
                 "alert_status": OPEN_ALERT_STATUS,
             },
             output_payload={
+                "availability": payload["availability"],
                 "total_checks": payload["total_checks"],
                 "total_open_alerts": payload["total_open_alerts"],
             },

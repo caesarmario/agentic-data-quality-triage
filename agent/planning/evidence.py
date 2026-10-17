@@ -412,7 +412,8 @@ def build_evidence_plan_for_state(state: TriageState) -> EvidencePlanningResult:
         response = run_llm_task(
             route_name=EVIDENCE_PLANNING_ROUTE,
             prompt=prompt,
-            context=build_planning_context(alert=state.alert),
+            context={**build_planning_context(alert=state.alert),
+                     "incident_context_bundle": state.refresh_incident_context_bundle().model_dump(mode="json")},
             agent_run_id=state.agent_run_id,
             response_model=EvidencePlanProposal,
             response_schema_name="evidence_plan",

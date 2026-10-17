@@ -15,10 +15,12 @@ from dq_platform.helpers import (
     DAILY_PLATFORM_SCHEDULE,
     DEFAULT_TRIGGER_RESET_DAG_RUN,
     DEFAULT_START_DATE,
+    acceptance_manual_only,
     common_dag_params,
     default_dag_args,
     default_user_defined_macros,
     finish_task,
+    optional_stage,
     single_date_conf,
     start_task,
 )
@@ -52,6 +54,10 @@ Schedule: every day at 00:05 Asia/Bangkok.
 Scheduled runs use `incident_scenario=auto`, which resolves a deterministic random
 daily scenario from `configs/incidents/daily_policy.yml`. Manual runs default to
 `baseline` unless explicitly overridden.
+
+Stages are independently controlled by strict boolean `run_seed`, `run_load`,
+`run_dbt`, `run_dq` (default true) and `run_triage` (default false) flags.
+Disabled stages do not create child runs or skip later enabled stages.
 
 Manual `dag_run.conf` examples:
 
@@ -111,7 +117,7 @@ with DAG(
     dag_id=DAG_ID,
     description="Run the full local orders DQ platform path from landing through optional agent triage.",
     start_date=DEFAULT_START_DATE,
-    schedule=DAILY_PLATFORM_SCHEDULE,
+    schedule=None if acceptance_manual_only() else DAILY_PLATFORM_SCHEDULE,
     catchup=False,
     render_template_as_native_obj=True,
     max_active_runs=1,
@@ -187,14 +193,24 @@ with DAG(
 
     t90_finish = finish_task()
 
-    (
-        t00_start
-        >> t10_trigger_landing
-        >> t20_trigger_dbt_transform
-        >> t30_trigger_quality_alerts
-        >> t40_trigger_agentic_triage
-        >> t90_finish
+    t05_landing, t15_landing_done = optional_stage(
+        task_id="t05_choose_landing", flags=("run_seed", "run_load"), task=t10_trigger_landing,
     )
+    t16_dbt, t25_dbt_done = optional_stage(
+        task_id="t16_choose_dbt", flags=("run_dbt",), task=t20_trigger_dbt_transform,
+    )
+    t26_quality, t35_quality_done = optional_stage(
+        task_id="t26_choose_quality", flags=("run_dq",), task=t30_trigger_quality_alerts,
+    )
+    t36_triage, t45_triage_done = optional_stage(
+        task_id="t36_choose_triage", flags=("run_triage",), task=t40_trigger_agentic_triage,
+    )
+
+    t00_start >> t05_landing
+    t15_landing_done >> t16_dbt
+    t25_dbt_done >> t26_quality
+    t35_quality_done >> t36_triage
+    t45_triage_done >> t90_finish
 
 
 logger.info("Loaded DAG | dag_id=%s", DAG_ID)
