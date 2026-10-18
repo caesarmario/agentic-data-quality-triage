@@ -31,7 +31,11 @@ client = TestClient(api_main.app)
 
 @pytest.fixture(autouse=True)
 def configured_local_adapter(monkeypatch):
+    from agent.context import live
+
     monkeypatch.setenv("CONTROL_PLANE_APPROVAL_TOKEN", "test-service-token")
+    monkeypatch.setattr(api_main, "build_clickhouse_client", lambda: object())
+    monkeypatch.setattr(live, "load_trusted_context", lambda _alert: None)
     client.headers["X-Control-Plane-Token"] = "test-service-token"
     yield
     client.headers.pop("X-Control-Plane-Token", None)

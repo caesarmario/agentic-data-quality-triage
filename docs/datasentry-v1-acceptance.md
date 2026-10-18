@@ -136,6 +136,10 @@ The separate frozen-video check also exposed a dependency on an ignored prepared
 
 These findings require a follow-up test/tooling correction commit rather than rewriting the two existing scoped commits. The corrected candidate must pass a new isolated clone and post-commit Airflow validation before publication; the first clone is not a passing release gate.
 
+Candidate `18d4740` passed the main post-commit gate (2,715 passed / 12 Node skips / readiness 39/39), a fresh clone (2,727 passed / zero skips / readiness 24/24), 48 web tests/typecheck, and 10 cache-independent media checks. The clone's CLI-triggered run without a logical date first failed closed on its missing audit boundary; the successful run used its recorded pre-bootstrap creation timestamp and retained all earlier audit.
+
+The first remote workflow, [39138374256](https://github.com/caesarmario/agentic-data-quality-triage/actions/runs/39138374256), then exposed three API serialization tests constructing a real ClickHouse client before invoking their service doubles. Its other steps passed, including all required Node helpers. The API test adapter now supplies a client double and isolates trusted-context lookup. No production authorization, evidence collection, skip policy, or workflow gate was weakened; the failed remote run remains visible. A further forward-only correction and fresh final gates are required, not a force push or an unmodified CI retry.
+
 Runtime usage and provider/model evidence were correlated through ClickHouse audit and report artifacts. The live Ask calls went through the API, **not Airflow orchestration**. Help, language changes, artifact reads, recovery execution, revalidation, reconciliation, and closure add no model call. Scenario labels and evaluator ground truth were not supplied as model context.
 
 This is a small functional sample with a disclosed failed review and explicit retest, not evidence of a statistical accuracy improvement.
