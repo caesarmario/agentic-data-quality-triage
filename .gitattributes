@@ -18,3 +18,7 @@ docs/diagrams/*.json       text eol=lf
 docs/diagrams/*.svg        text eol=lf
 docs/diagrams/*.mmd        text eol=lf
 docs/images/*.png          binary
+
+tools/demo-video/recorded-diagrams/*.svg text eol=lf
+tools/demo-video/*.vtt                  text eol=lf
+tools/demo-video/*.json                 text eol=lf

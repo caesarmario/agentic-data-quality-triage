@@ -66,6 +66,16 @@ def test_all_diagrams_are_static_accessible_svg():
         assert not re.search(r"<script\b|\bonload=|javascript:", text, re.I)
 
 
+def test_recorded_media_checkout_preserves_hashes_with_windows_autocrlf():
+    attributes = Path(".gitattributes").read_text(encoding="utf-8")
+    for pattern in (
+        "tools/demo-video/recorded-diagrams/*.svg",
+        "tools/demo-video/*.vtt",
+        "tools/demo-video/*.json",
+    ):
+        assert any(line.split() == [pattern, "text", "eol=lf"] for line in attributes.splitlines())
+
+
 def test_public_video_assets_are_local_and_match_recorded_hashes():
     import hashlib
 

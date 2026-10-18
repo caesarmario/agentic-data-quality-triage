@@ -140,6 +140,8 @@ Candidate `18d4740` passed the main post-commit gate (2,715 passed / 12 Node ski
 
 The first remote workflow, [39138374256](https://github.com/caesarmario/agentic-data-quality-triage/actions/runs/39138374256), then exposed three API serialization tests constructing a real ClickHouse client before invoking their service doubles. Its other steps passed, including all required Node helpers. The API test adapter now supplies a client double and isolates trusted-context lookup. No production authorization, evidence collection, skip policy, or workflow gate was weakened; the failed remote run remains visible. A further forward-only correction and fresh final gates are required, not a force push or an unmodified CI retry.
 
+A subsequent network-disabled source-only run exposed Git's Windows `autocrlf` changing frozen SVG bytes. Recorded SVGs, captions, and media manifests now have explicit LF attributes. Original hashes remain unchanged. This is a checkout reproducibility fix, not replacement evidence or a new recording.
+
 Runtime usage and provider/model evidence were correlated through ClickHouse audit and report artifacts. The live Ask calls went through the API, **not Airflow orchestration**. Help, language changes, artifact reads, recovery execution, revalidation, reconciliation, and closure add no model call. Scenario labels and evaluator ground truth were not supplied as model context.
 
 This is a small functional sample with a disclosed failed review and explicit retest, not evidence of a statistical accuracy improvement.
