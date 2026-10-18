@@ -20,6 +20,8 @@ from apps.streamlit import app, localization, resolution
 ROOT = Path(__file__).resolve().parents[1]
 URI = "s3://dq-artifacts/agent-reports/report.md"
 NOW = datetime(2026, 10, 12, 0, 0, tzinfo=timezone.utc)
+# Bound synthetic UI startup on contended CI hosts; this is not an application SLA.
+APP_TEST_TIMEOUT_SECONDS = 15
 
 
 @pytest.fixture
@@ -245,7 +247,7 @@ with tabs[1]:
     st.text_input(tr("Operator name"), key="original_actor")
     st.text_area(tr("Closure reason"), key="original_reason")
 st.code(st.session_state["primary_workspace_tabs"])
-''').run()
+''', default_timeout=APP_TEST_TIMEOUT_SECONDS).run()
     assert not at.exception
     assert at.session_state[localization.LANGUAGE_KEY] == "en"
     assert [tab.label for tab in at.tabs] == ["Incidents", "Approvals", "Agent Reliability"]
@@ -271,7 +273,7 @@ from apps.streamlit.app import render_report_access, render_selected_alert
 st.session_state["streamlit_language"] = "id"
 render_report_access("s3://dq-artifacts/agent-reports/report.md", "Original {id} report")
 render_selected_alert({"status": "resolved", "table_name": "<script>alert(1)</script>", "metric": "raw_metric", "observed_value": "<b>raw</b>"})
-''').run()
+''', default_timeout=APP_TEST_TIMEOUT_SECONDS).run()
     assert not at.exception
     assert [item.value for item in at.code] == [URI, "dq-artifacts", "agent-reports/report.md"]
     card = at.markdown[-1].value

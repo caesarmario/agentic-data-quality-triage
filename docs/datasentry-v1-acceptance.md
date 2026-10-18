@@ -142,6 +142,8 @@ The first remote workflow, [39138374256](https://github.com/caesarmario/agentic-
 
 A subsequent network-disabled source-only run exposed Git's Windows `autocrlf` changing frozen SVG bytes. Recorded SVGs, captions, and media manifests now have explicit LF attributes. Original hashes remain unchanged. This is a checkout reproducibility fix, not replacement evidence or a new recording.
 
+Under concurrent local builds, the synthetic Streamlit AppTest also exceeded its framework-default three-second startup timeout. Its harness now has an explicit bounded 15-second budget; tab, language, form-state, and escaping assertions are unchanged. This is not an increased API/LLM timeout or a measured application latency claim. The failed local run is retained rather than silently retried.
+
 Runtime usage and provider/model evidence were correlated through ClickHouse audit and report artifacts. The live Ask calls went through the API, **not Airflow orchestration**. Help, language changes, artifact reads, recovery execution, revalidation, reconciliation, and closure add no model call. Scenario labels and evaluator ground truth were not supplied as model context.
 
 This is a small functional sample with a disclosed failed review and explicit retest, not evidence of a statistical accuracy improvement.
