@@ -659,6 +659,8 @@ def test_extended_discord_summaries_use_api_and_only_transport_fallback(
 
 def test_extended_quality_summary_publishes_embed_not_markdown(monkeypatch) -> None:
     """Weekly, table, and warehouse summaries share the compact embed publisher."""
+    monkeypatch.setattr(bot, "TRIAGE_CHANNEL_ID", 101)
+    monkeypatch.setattr(bot, "ALERTS_CHANNEL_ID", 102)
     published: list[dict[str, Any]] = []
     interaction = object()
     payload = {

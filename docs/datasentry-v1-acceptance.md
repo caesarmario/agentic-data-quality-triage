@@ -1,6 +1,6 @@
 # DataSentry v1: Fresh Local Acceptance
 
-This record covers the local desktop POC on 16-17 October 2026, after the fresh-demo reset. New data and evidence were retained. Earlier acceptance ledgers remain historical; they are not proof that pre-reset rows still exist.
+This record covers the local desktop POC on 16-18 October 2026, after the fresh-demo reset. New data and evidence were retained. Earlier acceptance ledgers remain historical; they are not proof that pre-reset rows still exist.
 
 Job success, quality PASS, approval, execution, and incident closure are separate results. None of the checks below establishes production certification or statistical diagnosis accuracy.
 
@@ -33,6 +33,8 @@ All runs in this table use `91_dag_dq_platform_validation`. Successful runs comp
 | `manual__release_v1_reviewed_precommit_all_20261016` | Retained interrupted run; not a completed regression gate. |
 | `manual__release_v1_reviewed_precommit_all_20261017` | Retained failure: 2,714 passed and one obsolete assertion still expected a model-selected action instead of the enforced deterministic recommendation. |
 | `manual__release_v1_policy_precommit_all_20261017` | Success after updating that assertion; 2,715 passed, 12 skipped, 10 warnings; readiness 39/39; all five tasks on attempt one. |
+
+`manual__release_v1_hermetic_precommit_20261018` subsequently completed all five tasks on attempt one: 2,715 passed, 12 skipped, 10 warnings; readiness 39/39. This verifies credential-erasing test defaults on the main stack; it is not a substitute for the corrected fresh clone.
 
 The 12 main-runner skips are Node-dependent capture-helper tests, not skipped recovery checks. Node-enabled validation separately exercises those helpers. Known warnings concern Python `audioop` and Discord component-label deprecations. CI has an exact allowlist for service-backed skips and requires all 12 Node helpers; unexpected skips and failures fail its gate. Only sanitized summaries, fixed warning categories, and allowlisted skip names are uploaded, not raw diagnostics.
 
@@ -123,6 +125,16 @@ The first investigation completed technically but failed content review: it prop
 The corrected report, `RPT-64F74018`, separates current system-verified consistency from historical detection and recommends fresh scoped read-only revalidation, not another replay/rebuild. Its three actual Gemini routes had no heuristic/provider fallback. The two live Ask responses made the same distinction; Indonesian preference overrode an English question. English preference was restored afterward without another model call.
 
 Final review removed a phrase-based action filter: both model and heuristic investigation actions now use the deterministic context recommendation unconditionally. This prevents a paraphrased broader repair from bypassing the minimum-runbook decision. Existing model explanations remain separate from the application-owned action. Focused tests and the fresh 17 October Airflow regression cover this strengthening; it did not trigger another paid call.
+
+## Fresh-Clone Findings
+
+The first isolated candidate, `f928710`, built fresh Python/Airflow/web images and initialized all four bootstrap jobs successfully. Before validation it had zero business/control rows, objects, checkpoints or DagRuns, with provider/bot credentials absent. Both scheduled DAGs were verified manual-only and paused before workers started.
+
+`manual__cleanclone_f928710_20261017` exposed nine test failures: mocked Gemini paths had supplied only an unrelated provider key, a Discord routing assertion inherited channel IDs, and a local Streamlit unit test inherited API configuration. These were test isolation defects, not reasons to supply real credentials to CI or weaken runtime authorization. The failed logs were retained. Test defaults now erase outbound credentials, and those cases explicitly supply their own doubles and routing configuration.
+
+The separate frozen-video check also exposed a dependency on an ignored prepared-assets cache. Its diagram-copy code now verifies committed, pinned historical SVGs and is tested in a new temporary directory. Offline checks neither require private captures nor modify the tracked provenance manifest. No new video or AI call was produced.
+
+These findings require a follow-up test/tooling correction commit rather than rewriting the two existing scoped commits. The corrected candidate must pass a new isolated clone and post-commit Airflow validation before publication; the first clone is not a passing release gate.
 
 Runtime usage and provider/model evidence were correlated through ClickHouse audit and report artifacts. The live Ask calls went through the API, **not Airflow orchestration**. Help, language changes, artifact reads, recovery execution, revalidation, reconciliation, and closure add no model call. Scenario labels and evaluator ground truth were not supplied as model context.
 

@@ -346,6 +346,7 @@ def test_openai_compatible_route_retries_unsupported_schema_once(monkeypatch) ->
     """
     monkeypatch.setenv("EXTERNAL_LLM_ENABLED", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
 
     completions = FakeChatCompletions(
         content='{"summary":"The partition has zero rows.","confidence":0.88}',
@@ -408,6 +409,7 @@ def test_supervised_schema_retry_stops_before_unbudgeted_provider_call(monkeypat
     """
     monkeypatch.setenv("EXTERNAL_LLM_ENABLED", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
 
     completions = FakeChatCompletions(
         content='{"summary":"unused","confidence":0.50}',
@@ -474,6 +476,7 @@ def test_supervised_client_disables_hidden_sdk_retries(monkeypatch) -> None:
     monkeypatch.setattr(openai, "OpenAI", capture_client)
     monkeypatch.setenv("EXTERNAL_LLM_ENABLED", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
     monkeypatch.setenv("LLM_PROVIDER_MAX_RETRIES", "4")
     resolved_route = resolve_route(route_name="triage_reasoning", config_path=CONFIG_PATH)
 
@@ -501,6 +504,7 @@ def test_openai_compatible_route_does_not_retry_quota_failure(monkeypatch) -> No
     """
     monkeypatch.setenv("EXTERNAL_LLM_ENABLED", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
 
     quota_error = FakeProviderError("quota exceeded", status_code=429)
     completions = FakeChatCompletions(content="", first_error=quota_error)
@@ -751,6 +755,7 @@ def test_external_llm_kill_switch_accepts_explicit_true_values(monkeypatch, valu
     """
     monkeypatch.setenv("EXTERNAL_LLM_ENABLED", value)
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
 
     resolved = resolve_route(route_name="triage_reasoning", config_path=CONFIG_PATH)
 

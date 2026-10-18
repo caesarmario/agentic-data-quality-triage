@@ -1780,6 +1780,7 @@ def test_answer_ui_copilot_question_delegates_to_shared_service(monkeypatch) -> 
         alert={"alert_key": alert_key, "alert_display_id": "DQ-TEST01"},
         latest_triage_result=sample_copilot_triage_result(alert_key),
         audit_rows=[{"action": "triage_completed", "status": "success"}],
+        api_base_url="",
     )
 
     assert result["answer"] == "Grounded operator answer."

@@ -3,6 +3,7 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import sharp from 'sharp';
 import {root, tooling, publicDir} from './paths.mjs';
+import {prepareRecordedDiagrams} from './recorded-diagrams.mjs';
 
 // Coordinates refer to inspected originals; never copy raw private captures.
 export const captures = [
@@ -19,15 +20,6 @@ export const captures = [
   {id: 'streamlit-light', source: 'streamlit-english-light-20261013.jpg', crop: [379, 177, 890, 339]},
   {id: 'streamlit-dark', source: 'streamlit-english-dark-20261013.jpg', crop: [379, 177, 890, 339]},
   {id: 'incident-queue', source: 'streamlit-english-light-20261013.jpg', crop: [379, 540, 890, 540]},
-];
-
-const recordedDiagrams = [
-  {name: 'architecture.svg', source: 'tools/demo-video/recorded-diagrams/architecture.svg',
-    sha256: '494a72260ac466a6faffd31dc651187aa19b4b682660ff386ef00aafe53e8a30',
-    recordedFrom: 'HEAD:docs/diagrams/architecture.svg', videoRegions: [[40,184,610,145],[688,184,632,145]]},
-  {name: 'data-model-overview.svg', source: 'tools/demo-video/recorded-diagrams/data-model-overview.svg',
-    sha256: '1b8d16d20e91f3a75f5462d9dd86ab22d72ffef6a1de1bfbd4207dbd7e2800da',
-    recordedFrom: 'HEAD:docs/diagrams/data-model-overview.svg', videoRegions: [[35,184,748,215],[815,184,431,215]]},
 ];
 
 export const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -63,19 +55,7 @@ for (const entry of captures) {
     label: entry.id.startsWith('gemini-') ? 'Recorded Gemini analysis' : 'Recorded UI',
     inspectedBeforeUse: true});
 }
-const diagrams = [];
-for (const diagram of recordedDiagrams) {
-  if (process.argv.includes('--captures-only')) continue;
-  const bytes = await fs.readFile(path.join(root, diagram.source));
-  if (bytes.toString().includes('<script')) throw new Error('Scripted SVG not permitted');
-  const actual = hash(bytes);
-  if (actual !== diagram.sha256) throw new Error(`Recorded diagram hash changed: ${diagram.source}`);
-  await fs.writeFile(path.join(publicDir, diagram.name), bytes);
-  diagrams.push({path: diagram.source, sha256: actual, recordedFrom: diagram.recordedFrom,
-    label: 'Recorded repository diagram; predates evidence-driven recovery; not a UI capture',
-    videoRegions: diagram.videoRegions,
-    treatment: 'Frozen recorded SVG bytes; guided detail views preserve original labels.'});
-}
+const diagrams = process.argv.includes('--captures-only') ? [] : await prepareRecordedDiagrams(publicDir);
 await fs.writeFile(manifestPath, JSON.stringify({
   schemaVersion: 1,
   policy: 'Actual retained UI only. No mockups, synthesized UI, new provider call, or source repair. Cross-session evidence is not one autonomous run.',

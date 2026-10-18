@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import {createHash} from 'node:crypto';
-import {root, tooling, publicDir, chapterBounds, qaFrames} from './paths.mjs';
+import {root, tooling, chapterBounds, qaFrames} from './paths.mjs';
 import {timecode} from './captions.mjs';
+import {prepareRecordedDiagrams} from './recorded-diagrams.mjs';
 
 const read = async (name) => JSON.parse(await fs.readFile(path.join(tooling, name), 'utf8'));
 const story = await read('src/story.json');
@@ -45,8 +47,12 @@ test('all public UI assets have crop provenance and matching hashes', async () =
   }
   assert.ok(manifest.assets.find((asset) => asset.id === 'resolved').mask);
 });
-test('both repository diagrams are present, attributed and hash matched', async () => {
+test('both repository diagrams are present, attributed and hash matched', async (t) => {
+  const servedDir = await fs.mkdtemp(path.join(os.tmpdir(), 'datasentry-recorded-diagrams-'));
+  t.after(() => fs.rm(servedDir, {recursive: true, force: true}));
+  const prepared = await prepareRecordedDiagrams(servedDir);
   const manifest = await read('asset-provenance.json');
+  assert.deepEqual(prepared, manifest.diagrams);
   assert.equal(manifest.diagrams.length, 2);
   const recorded = new Map([
     ['tools/demo-video/recorded-diagrams/architecture.svg', '494a72260ac466a6faffd31dc651187aa19b4b682660ff386ef00aafe53e8a30'],
@@ -59,7 +65,7 @@ test('both repository diagrams are present, attributed and hash matched', async 
     assert.match(diagram.label, /predates evidence-driven recovery/);
     const bytes = await fs.readFile(path.join(root, diagram.path));
     assert.equal(createHash('sha256').update(bytes).digest('hex'), diagram.sha256);
-    const served = await fs.readFile(path.join(publicDir, path.basename(diagram.path)));
+    const served = await fs.readFile(path.join(servedDir, path.basename(diagram.path)));
     assert.equal(createHash('sha256').update(served).digest('hex'), diagram.sha256);
   }
 });
